@@ -1,0 +1,15 @@
+services:
+  timeclock:
+    build: .
+    container_name: timeclock
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - timeclock_data:/data
+    environment:
+      - PORT=3000
+      - DB_PATH=/data/timeclock.db
+
+volumes:
+  timeclock_data:
