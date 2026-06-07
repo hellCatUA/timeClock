@@ -527,6 +527,64 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 
 .flex-1 { flex: 1; }
 
+/* ===== Status selector (clock-out modal) ===== */
+.status-selector {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.status-opt {
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  -webkit-tap-highlight-color: transparent;
+}
+.status-opt:active { opacity: .8; }
+.status-opt.active[data-status="completed"] { background: var(--green-bg); border-color: var(--green); color: var(--green); }
+.status-opt.active[data-status="pending"]   { background: var(--orange-bg); border-color: var(--orange); color: var(--orange); }
+.status-opt.active[data-status="fail"]      { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.status-opt.active[data-status="canceled"]  { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+
+/* ===== Materials row ===== */
+.material-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.material-row .form-control { padding: 10px 12px; font-size: 14px; }
+
+/* ===== Summary output card ===== */
+.summary-output {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: var(--text2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.7;
+  user-select: all;
+}
+
+/* ===== Replacement toggle label ===== */
+.replacement-toggle-label {
+  display: flex !important;
+  align-items: center;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
 /* ===== Responsive tweaks ===== */
 @media (min-width: 480px) {
   .elapsed-time { font-size: 5rem; }
