@@ -185,6 +185,25 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .input-row .form-control { flex: 1; }
 .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
+/* ===== Money input wrapper ===== */
+.money-wrap {
+  position: relative;
+  display: block;
+}
+.money-sym {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text2);
+  font-size: 15px;
+  font-weight: 500;
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+}
+.money-wrap .form-control { padding-left: 26px; }
+
 /* ===== Toggle Group (segmented) ===== */
 .toggle-group {
   display: flex;
@@ -452,6 +471,7 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .summary-earn-breakdown { font-size: 12px; color: var(--text3); margin-top: 4px; }
 
 .report-text { font-size: 13px; white-space: pre-wrap; color: var(--text); background: var(--bg3); padding: 12px; border-radius: var(--radius-sm); max-height: 50vh; overflow-y: auto; }
+.report-textarea { font-family: monospace; font-size: 13px; white-space: pre; resize: none; max-height: 50vh; }
 
 /* ===== Journal ===== */
 .journal-header {

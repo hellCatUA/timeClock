@@ -203,6 +203,36 @@ function clearTimers() {
   state.breakElapsedInterval = null;
 }
 
+/* ── Clipboard helpers ───────────────────────────────────────────── */
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      showToast('Copied to clipboard!', 'success');
+      return;
+    }
+  } catch (_) { /* fall through */ }
+  showTextModal(text);
+}
+
+function showTextModal(text) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('copy')} Text Report</h3>
+      <button class="btn btn-ghost btn-sm" id="tr-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:10px;">Tap inside the box, then select all (Ctrl+A / Cmd+A) and copy</p>
+      <textarea class="form-control report-textarea" id="tr-text" readonly rows="14">${escHtml(text)}</textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="tr-close">Close</button>
+    </div>`);
+  setTimeout(() => { const ta = document.getElementById('tr-text'); ta?.focus(); ta?.select(); }, 60);
+  document.getElementById('tr-x')?.addEventListener('click', closeModal);
+  document.getElementById('tr-close')?.addEventListener('click', closeModal);
+}
+
 function startElapsedTimer(entry) {
   const isFlat = entry.rate_type === 'flat';
   const update = () => {
@@ -374,12 +404,18 @@ function renderIdleClockPage() {
           </select>
         </div>
         <div class="form-group hidden" id="flat-rate-group">
-          <label class="form-label">Flat Rate (${sym})</label>
-          <input type="number" class="form-control" id="flat-amount-input" min="0" step="0.01" placeholder="0.00">
+          <label class="form-label">Flat Rate</label>
+          <div class="money-wrap">
+            <span class="money-sym">${sym}</span>
+            <input type="number" class="form-control" id="flat-amount-input" min="0" step="0.01" placeholder="0.00">
+          </div>
         </div>
         <div class="form-group">
-          <label class="form-label">Travel Reimbursement (${sym})</label>
-          <input type="number" class="form-control" id="travel-reimb-input" min="0" step="0.01" placeholder="0.00">
+          <label class="form-label">Travel Reimbursement</label>
+          <div class="money-wrap">
+            <span class="money-sym">${sym}</span>
+            <input type="number" class="form-control" id="travel-reimb-input" min="0" step="0.01" placeholder="0.00">
+          </div>
         </div>
         <div id="clockin-time-selector"></div>
       </div>
@@ -639,8 +675,11 @@ function renderActiveClockPage() {
         </div>
       </div>
       <div id="parking-amount-group" class="${hasPark?'':'hidden'} form-group">
-        <label class="form-label">Amount (${sym})</label>
-        <input type="number" class="form-control" id="parking-amount" min="0" step="0.01" value="${escHtml(String(entry.parking_tolls||''))}">
+        <label class="form-label">Amount</label>
+        <div class="money-wrap">
+          <span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="parking-amount" min="0" step="0.01" value="${escHtml(String(entry.parking_tolls||''))}">
+        </div>
       </div>
       <div class="divider"></div>
       <div class="form-group">
@@ -793,10 +832,14 @@ async function saveSection(entry, data) {
 
 /* ── Materials helpers ───────────────────────────────────────────── */
 function buildMaterialRow(index, name='', price='') {
+  const sym = state.settings.currency_symbol || '$';
   return `<div class="material-row" data-index="${index}">
-    <input type="text" class="form-control mat-name" placeholder="Material name" value="${escHtml(name)}" style="flex:2;">
-    <input type="number" class="form-control mat-price" placeholder="Price" value="${escHtml(String(price))}" min="0" step="0.01" style="flex:1;">
-    <button class="btn btn-ghost btn-sm remove-mat" style="color:var(--red);" title="Remove">${svg('trash')}</button>
+    <input type="text" class="form-control mat-name" placeholder="Material name" value="${escHtml(name)}" style="flex:2;min-width:0;">
+    <div class="money-wrap" style="flex:1;min-width:0;">
+      <span class="money-sym">${sym}</span>
+      <input type="number" class="form-control mat-price" placeholder="0.00" value="${escHtml(String(price))}" min="0" step="0.01">
+    </div>
+    <button class="btn btn-ghost btn-sm remove-mat" style="color:var(--red);flex-shrink:0;" title="Remove">${svg('trash')}</button>
   </div>`;
 }
 
@@ -1051,11 +1094,7 @@ function renderSummaryPage(entry) {
     </div>`;
 
   document.getElementById('copy-report-btn').addEventListener('click', () => {
-    const text = buildTextReport(entry);
-    navigator.clipboard.writeText(text).then(() => showToast('Report copied!', 'success')).catch(() => {
-      openModal(`<div class="modal-header"><h3>Text Report</h3></div><div class="modal-body"><pre class="report-text">${escHtml(text)}</pre></div><div class="modal-footer"><button class="btn btn-ghost" id="close-report-btn">Close</button></div>`);
-      document.getElementById('close-report-btn').addEventListener('click', closeModal);
-    });
+    copyToClipboard(buildTextReport(entry));
   });
 
   document.getElementById('view-journal-btn').addEventListener('click', () => {
@@ -1308,8 +1347,7 @@ function openEntryDetail(entry) {
 
   document.getElementById('det-close-btn').addEventListener('click', closeModal);
   document.getElementById('det-copy-btn').addEventListener('click', () => {
-    const text = buildTextReport(entry);
-    navigator.clipboard.writeText(text).then(() => showToast('Copied!', 'success'));
+    copyToClipboard(buildTextReport(entry));
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
   document.getElementById('det-save-recv-btn').addEventListener('click', async () => {
