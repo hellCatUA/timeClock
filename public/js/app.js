@@ -286,7 +286,10 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
 });
 
 /* ── Navigation ─────────────────────────────────────────────────── */
-function navigateTo(page) {
+async function navigateTo(page) {
+  if (state.page === 'clock' && page !== 'clock' && state.currentEntry) {
+    await autoSaveActiveForm();
+  }
   state.page = page;
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   renderPage();
@@ -390,8 +393,9 @@ function scheduleBreakReminder() {
   if (state.settings.breaks_enabled !== '1') return;
   const minutes = parseInt(state.settings.break_frequency_minutes || '120', 10);
   if (!minutes) return;
-  state.reminderTimeout = setTimeout(() => {
+  state.reminderTimeout = setTimeout(async () => {
     state.showReminderBanner = true;
+    await autoSaveActiveForm();
     renderActiveClockPage();
   }, minutes * 60000);
 }
@@ -402,8 +406,9 @@ function scheduleBreakReturnReminder(breakStart) {
   if (!minutes) return;
   const elapsed = (Date.now() - new Date(breakStart)) / 60000;
   const remaining = Math.max(0, minutes - elapsed);
-  state.breakReturnTimeout = setTimeout(() => {
+  state.breakReturnTimeout = setTimeout(async () => {
     state.showBreakReturnBanner = true;
+    await autoSaveActiveForm();
     renderActiveClockPage();
   }, remaining * 60000);
 }
@@ -820,6 +825,7 @@ function renderActiveClockPage() {
   if (onBreak) {
     const endBreakAction = async () => {
       try {
+        await autoSaveActiveForm();
         await api.endBreak(entry.id, { break_end: new Date().toISOString() });
         state.currentEntry = await api.getCurrentEntry();
         state.showBreakReturnBanner = false;
@@ -835,6 +841,7 @@ function renderActiveClockPage() {
   } else if (state.settings.breaks_enabled === '1') {
     document.getElementById('start-break-btn')?.addEventListener('click', async () => {
       try {
+        await autoSaveActiveForm();
         const b = await api.startBreak(entry.id, { break_start: new Date().toISOString() });
         state.currentEntry = { ...entry, active_break: b };
         state.showReminderBanner = false;
@@ -845,7 +852,10 @@ function renderActiveClockPage() {
   }
   document.getElementById('take-break-reminder')?.addEventListener('click', () => document.getElementById('start-break-btn')?.click());
 
-  document.getElementById('clockout-btn').addEventListener('click', () => initiateClockOut(entry));
+  document.getElementById('clockout-btn').addEventListener('click', async () => {
+    await autoSaveActiveForm();
+    initiateClockOut(entry);
+  });
 
   // Collapsible sections
   document.querySelectorAll('.section-header.collapsible').forEach(hdr => {
@@ -1015,6 +1025,37 @@ function readMaterialsFromDOM() {
     name:  row.querySelector('.mat-name')?.value.trim()  || '',
     price: row.querySelector('.mat-price')?.value.trim() || '',
   })).filter(m => m.name || m.price);
+}
+
+async function autoSaveActiveForm() {
+  const entry = state.currentEntry;
+  if (!entry) return;
+  const g = id => document.getElementById(id);
+  const data = {};
+  if (g('jd-wo-title'))    data.wo_title        = g('jd-wo-title').value.trim()    || null;
+  if (g('jd-company'))     data.organization_id  = g('jd-company').value            ? Number(g('jd-company').value)   : null;
+  if (g('jd-customer'))    data.client_id        = g('jd-customer').value           ? Number(g('jd-customer').value)  : null;
+  if (g('jd-site-id'))     data.site_id          = g('jd-site-id').value.trim()     || null;
+  if (g('jd-assignment'))  data.assignment_id    = g('jd-assignment').value.trim()  || null;
+  if (g('jd-ticket'))      data.ticket_num       = g('jd-ticket').value.trim()      || null;
+  if (g('jd-inc'))         data.inc_num          = g('jd-inc').value.trim()         || null;
+  if (g('jd-mod'))         data.mod_name         = g('jd-mod').value.trim()         || null;
+  if (g('jd-noc'))         data.noc_name         = g('jd-noc').value.trim()         || null;
+  if (g('jd-pmpc'))        data.pm_pc_name       = g('jd-pmpc').value.trim()        || null;
+  if (g('jd-replacement')) data.is_replacement   = g('jd-replacement').checked ? 1 : 0;
+  if (g('jd-return-track')) {
+    const noRet = g('jd-return-track').disabled;
+    data.no_return_track = noRet ? 1 : 0;
+    data.return_track    = noRet ? null : (g('jd-return-track').value.trim() || null);
+  }
+  if (g('jd-work-summary')) data.work_summary    = g('jd-work-summary').value.trim() || null;
+  if (g('parking-toggle')) {
+    const parkOn = g('parking-toggle').checked;
+    data.parking_tolls = parkOn ? (parseFloat(g('parking-amount')?.value) || null) : null;
+  }
+  if (g('materials-toggle')?.checked) data.materials = readMaterialsFromDOM();
+  if (!Object.keys(data).length) return;
+  try { state.currentEntry = await api.updateEntry(entry.id, data); } catch { /* silent */ }
 }
 
 /* ── Clock Out flow ─────────────────────────────────────────────── */
