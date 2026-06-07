@@ -84,6 +84,10 @@ def init_db():
             no_return_track INTEGER DEFAULT 0,
             work_summary TEXT,
             additional_info TEXT,
+            wo_title TEXT,
+            travel_reimb REAL,
+            revisit_required INTEGER DEFAULT 0,
+            received_pay REAL,
             status TEXT DEFAULT 'pending',
             release_code TEXT,
             no_release_code INTEGER DEFAULT 0,
@@ -111,7 +115,11 @@ def init_db():
             ('break_return_minutes', '10'),
             ('currency_symbol', '$'),
             ('week_start', '1'),
-            ('tech_name', '');
+            ('tech_name', ''),
+            ('breaks_enabled', '1'),
+            ('paid_breaks', '0'),
+            ('break_frequency_minutes', '120'),
+            ('break_length_minutes', '15');
         """)
 
 
@@ -141,6 +149,14 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN no_release_code INTEGER DEFAULT 0",
         "ALTER TABLE time_entries ADD COLUMN materials TEXT",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('tech_name', '')",
+        "ALTER TABLE time_entries ADD COLUMN wo_title TEXT",
+        "ALTER TABLE time_entries ADD COLUMN travel_reimb REAL",
+        "ALTER TABLE time_entries ADD COLUMN revisit_required INTEGER DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN received_pay REAL",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('breaks_enabled', '1')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('paid_breaks', '0')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_frequency_minutes', '120')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_length_minutes', '15')",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -391,8 +407,9 @@ def h_post_entry(req, _groups):
              clock_in, address, latitude, longitude, site_id, comment,
              assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
-             work_summary, additional_info, status, release_code, no_release_code, materials)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             work_summary, additional_info, wo_title, travel_reimb,
+             status, release_code, no_release_code, materials)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -403,6 +420,7 @@ def h_post_entry(req, _groups):
              data.get("old_serial"), data.get("new_serial"), data.get("return_track"),
              1 if data.get("no_return_track") else 0,
              data.get("work_summary"), data.get("additional_info"),
+             data.get("wo_title"), data.get("travel_reimb"),
              data.get("status", "pending"), data.get("release_code"),
              1 if data.get("no_release_code") else 0, materials_str)
         )
@@ -430,6 +448,7 @@ def h_put_entry(req, groups):
                 assignment_id=?, ticket_num=?, inc_num=?, mod_name=?, noc_name=?, pm_pc_name=?,
                 parking_tolls=?, is_replacement=?, old_serial=?, new_serial=?,
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
+                wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?
             WHERE id=?
         """, (
@@ -459,6 +478,10 @@ def h_put_entry(req, groups):
             1 if data.get("no_return_track", ex.get("no_return_track", 0)) else 0,
             data.get("work_summary", ex.get("work_summary")),
             data.get("additional_info", ex.get("additional_info")),
+            data.get("wo_title", ex.get("wo_title")),
+            data.get("travel_reimb", ex.get("travel_reimb")),
+            1 if data.get("revisit_required", ex.get("revisit_required", 0)) else 0,
+            data.get("received_pay", ex.get("received_pay")),
             data.get("status", ex.get("status", "pending")),
             data.get("release_code", ex.get("release_code")),
             1 if data.get("no_release_code", ex.get("no_release_code", 0)) else 0,
@@ -492,7 +515,8 @@ def h_clockout(req, groups):
             work_summary=?, assignment_id=?, ticket_num=?, inc_num=?,
             mod_name=?, noc_name=?, pm_pc_name=?, parking_tolls=?,
             is_replacement=?, old_serial=?, new_serial=?, return_track=?, no_return_track=?,
-            additional_info=?, materials=?
+            additional_info=?, materials=?, wo_title=?, travel_reimb=?,
+            revisit_required=?, received_pay=?
             WHERE id=?""",
             (clock_out, data.get("comment", entry["comment"]), total_break,
              data.get("status", entry["status"] or "pending"),
@@ -512,7 +536,12 @@ def h_clockout(req, groups):
              data.get("return_track", entry["return_track"]),
              1 if data.get("no_return_track", entry["no_return_track"]) else 0,
              data.get("additional_info", entry["additional_info"]),
-             materials_str, eid))
+             materials_str,
+             data.get("wo_title", entry.get("wo_title")),
+             data.get("travel_reimb", entry.get("travel_reimb")),
+             1 if data.get("revisit_required", entry.get("revisit_required", 0)) else 0,
+             data.get("received_pay", entry.get("received_pay")),
+             eid))
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
         result = row_to_dict(row)
         result["breaks"] = breaks
@@ -636,6 +665,50 @@ def h_week_report(req, _groups):
     }
 
 
+def h_month_report(req, _groups):
+    params = req.get("query", {})
+    date_str = params.get("date", [None])[0]
+    from datetime import timedelta
+
+    try:
+        ref = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc) if date_str else datetime.now(timezone.utc)
+    except Exception:
+        ref = datetime.now(timezone.utc)
+
+    month_start = ref.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        month_end = month_start.replace(year=month_start.year + 1, month=1) - timedelta(seconds=1)
+    else:
+        month_end = month_start.replace(month=month_start.month + 1) - timedelta(seconds=1)
+
+    with get_db() as db:
+        week_start_setting = db.execute("SELECT value FROM settings WHERE key='week_start'").fetchone()
+        week_start_day = int((week_start_setting["value"] if week_start_setting else "1"))
+        rows = rows_to_list(db.execute(
+            ENTRY_SELECT + " WHERE e.clock_in >= ? AND e.clock_in <= ? ORDER BY e.clock_in ASC",
+            (month_start.isoformat(), month_end.isoformat())
+        ).fetchall())
+        entries = [attach_breaks(db, r) for r in rows]
+
+    for e in entries:
+        if e["clock_out"]:
+            gross = dt_diff_seconds(e["clock_in"], e["clock_out"])
+            net = max(0, gross - (e["total_break_seconds"] or 0))
+        else:
+            net = None
+        e["gross_seconds"] = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else None
+        e["net_seconds"] = net
+        earn = (net / 3600 * e["hourly_rate"]) if (net is not None and e["hourly_rate"] and e.get("rate_type") != "flat") else (e.get("flat_amount") if e.get("rate_type") == "flat" else None)
+        e["earnings"] = earn
+
+    return 200, {
+        "month_start": month_start.isoformat(),
+        "month_end": month_end.isoformat(),
+        "week_start_day": week_start_day,
+        "entries": entries,
+    }
+
+
 def h_export_csv(req, _groups):
     params = req.get("query", {})
     frm = params.get("from", [None])[0]
@@ -653,7 +726,7 @@ def h_export_csv(req, _groups):
         rows = rows_to_list(db.execute(sql, args).fetchall())
 
     DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    lines = ["Date,Day,Organization,Client,Site ID,Assignment ID,Ticket #,INC #,MOD Name,NOC Name,PM/PC Name,Pay Rate,Rate Type,Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Earnings,Parking/Tolls,Status,Release Code,Return Track #,Materials,Address,Work Summary,Comment"]
+    lines = ["Date,Day,WO Title,Company,Customer,Site ID,Assignment ID,Ticket #,INC #,MOD Name,NOC Name,PM/PC Name,Pay Rate,Rate Type,Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Total Labor,Travel Reimb,Parking/Tolls,Total Expected,Received Pay,Pay Status,Status,Release Code,Return Track #,Materials,Address,Work Summary"]
 
     def fmth(s):
         return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
@@ -691,9 +764,22 @@ def h_export_csv(req, _groups):
         except Exception:
             day_name = ""
         rate_val = e["hourly_rate"] if e.get("rate_type","hourly") == "hourly" else e.get("flat_amount","")
+        labor = earn
+        travel = float(e.get("travel_reimb") or 0)
+        parking_amt = 0
+        try:
+            parking_amt = float(e.get("parking_tolls") or 0)
+        except (ValueError, TypeError):
+            parking_amt = 0
+        total_exp = labor + travel + parking_amt
+        recv = e.get("received_pay")
+        if recv is None:
+            recv = total_exp
+        pay_status = "PAID" if recv >= total_exp else ("PARTIAL" if recv > 0 else "PENDING")
         lines.append(",".join([
             cell(fmt_date(e["clock_in"])),
             cell(day_name),
+            cell(e.get("wo_title") or ""),
             cell(e["org_name"] or ""),
             cell(e["client_name"] or ""),
             cell(e.get("site_id") or ""),
@@ -712,19 +798,22 @@ def h_export_csv(req, _groups):
             cell(fmth(gross)),
             cell(fmth(e["total_break_seconds"] or 0)),
             cell(fmth(net)),
-            cell(f"{earn:.2f}"),
+            cell(f"{labor:.2f}"),
+            cell(f"{travel:.2f}"),
             cell(e.get("parking_tolls") or ""),
+            cell(f"{total_exp:.2f}"),
+            cell(f"{recv:.2f}"),
+            cell(pay_status),
             cell(e.get("status") or ""),
-            cell(e.get("release_code") or ("No Release Code" if e.get("no_release_code") else "")),
-            cell(e.get("return_track") or ("No Return Track #" if e.get("no_return_track") else "")),
+            cell(e.get("release_code") or ("N/a" if e.get("no_release_code") else "")),
+            cell(e.get("return_track") or ("N/a" if e.get("no_return_track") else "")),
             cell(e.get("materials") or ""),
             cell(e["address"] or ""),
             cell(e.get("work_summary") or ""),
-            cell(e["comment"] or ""),
         ]))
 
     th = total_net // 3600; tm = (total_net % 3600) // 60
-    lines.append(f'"","","","","","","","","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","","","","","","",""')
+    lines.append(f'"","","","","","","","","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","","","","","","","","","","","","",""')
     return "csv", "\n".join(lines)
 
 
@@ -754,6 +843,7 @@ ROUTES = [
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),
     (r"/api/reports/week",              ["GET"],    h_week_report),
+    (r"/api/reports/month",             ["GET"],    h_month_report),
     (r"/api/reports/export/csv",        ["GET"],    h_export_csv),
 ]
 
