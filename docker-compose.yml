@@ -1,15 +1,15 @@
 services:
   timeclock:
-    build: .
+    build:
+      context: /docker/apps/timeClock
+      dockerfile: Dockerfile
     container_name: timeclock
     restart: unless-stopped
     ports:
-      - "3000:3000"
-    volumes:
-      - timeclock_data:/data
+      - "127.0.0.1:18080:3000"
     environment:
-      - PORT=3000
-      - DB_PATH=/data/timeclock.db
-
-volumes:
-  timeclock_data:
+      TZ: America/Los_Angeles
+      PORT: "3000"
+      DB_PATH: /data/timeclock.db
+    volumes:
+      - /docker/apps/timeClock/data:/data
