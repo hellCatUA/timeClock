@@ -192,114 +192,84 @@ async function uploadPhoto(entryId, file, photoType) {
   });
 }
 
-function buildPhotoSlot(photoType, label, photo = null) {
-  const sym = svg('camera');
-  if (photo) {
-    return `<div class="photo-slot has-photo" data-type="${photoType}" data-photo-id="${photo.id}">
-      <img class="photo-thumb" src="${escHtml(photo.url)}" alt="${escHtml(label)}">
-      <div class="photo-slot-label">${escHtml(label)}</div>
-      <button class="photo-delete-btn" data-photo-id="${photo.id}" aria-label="Delete photo">×</button>
-    </div>`;
-  }
-  return `<div class="photo-slot empty" data-type="${photoType}">
-    <label class="photo-upload-zone" for="photo-inp-${photoType}">
-      ${sym}
-      <span>${escHtml(label)}</span>
-    </label>
-    <input type="file" accept="image/*;capture=camera" class="photo-input visually-hidden" id="photo-inp-${photoType}" data-type="${photoType}">
+function buildPhotoThumb(photo, label) {
+  return `<div class="photo-thumb-item" data-photo-id="${photo.id}">
+    <img class="photo-thumb-img" src="${escHtml(photo.url)}" alt="${escHtml(label)}" loading="lazy">
+    <button class="photo-delete-btn" data-photo-id="${photo.id}" type="button" aria-label="Remove">&#x2715;</button>
   </div>`;
 }
 
-function renderPhotoSlots(container, entryId, photos) {
-  const photoMap = {};
-  photos.forEach(p => { photoMap[p.photo_type] = p; });
+function buildPhotoSection(photoType, label, photos) {
+  const thumbs = (photos || []).map(p => buildPhotoThumb(p, label)).join('');
+  return `<div class="photo-section" data-type="${photoType}">
+    <div class="photo-section-label">${escHtml(label)}</div>
+    <div class="photo-thumbs-row" data-thumbs="${photoType}">${thumbs}</div>
+    <label class="photo-add-btn" for="photo-inp-${photoType}">
+      ${svg('camera')}<span>Add Photo</span>
+    </label>
+    <input type="file" accept="image/*" multiple class="photo-input visually-hidden"
+           id="photo-inp-${photoType}" data-type="${photoType}">
+  </div>`;
+}
 
-  const slots = [
-    { type: 'before',       label: 'Before Photo' },
-    { type: 'serial_before',label: 'Serial Numbers (Before)' },
-    { type: 'after',        label: 'After Photo' },
-  ];
-  // new_serial slot added dynamically when replacement toggle is on
+function buildPhotoGallery(photos) {
+  if (!photos || !photos.length) return '';
+  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', after: 'After', new_serial: 'New Serials' };
+  const grouped = {};
+  photos.forEach(p => { if (!grouped[p.photo_type]) grouped[p.photo_type] = []; grouped[p.photo_type].push(p); });
+  return `<div class="det-photo-section">
+    <div class="subsection-label" style="margin:12px 0 8px;">Photos</div>
+    ${Object.entries(grouped).map(([type, list]) => `
+      <div style="margin-bottom:10px;">
+        <div class="photo-section-label">${LABELS[type] || type}</div>
+        <div class="photo-gallery-row">
+          ${list.map(p => `<a href="${escHtml(p.url)}" target="_blank" class="photo-gallery-item">
+            <img src="${escHtml(p.url)}" alt="${type}" loading="lazy">
+          </a>`).join('')}
+        </div>
+      </div>`).join('')}
+  </div>`;
+}
 
-  container.querySelectorAll('.photo-slot-wrap[data-always]').forEach(wrap => {
-    const type = wrap.dataset.type;
-    wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photoMap[type] || null);
+function setupPictureSectionEvents(picSection, entryId) {
+  picSection.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.photo-delete-btn');
+    if (!btn || btn.disabled) return;
+    const photoId = btn.dataset.photoId;
+    const item = btn.closest('.photo-thumb-item');
+    if (!item) return;
+    btn.disabled = true;
+    try {
+      await api.deletePhoto(entryId, photoId);
+      item.remove();
+      showToast('Photo removed', 'success');
+    } catch (err) {
+      btn.disabled = false;
+      showToast(err.message || 'Delete failed', 'error');
+    }
   });
 
-  const newSerialWrap = container.querySelector('.photo-slot-wrap[data-type="new_serial"]');
-  if (newSerialWrap) {
-    newSerialWrap.innerHTML = buildPhotoSlot('new_serial', 'New Serial Numbers', photoMap['new_serial'] || null);
-  }
-
-  // Wire up file inputs and delete buttons
-  container.querySelectorAll('.photo-input').forEach(inp => {
-    inp.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const type = inp.dataset.type;
-      const wrap = inp.closest('.photo-slot-wrap');
-      inp.disabled = true;
-      wrap.querySelector('.photo-upload-zone')?.classList.add('uploading');
+  picSection.addEventListener('change', async (e) => {
+    const inp = e.target.closest('.photo-input');
+    if (!inp) return;
+    const files = [...(inp.files || [])];
+    if (!files.length) return;
+    const photoType = inp.dataset.type;
+    const label = inp.closest('.photo-section')?.querySelector('.photo-section-label')?.textContent || photoType;
+    const thumbsDiv = picSection.querySelector(`[data-thumbs="${photoType}"]`);
+    inp.disabled = true;
+    for (const file of files) {
       try {
-        const photo = await uploadPhoto(entryId, file, type);
-        wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photo);
-        rewirePhotoSlot(wrap, entryId);
+        const photo = await uploadPhoto(entryId, file, photoType);
+        thumbsDiv?.insertAdjacentHTML('beforeend', buildPhotoThumb(photo, label));
         showToast('Photo uploaded', 'success');
       } catch (err) {
         showToast(err.message || 'Upload failed', 'error');
-        inp.disabled = false;
-        wrap.querySelector('.photo-upload-zone')?.classList.remove('uploading');
       }
-    });
-  });
-
-  container.querySelectorAll('.photo-delete-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const photoId = btn.dataset.photoId;
-      const slot = btn.closest('.photo-slot');
-      const wrap = slot.closest('.photo-slot-wrap');
-      try {
-        await api.deletePhoto(entryId, photoId);
-        wrap.innerHTML = buildPhotoSlot(wrap.dataset.type, wrap.dataset.label, null);
-        rewirePhotoSlot(wrap, entryId);
-        showToast('Photo deleted', 'success');
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
-    });
-  });
-}
-
-function rewirePhotoSlot(wrap, entryId) {
-  const inp = wrap.querySelector('.photo-input');
-  if (!inp) return;
-  inp.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const type = inp.dataset.type;
-    inp.disabled = true;
-    wrap.querySelector('.photo-upload-zone')?.classList.add('uploading');
-    try {
-      const photo = await uploadPhoto(entryId, file, type);
-      wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photo);
-      rewirePhotoSlot(wrap, entryId);
-      showToast('Photo uploaded', 'success');
-    } catch (err) {
-      showToast(err.message || 'Upload failed', 'error');
-      inp.disabled = false;
-      wrap.querySelector('.photo-upload-zone')?.classList.remove('uploading');
     }
+    inp.value = '';
+    inp.disabled = false;
   });
-  const deleteBtn = wrap.querySelector('.photo-delete-btn');
-  if (deleteBtn) {
-    deleteBtn.addEventListener('click', async () => {
-      const photoId = deleteBtn.dataset.photoId;
-      try {
-        await api.deletePhoto(entryId, photoId);
-        wrap.innerHTML = buildPhotoSlot(wrap.dataset.type, wrap.dataset.label, null);
-        rewirePhotoSlot(wrap, entryId);
-        showToast('Photo deleted', 'success');
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
-    });
-  }
 }
 
 /* ── Modal ──────────────────────────────────────────────────────── */
@@ -767,26 +737,13 @@ function renderActiveClockPage() {
     </div>
     <div id="sec-pictures" class="card sec-body">
       <div class="subsection-label">Before</div>
-      <div class="photo-grid" id="photos-before-grid">
-        <div class="photo-slot-wrap" data-type="before" data-label="Before Photo" data-always="1">
-          <div class="photo-slot empty" data-type="before">
-            <label class="photo-upload-zone photo-loading" for="photo-inp-before">${svg('camera')}<span>Loading...</span></label>
-          </div>
-        </div>
-        <div class="photo-slot-wrap" data-type="serial_before" data-label="Serial Numbers" data-always="1">
-          <div class="photo-slot empty" data-type="serial_before">
-            <label class="photo-upload-zone photo-loading" for="photo-inp-serial_before">${svg('camera')}<span>Loading...</span></label>
-          </div>
-        </div>
+      <div id="photos-before" class="photo-sections-group">
+        <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
       <div class="divider"></div>
       <div class="subsection-label">After</div>
-      <div class="photo-grid">
-        <div class="photo-slot-wrap" data-type="after" data-label="After Photo" data-always="1">
-          <div class="photo-slot empty" data-type="after">
-            <label class="photo-upload-zone photo-loading" for="photo-inp-after">${svg('camera')}<span>Loading...</span></label>
-          </div>
-        </div>
+      <div id="photos-after" class="photo-sections-group">
+        <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
       <div class="form-group" style="margin-top:8px;">
         <div class="toggle-row">
@@ -795,12 +752,8 @@ function renderActiveClockPage() {
         </div>
       </div>
       <div id="replacement-fields" class="${entry.is_replacement?'':'hidden'}">
-        <div class="photo-grid">
-          <div class="photo-slot-wrap" data-type="new_serial" data-label="New Serial Numbers">
-            <div class="photo-slot empty" data-type="new_serial">
-              <label class="photo-upload-zone photo-loading" for="photo-inp-new_serial">${svg('camera')}<span>Loading...</span></label>
-            </div>
-          </div>
+        <div id="photos-new-serial" class="photo-sections-group">
+          <div class="photo-section-loading">${svg('camera')} Loading…</div>
         </div>
         <div class="form-group" style="margin-top:8px;">
           <label class="form-label">Return Track #</label>
@@ -930,10 +883,6 @@ function renderActiveClockPage() {
   let noReturn = !!entry.no_return_track;
   document.getElementById('jd-replacement').addEventListener('change', e => {
     document.getElementById('replacement-fields').classList.toggle('hidden', !e.target.checked);
-    if (e.target.checked) {
-      const newSerialWrap = document.querySelector('.photo-slot-wrap[data-type="new_serial"]');
-      if (newSerialWrap) rewirePhotoSlot(newSerialWrap, entry.id);
-    }
   });
   document.getElementById('no-return-btn')?.addEventListener('click', () => {
     noReturn = !noReturn;
@@ -943,7 +892,27 @@ function renderActiveClockPage() {
     document.getElementById('no-return-btn').textContent = noReturn ? 'Undo N/a' : 'No Return';
   });
 
-  // Pictures save
+  // Pictures: event delegation + load photos
+  const picSection = document.getElementById('sec-pictures');
+  setupPictureSectionEvents(picSection, entry.id);
+  (async () => {
+    try {
+      const photos = await api.getPhotos(entry.id);
+      const grouped = { before: [], serial_before: [], after: [], new_serial: [] };
+      photos.forEach(p => { if (grouped[p.photo_type] !== undefined) grouped[p.photo_type].push(p); });
+      document.getElementById('photos-before').innerHTML =
+        buildPhotoSection('before', 'Before Photo', grouped.before) +
+        buildPhotoSection('serial_before', 'Serial Numbers', grouped.serial_before);
+      document.getElementById('photos-after').innerHTML =
+        buildPhotoSection('after', 'After Photo', grouped.after);
+      document.getElementById('photos-new-serial').innerHTML =
+        buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
+    } catch(e) {
+      picSection.querySelectorAll('.photo-section-loading').forEach(el => { el.textContent = '—'; });
+    }
+  })();
+
+  // Pictures save (replacement toggle + return track)
   document.getElementById('save-pictures-btn').addEventListener('click', () => {
     const isReplacement = document.getElementById('jd-replacement').checked;
     saveSection(entry, {
@@ -952,20 +921,6 @@ function renderActiveClockPage() {
       no_return_track: noReturn && isReplacement,
     });
   });
-
-  // Load photos for this entry
-  (async () => {
-    try {
-      const photos = await api.getPhotos(entry.id);
-      const picSection = document.getElementById('sec-pictures');
-      renderPhotoSlots(picSection, entry.id, photos);
-    } catch (e) {
-      // fail silently
-      document.getElementById('sec-pictures').querySelectorAll('.photo-loading').forEach(el => {
-        el.classList.remove('photo-loading');
-      });
-    }
-  })();
 
   // Work summary
   document.getElementById('jd-work-summary').addEventListener('input', e => {
@@ -1591,6 +1546,7 @@ function openEntryDetail(entry) {
       ${entry.release_code ? `<div class="review-row"><span>Release Code:</span><span>${escHtml(entry.release_code)}</span></div>` : ''}
       ${mats.length ? '<div class="review-row"><span>Materials:</span><span>' + mats.map(m=>escHtml(m.name+(m.price?' ($'+m.price+')':''))).join(', ') + '</span></div>' : ''}
       ${entry.work_summary ? `<div class="review-row" style="align-items:flex-start;"><span>Summary:</span><span style="white-space:pre-wrap;">${escHtml(entry.work_summary)}</span></div>` : ''}
+      <div id="det-photos"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
@@ -1611,6 +1567,16 @@ function openEntryDetail(entry) {
       renderJournalPage();
     } catch (e) { showToast(e.message, 'error'); }
   });
+
+  (async () => {
+    const photosDiv = document.getElementById('det-photos');
+    if (!photosDiv) return;
+    try {
+      const photos = await api.getPhotos(entry.id);
+      if (!photos.length) return;
+      photosDiv.innerHTML = buildPhotoGallery(photos);
+    } catch (e) { /* silently skip if photos unavailable */ }
+  })();
 }
 
 function openEntryEdit(entry) {

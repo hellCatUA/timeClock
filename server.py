@@ -124,6 +124,7 @@ def init_db():
             entry_id INTEGER NOT NULL,
             photo_type TEXT NOT NULL,
             filename TEXT NOT NULL,
+            folder TEXT,
             original_name TEXT,
             ftp_synced INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -188,6 +189,7 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_user', '')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_password', '')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_path', '/timeclock/photos')",
+        "ALTER TABLE entry_photos ADD COLUMN folder TEXT",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -648,6 +650,19 @@ def h_delete_entry(req, groups):
 
 # ── Photos ─────────────────────────────────────────────────────────────────────
 
+def _photo_folder(entry_row, eid):
+    """Compute folder path: MM/DD/YY-AssignmentID"""
+    clock_in = (entry_row or {}).get('clock_in') or ''
+    assignment_id = re.sub(r'[^\w-]', '', ((entry_row or {}).get('assignment_id') or '').strip())
+    try:
+        dt = datetime.fromisoformat(clock_in.replace('Z', '+00:00'))
+        mm, dd, yy = dt.strftime('%m'), dt.strftime('%d'), dt.strftime('%y')
+    except Exception:
+        mm, dd, yy = 'XX', 'XX', 'XX'
+    suffix = assignment_id if assignment_id else str(eid)
+    return f"{mm}/{dd}/{yy}-{suffix}"
+
+
 def h_get_photos(req, groups):
     eid = groups[0]
     with get_db() as db:
@@ -655,7 +670,8 @@ def h_get_photos(req, groups):
             "SELECT * FROM entry_photos WHERE entry_id=? ORDER BY created_at", (eid,)
         ).fetchall())
     for r in rows:
-        r['url'] = f"/uploads/{eid}/{r['filename']}"
+        folder = r.get('folder') or str(eid)
+        r['url'] = f"/uploads/{folder}/{r['filename']}"
     return 200, rows
 
 
@@ -675,32 +691,34 @@ def h_post_photo(req, groups):
         return 400, {"error": "Invalid base64 data"}
 
     ext = ".jpg"
-    if "png" in mime:
-        ext = ".png"
-    elif "webp" in mime:
-        ext = ".webp"
-    elif "gif" in mime:
-        ext = ".gif"
+    if "png" in mime: ext = ".png"
+    elif "webp" in mime: ext = ".webp"
+    elif "gif" in mime: ext = ".gif"
 
+    with get_db() as db:
+        entry_row = row_to_dict(db.execute(
+            "SELECT clock_in, assignment_id FROM time_entries WHERE id=?", (eid,)
+        ).fetchone())
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+
+    folder = _photo_folder(entry_row, eid)
     safe_name = f"{photo_type}_{uuid.uuid4().hex[:10]}{ext}"
-    entry_dir = UPLOADS_DIR / str(eid)
+    entry_dir = UPLOADS_DIR / folder
     entry_dir.mkdir(parents=True, exist_ok=True)
     file_path = entry_dir / safe_name
     file_path.write_bytes(img_bytes)
 
-    with get_db() as db:
-        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
-
-    ftp_synced = 1 if ftp_sync_photo(str(file_path), f"{eid}_{safe_name}", settings) else 0
+    ftp_remote = f"{folder.replace('/', '_')}_{safe_name}"
+    ftp_synced = 1 if ftp_sync_photo(str(file_path), ftp_remote, settings) else 0
 
     with get_db() as db:
         cur = db.execute(
-            "INSERT INTO entry_photos (entry_id, photo_type, filename, original_name, ftp_synced) VALUES (?, ?, ?, ?, ?)",
-            (eid, photo_type, safe_name, original_name, ftp_synced)
+            "INSERT INTO entry_photos (entry_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?, ?, ?, ?, ?, ?)",
+            (eid, photo_type, safe_name, folder, original_name, ftp_synced)
         )
         row = row_to_dict(db.execute("SELECT * FROM entry_photos WHERE id=?", (cur.lastrowid,)).fetchone())
 
-    row['url'] = f"/uploads/{eid}/{safe_name}"
+    row['url'] = f"/uploads/{folder}/{safe_name}"
     return 201, row
 
 
@@ -714,7 +732,8 @@ def h_delete_photo(req, groups):
             return 404, {"error": "Not found"}
         db.execute("DELETE FROM entry_photos WHERE id=?", (photo_id,))
 
-    file_path = UPLOADS_DIR / str(eid) / photo['filename']
+    folder = photo.get('folder') or str(eid)
+    file_path = UPLOADS_DIR / folder / photo['filename']
     try:
         file_path.unlink(missing_ok=True)
     except Exception:
