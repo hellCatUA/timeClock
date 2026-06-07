@@ -885,14 +885,13 @@ function readMaterialsFromDOM() {
 
 /* ── Clock Out flow ─────────────────────────────────────────────── */
 async function initiateClockOut(entry) {
-  // Save current form state first
   const workSummary = document.getElementById('jd-work-summary')?.value.trim() || entry.work_summary || '';
   const assignId    = document.getElementById('jd-assignment')?.value.trim()   || entry.assignment_id || '';
   const modName     = document.getElementById('jd-mod')?.value.trim()          || entry.mod_name || '';
 
   const missing = [];
-  if (!assignId)   missing.push('Assignment ID');
-  if (!modName)    missing.push('MOD Name');
+  if (!assignId)    missing.push('Assignment ID');
+  if (!modName)     missing.push('MOD Name');
   if (!workSummary) missing.push('Work Performed / Comments');
 
   if (missing.length) {
@@ -912,19 +911,84 @@ async function initiateClockOut(entry) {
     document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
     document.getElementById('co-override-btn').addEventListener('click', () => {
       closeModal();
-      showClockOutModal(entry, workSummary, assignId, modName, missing);
+      showClockOutTimePicker(entry, workSummary, assignId, modName, missing);
     });
     return;
   }
-  showClockOutModal(entry, workSummary, assignId, modName, []);
+  showClockOutTimePicker(entry, workSummary, assignId, modName, []);
 }
 
-function showClockOutModal(entry, workSummary, assignId, modName, overrides) {
+function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides) {
+  const t = off => fmtHHMM(adjustedTime(off));
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('stop')} Clock Out</h3>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">When did you finish?</label>
+        <div class="time-sel-row">
+          <button class="btn btn-danger flex-1" id="co-ts-now">Clock Out Now</button>
+          <button class="btn btn-ghost flex-1" id="co-ts-adjust">Early / Later →</button>
+        </div>
+      </div>
+      <div id="co-adjust-panel" class="hidden">
+        <div class="form-group" style="margin-top:12px;">
+          <label class="form-label">Adjust time</label>
+          <div class="time-sel-grid">
+            <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10 min<span>${t(-10)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5 min<span>${t(-5)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="5">+5 min<span>${t(5)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="10">+10 min<span>${t(10)}</span></button>
+          </div>
+        </div>
+        <button class="btn btn-ghost btn-full" id="co-ts-manual-toggle">Enter time manually...</button>
+        <div id="co-ts-manual-group" class="hidden" style="margin-top:8px;">
+          <input type="datetime-local" class="form-control" id="co-ts-manual-input" value="${localISOString()}">
+          <button class="btn btn-danger btn-full" id="co-ts-manual-confirm" style="margin-top:8px;">Confirm Time</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="co-ts-cancel">Cancel</button>
+    </div>`);
+
+  document.getElementById('co-ts-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('co-ts-now').addEventListener('click', () =>
+    showClockOutModal(entry, workSummary, assignId, modName, overrides, new Date().toISOString())
+  );
+
+  document.getElementById('co-ts-adjust').addEventListener('click', () =>
+    document.getElementById('co-adjust-panel').classList.remove('hidden')
+  );
+
+  document.querySelectorAll('.time-adj-btn').forEach(btn => {
+    btn.addEventListener('click', () =>
+      showClockOutModal(entry, workSummary, assignId, modName, overrides,
+        adjustedTime(parseInt(btn.dataset.offset)).toISOString())
+    );
+  });
+
+  document.getElementById('co-ts-manual-toggle').addEventListener('click', () =>
+    document.getElementById('co-ts-manual-group').classList.toggle('hidden')
+  );
+
+  document.getElementById('co-ts-manual-confirm').addEventListener('click', () => {
+    const val = document.getElementById('co-ts-manual-input').value;
+    if (!val) return showToast('Please select a time', 'error');
+    showClockOutModal(entry, workSummary, assignId, modName, overrides, toISOFull(val));
+  });
+}
+
+function showClockOutModal(entry, workSummary, assignId, modName, overrides, clockOutISO) {
   const override = field => overrides.includes(field) ? 'OVERRIDE!' : null;
+  const clockOutTime = new Date(clockOutISO);
 
   openModal(`
     <div class="modal-header">
       <h3>${svg('stop')} Clock Out</h3>
+      <span style="font-size:12px;color:var(--text3);">Out: ${fmtHHMM(clockOutTime)}</span>
     </div>
     <div class="modal-body">
       <div class="form-group">
@@ -941,17 +1005,20 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides) {
           <label class="switch"><input type="checkbox" id="revisit-toggle"><span class="slider"></span></label>
         </div>
       </div>
+      <div id="revisit-auto" class="hidden field-hint" style="color:var(--red);margin-bottom:4px;">
+        ⚠ FAIL — Revisit Required is set automatically.
+      </div>
       <div class="form-group">
         <label class="form-label">Release Code</label>
         <div class="input-row">
           <input type="text" class="form-control" id="co-release-code" value="${escHtml(entry.release_code||'')}" placeholder="Enter release code...">
           <button class="btn btn-ghost btn-sm" id="no-code-btn" style="white-space:nowrap;">No Code</button>
         </div>
-        <div id="no-code-label" class="hidden field-hint" style="color:var(--orange);">⚠ Marked as N/a</div>
+        <div id="no-code-label" class="hidden field-hint" style="color:var(--orange);">⊘ Marked as N/a</div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="co-back-btn">Cancel</button>
+      <button class="btn btn-ghost" id="co-back-btn">← Back</button>
       <button class="btn btn-primary" id="co-review-btn">Final Review →</button>
     </div>`);
 
@@ -969,51 +1036,60 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides) {
       btn.classList.add('active');
       selectedStatus = btn.dataset.s;
       document.getElementById('revisit-group').classList.toggle('hidden', selectedStatus !== 'completed');
+      document.getElementById('revisit-auto').classList.toggle('hidden', selectedStatus !== 'fail');
     });
   });
 
   document.getElementById('no-code-btn').addEventListener('click', () => {
     noCode = !noCode;
     document.getElementById('co-release-code').disabled = noCode;
-    document.getElementById('co-release-code').value = noCode ? '' : (entry.release_code||'');
+    document.getElementById('co-release-code').value = noCode ? '' : (entry.release_code || '');
     document.getElementById('no-code-label').classList.toggle('hidden', !noCode);
     document.getElementById('no-code-btn').textContent = noCode ? 'Undo N/a' : 'No Code';
   });
 
-  document.getElementById('co-back-btn').addEventListener('click', closeModal);
+  document.getElementById('co-back-btn').addEventListener('click', () =>
+    showClockOutTimePicker(entry, workSummary, assignId, modName, overrides)
+  );
 
   document.getElementById('co-review-btn').addEventListener('click', () => {
     if (!selectedStatus) { showToast('Please select a WO status', 'error'); return; }
-    const revisit = selectedStatus === 'completed' && document.getElementById('revisit-toggle').checked;
     const releaseCode = noCode ? null : (document.getElementById('co-release-code').value.trim() || null);
+    if (!noCode && !releaseCode) {
+      showToast('Release code is empty — use "No Code" if there is none', 'error');
+      return;
+    }
+    const isFail = selectedStatus === 'fail';
+    const revisit = isFail || (selectedStatus === 'completed' && document.getElementById('revisit-toggle').checked);
+    const baseSummary = workSummary || override('Work Performed / Comments') || '';
     showFinalReview(entry, {
-      workSummary: revisit
-        ? (workSummary || override('Work Performed / Comments') || '') + '\n\nREVISIT REQUIRED!'
-        : (workSummary || override('Work Performed / Comments') || ''),
-      assignId:    assignId    || override('Assignment ID')   || '',
-      modName:     modName     || override('MOD Name')        || '',
+      workSummary: revisit ? baseSummary + '\n\nREVISIT REQUIRED!' : baseSummary,
+      assignId:    assignId  || override('Assignment ID') || '',
+      modName:     modName   || override('MOD Name')      || '',
       status:      selectedStatus,
       revisit,
       releaseCode,
       noCode,
+      clockOutISO,
     });
   });
 }
 
 function showFinalReview(entry, coData) {
-  const sym = state.settings.currency_symbol || '$';
   const techName = state.settings.tech_name || '—';
-  const netSec = getNetSeconds({ ...entry, clock_out: new Date().toISOString() });
-  const labor = calcLabor(entry, netSec);
-  const travel = parseFloat(entry.travel_reimb) || 0;
-  const parking = parseFloat(entry.parking_tolls) || 0;
-  const total = labor + travel + parking;
+  const clockOutTime = new Date(coData.clockOutISO);
+  const grossSec = Math.max(0, Math.floor((clockOutTime - new Date(entry.clock_in)) / 1000));
+  const netSec   = Math.max(0, grossSec - (entry.total_break_seconds || 0));
+  const labor    = calcLabor(entry, netSec);
+  const travel   = parseFloat(entry.travel_reimb) || 0;
+  const parking  = parseFloat(entry.parking_tolls) || 0;
+  const total    = labor + travel + parking;
 
   openModal(`
     <div class="modal-header">
       <h3>${svg('check')} Final Review</h3>
     </div>
-    <div class="modal-body review-body">
+    <div class="modal-body">
       <div class="review-row"><span>Tech:</span><span>${escHtml(techName)}</span></div>
       <div class="review-row"><span>WO Title:</span><span>${escHtml(entry.wo_title||'—')}</span></div>
       <div class="review-row"><span>Company:</span><span>${escHtml(entry.org_name||'—')}</span></div>
@@ -1022,40 +1098,37 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>MOD Name:</span><span>${escHtml(coData.modName)}</span></div>
       <div class="review-row"><span>Address:</span><span>${escHtml(entry.address||'—')}</span></div>
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
+      <div class="review-row"><span>Clock Out:</span><span>${fmtHHMM(clockOutTime)}</span></div>
       <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
-      ${travel ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>` : ''}
+      ${travel  ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>`  : ''}
       ${parking ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(parking)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
-      <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit?' · REVISIT':''}</span></div>
-      <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode||'—')}</span></div>
+      <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
+      <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="fr-back-btn">Back</button>
+      <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
       <button class="btn btn-danger" id="fr-confirm-btn">Confirm Clock Out</button>
     </div>`);
 
   document.getElementById('fr-back-btn').addEventListener('click', () =>
-    showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [])
+    showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
   );
 
   document.getElementById('fr-confirm-btn').addEventListener('click', async () => {
     try {
-      const clockOutISO = new Date().toISOString();
-      const grossSec = Math.floor((new Date(clockOutISO) - new Date(entry.clock_in)) / 1000);
-      const netS = Math.max(0, grossSec - (entry.total_break_seconds || 0));
-      const totalExp = calcLabor(entry, netS) + (parseFloat(entry.travel_reimb)||0) + (parseFloat(entry.parking_tolls)||0);
-
+      const totalExp = labor + travel + parking;
       const completed = await api.clockOut(entry.id, {
-        clock_out:       clockOutISO,
-        status:          coData.status,
-        work_summary:    coData.workSummary,
-        assignment_id:   coData.assignId,
-        mod_name:        coData.modName     || entry.mod_name,
-        release_code:    coData.releaseCode,
-        no_release_code: coData.noCode,
-        revisit_required:coData.revisit ? 1 : 0,
-        received_pay:    totalExp,
+        clock_out:        coData.clockOutISO,
+        status:           coData.status,
+        work_summary:     coData.workSummary,
+        assignment_id:    coData.assignId,
+        mod_name:         coData.modName || entry.mod_name,
+        release_code:     coData.releaseCode,
+        no_release_code:  coData.noCode,
+        revisit_required: coData.revisit ? 1 : 0,
+        received_pay:     totalExp,
       });
       state.currentEntry = null;
       state.lastCompletedEntry = completed;
