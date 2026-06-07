@@ -54,5 +54,9 @@ const api = (() => {
     // Reports
     getWeekReport:      (date)   => req('GET',    '/api/reports/week' + (date ? `?date=${date}` : '')),
     getExportUrl:       (from, to) => `/api/reports/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+
+    // Pay Periods
+    getPayPeriods:    ()  => req('GET',  '/api/pay-periods'),
+    upsertPayPeriod:  (d) => req('POST', '/api/pay-periods', d),
   };
 })();

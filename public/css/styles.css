@@ -583,10 +583,13 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .week-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   padding: 8px 16px;
   font-size: 12px;
+  gap: 8px;
 }
+.week-header-left { flex: 1; min-width: 0; }
+.week-header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
 .week-label { font-weight: 700; color: var(--text2); font-size: 13px; }
 .week-dates { font-weight: 400; color: var(--text3); font-size: 11px; margin-left: 6px; }
 .week-totals { color: var(--text3); font-size: 12px; }
@@ -601,6 +604,60 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 .week-summary .pos { color: var(--green); }
 .week-summary .neg { color: var(--red); }
+
+/* ===== Pay Status ===== */
+.pay-status-chip {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 4px;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.pay-status-chip.pending  { background: var(--bg4);       color: var(--text2);  }
+.pay-status-chip.received { background: var(--green-bg);  color: var(--green);  }
+.pay-status-chip.delayed  { background: var(--orange-bg); color: var(--orange); }
+.pay-status-chip.problem  { background: var(--red-bg);    color: var(--red);    }
+
+.pay-status-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.pay-status-btn {
+  padding: 10px 8px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .15s, background .15s;
+}
+.pay-status-btn.received.active { border-color: var(--green);  color: var(--green);  background: var(--green-bg);  }
+.pay-status-btn.delayed.active  { border-color: var(--orange); color: var(--orange); background: var(--orange-bg); }
+.pay-status-btn.problem.active  { border-color: var(--red);    color: var(--red);    background: var(--red-bg);    }
+.pay-status-btn.pending.active  { border-color: var(--text3);  color: var(--text2);  background: var(--bg4);       }
+
+.pay-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.pay-summary-row:last-of-type { border-bottom: none; }
+.pay-summary-count { font-size: 12px; color: var(--text3); margin-left: 6px; }
+.pay-summary-outstanding {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0 6px;
+  font-weight: 700;
+  font-size: 15px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
 
 .entry-card {
   background: var(--bg2);

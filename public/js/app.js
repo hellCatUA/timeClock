@@ -109,6 +109,10 @@ function getISOWeekLabel(date) {
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return `Week ${Math.ceil(((d - yearStart) / 86400000 + 1) / 7)}`;
 }
+function dateToISODate(date) {
+  const pad = n => String(n).padStart(2,'0');
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`;
+}
 
 /* ── Icons ──────────────────────────────────────────────────────── */
 function icon(paths) {
@@ -1397,7 +1401,9 @@ Work summary: ${entry.work_summary || ''}`;
 async function renderJournalPage() {
   const page = document.getElementById('page');
   try {
-    const entries = await api.getEntries();
+    const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
+    const payMap = {};
+    payPeriods.forEach(p => { payMap[p.week_start] = p; });
     const weekStartDay = parseInt(state.settings.week_start || '1', 10) - 1; // 0=Sun, 1=Mon (settings stores 1 or 7)
     // Adjust: settings week_start: 1=Mon, 7=Sun
     const ws = state.settings.week_start === '7' ? 0 : 1; // 0=Sun, 1=Mon
@@ -1422,6 +1428,8 @@ async function renderJournalPage() {
     }
 
     const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
+    const weekGroupsByDate = {};
+    for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
 
     // Month totals
     const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
@@ -1444,7 +1452,7 @@ async function renderJournalPage() {
       </div>
       <div id="journal-body">
         ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
-          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym)).join('')}
+          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap)).join('')}
       </div>`;
 
     document.getElementById('j-prev').addEventListener('click', () => {
@@ -1486,32 +1494,137 @@ async function renderJournalPage() {
       });
     });
 
+    document.querySelectorAll('.pay-btn').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const weekStart = btn.dataset.weekStart;
+        const weekEnd   = btn.dataset.weekEnd;
+        const wg = weekGroupsByDate[weekStart];
+        if (!wg) return;
+        const wExp = wg.entries.filter(e => e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
+        openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage);
+      });
+    });
+
   } catch (err) {
     page.innerHTML = `<div class="empty-state">Error loading journal</div>`;
   }
 }
 
-function renderWeekGroup(wg, ws, sym) {
+function renderWeekGroup(wg, ws, sym, payMap) {
+  const weekKey   = dateToISODate(wg.start);
+  const weekEnd   = dateToISODate(wg.end);
+  const payPeriod = (payMap || {})[weekKey];
+  const payStatus = payPeriod?.status || 'pending';
+  const PAY_LABELS = { pending: 'PAY PENDING', received: 'PAY RECEIVED', delayed: 'PAY DELAYED', problem: 'PAY PROBLEM' };
+
   const weekLabel = getISOWeekLabel(wg.start);
   const dateRange = `${fmtDateShort(wg.start.toISOString())} – ${fmtDateShort(wg.end.toISOString())}`;
   const completed = wg.entries.filter(e => e.clock_out);
   const wHrs = completed.reduce((s,e) => s + getNetSeconds(e)/3600, 0);
   const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
-  const wRec = completed.reduce((s,e) => s + (parseFloat(e.received_pay) || calcTotalExpected(e)), 0);
+
+  const payRec     = payPeriod?.received_amount ?? null;
+  const payVariance = payRec !== null ? payRec - wExp : null;
 
   return `
     <div class="week-group">
       <div class="week-header">
-        <div class="week-label">${weekLabel} <span class="week-dates">${dateRange}</span></div>
-        <div class="week-totals">${wHrs.toFixed(2)}h · ${sym}${wExp.toFixed(2)}</div>
+        <div class="week-header-left">
+          <div class="week-label">${weekLabel} <span class="week-dates">${dateRange}</span></div>
+          <div class="week-totals">${wHrs.toFixed(2)}h · ${sym}${wExp.toFixed(2)}</div>
+        </div>
+        <div class="week-header-right">
+          <span class="pay-status-chip ${payStatus}">${PAY_LABELS[payStatus] || payStatus.toUpperCase()}</span>
+          <button class="btn btn-ghost btn-sm pay-btn" data-week-start="${weekKey}" data-week-end="${weekEnd}">${svg('dollar')} Pay</button>
+        </div>
       </div>
       ${wg.entries.map(e => renderEntryCard(e)).join('')}
       <div class="week-summary">
         <span>Expected: <b>${sym}${wExp.toFixed(2)}</b></span>
-        <span>Received: <b>${sym}${wRec.toFixed(2)}</b></span>
-        <span class="${wRec >= wExp ? 'pos' : 'neg'}">Δ ${sym}${Math.abs(wRec-wExp).toFixed(2)}</span>
+        ${payRec !== null
+          ? `<span>Paycheck: <b>${sym}${payRec.toFixed(2)}</b></span>
+             <span class="${payVariance >= 0 ? 'pos' : 'neg'}">Δ ${payVariance >= 0 ? '+' : '−'}${sym}${Math.abs(payVariance).toFixed(2)}</span>`
+          : ''}
       </div>
     </div>`;
+}
+
+function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave) {
+  const wsDate    = new Date(weekStart + 'T12:00:00');
+  const weDate    = new Date(weekEnd   + 'T12:00:00');
+  const dateRange = `${fmtDateShort(wsDate.toISOString())} – ${fmtDateShort(weDate.toISOString())}`;
+  const curStatus = payPeriod?.status || 'pending';
+  const curAmount = payPeriod?.received_amount ?? expectedTotal;
+  const curNotes  = payPeriod?.notes || '';
+
+  const statuses = [
+    { key: 'received', label: 'PAY RECEIVED' },
+    { key: 'delayed',  label: 'PAY DELAYED'  },
+    { key: 'problem',  label: 'PAY PROBLEM'  },
+    { key: 'pending',  label: 'PAY PENDING'  },
+  ];
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('dollar')} Weekly Pay</h3>
+      <button class="btn btn-ghost btn-sm" id="pm-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint" style="margin-bottom:16px;">${dateRange}</div>
+      <div class="form-group">
+        <label class="form-label">Expected Total</label>
+        <div style="font-size:20px;font-weight:700;color:var(--text);">${sym}${expectedTotal.toFixed(2)}</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Amount Received</label>
+        <div class="money-wrap">
+          <span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="pm-amount" min="0" step="0.01" value="${curAmount.toFixed(2)}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Status</label>
+        <div class="pay-status-selector">
+          ${statuses.map(s => `
+            <button class="pay-status-btn ${s.key}${curStatus === s.key ? ' active' : ''}" data-status="${s.key}">
+              ${s.label}
+            </button>`).join('')}
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes <span style="color:var(--text3);font-weight:400;">(optional)</span></label>
+        <textarea class="form-control" id="pm-notes" rows="2" placeholder="e.g. short by $50, check 1234...">${escHtml(curNotes)}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pm-cancel">Cancel</button>
+      <button class="btn btn-primary" id="pm-save">${svg('check')} Save</button>
+    </div>`);
+
+  let selectedStatus = curStatus;
+  document.getElementById('pm-close').addEventListener('click', closeModal);
+  document.getElementById('pm-cancel').addEventListener('click', closeModal);
+  document.querySelectorAll('.pay-status-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.pay-status-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      selectedStatus = btn.dataset.status;
+    });
+  });
+  document.getElementById('pm-save').addEventListener('click', async () => {
+    const amount = parseFloat(document.getElementById('pm-amount').value) || null;
+    const notes  = document.getElementById('pm-notes').value.trim() || null;
+    const paid_at = selectedStatus === 'received'
+      ? (payPeriod?.paid_at || new Date().toISOString())
+      : (payPeriod?.paid_at || null);
+    try {
+      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status: selectedStatus, received_amount: amount, expected_total: expectedTotal, notes, paid_at });
+      showToast('Pay status saved', 'success');
+      closeModal();
+      onSave();
+    } catch (e) { showToast(e.message || 'Save failed', 'error'); }
+  });
 }
 
 function renderEntryCard(entry) {
@@ -1714,7 +1827,7 @@ function openEntryEdit(entry) {
 async function renderOverviewPage() {
   const page = document.getElementById('page');
   try {
-    const all = await api.getEntries();
+    const [all, allPayPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
     const sym = state.settings.currency_symbol || '$';
     const now = new Date();
     const ws  = state.settings.week_start === '7' ? 0 : 1;
@@ -1770,6 +1883,22 @@ async function renderOverviewPage() {
     const maxBar = Math.max(...weekBars.map(w => w.earned), 1);
 
     const variance = totalReceived - totalExpected;
+
+    // Pay period summary (all-time, not filtered by period toggle)
+    const payStat = { pending:{weeks:0,expected:0}, delayed:{weeks:0,expected:0}, problem:{weeks:0,expected:0,received:0}, received:{weeks:0,expected:0,received:0} };
+    for (const pp of allPayPeriods) {
+      const st = pp.status || 'pending';
+      if (!payStat[st]) continue;
+      const wsD = new Date(pp.week_start + 'T00:00:00');
+      const weD = new Date(pp.week_end   + 'T23:59:59');
+      const exp = all.filter(e => e.clock_out && new Date(e.clock_in) >= wsD && new Date(e.clock_in) <= weD)
+                     .reduce((s,e) => s + calcTotalExpected(e), 0);
+      payStat[st].weeks++;
+      payStat[st].expected += exp;
+      if (pp.received_amount != null) payStat[st].received += pp.received_amount;
+    }
+    const outstanding = payStat.pending.expected + payStat.delayed.expected + Math.max(0, payStat.problem.expected - payStat.problem.received);
+    const hasPayData  = allPayPeriods.length > 0;
 
     page.innerHTML = `
       <div class="p-16">
@@ -1834,6 +1963,16 @@ async function renderOverviewPage() {
                 <div class="status-bar-bg"><div class="status-bar-fill ${k}" style="width:${Math.round(v/Math.max(allFiltered.length,1)*100)}%"></div></div>
               </div>`).join('')}
           </div>
+        </div>
+
+        <div class="section-label">Pay Status</div>
+        <div class="card" style="padding:4px 16px;">
+          ${!hasPayData ? '<div class="empty-state-sm" style="padding:12px 0;">No pay periods tracked yet — mark pay in the Journal tab</div>' : `
+          ${payStat.pending.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip pending">PAY PENDING</span> <span class="pay-summary-count">${payStat.pending.weeks} wk</span></div><b>${sym}${payStat.pending.expected.toFixed(2)}</b></div>` : ''}
+          ${payStat.delayed.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip delayed">PAY DELAYED</span> <span class="pay-summary-count">${payStat.delayed.weeks} wk</span></div><b>${sym}${payStat.delayed.expected.toFixed(2)}</b></div>` : ''}
+          ${payStat.problem.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip problem">PAY PROBLEM</span> <span class="pay-summary-count">${payStat.problem.weeks} wk</span></div><div style="text-align:right;"><b>${sym}${payStat.problem.expected.toFixed(2)}</b><div style="font-size:11px;color:var(--red);">rcvd ${sym}${payStat.problem.received.toFixed(2)} · Δ −${sym}${(payStat.problem.expected-payStat.problem.received).toFixed(2)}</div></div></div>` : ''}
+          ${payStat.received.weeks ? `<div class="pay-summary-row"><div><span class="pay-status-chip received">PAY RECEIVED</span> <span class="pay-summary-count">${payStat.received.weeks} wk</span></div><b style="color:var(--green)">${sym}${payStat.received.received.toFixed(2)}</b></div>` : ''}
+          ${outstanding > 0 ? `<div class="pay-summary-outstanding"><span>Outstanding</span><span style="color:var(--red);">−${sym}${outstanding.toFixed(2)}</span></div>` : ''}`}
         </div>
       </div>`;
 

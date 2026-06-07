@@ -130,6 +130,18 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (entry_id) REFERENCES time_entries(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS pay_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT NOT NULL UNIQUE,
+            week_end TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            expected_total REAL DEFAULT 0,
+            received_amount REAL,
+            notes TEXT,
+            paid_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -741,6 +753,52 @@ def h_delete_photo(req, groups):
     return 200, {"success": True}
 
 
+def h_get_pay_periods(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM pay_periods ORDER BY week_start DESC"
+        ).fetchall())
+    return 200, rows
+
+
+def h_upsert_pay_period(req, _groups):
+    data = req.get("body", {})
+    week_start = (data.get("week_start") or "").strip()
+    week_end   = (data.get("week_end")   or "").strip()
+    if not week_start or not week_end:
+        return 400, {"error": "week_start and week_end required"}
+    status          = data.get("status", "pending")
+    received_amount = data.get("received_amount")
+    expected_total  = data.get("expected_total")
+    notes           = data.get("notes")
+    paid_at         = data.get("paid_at")
+    with get_db() as db:
+        existing = db.execute(
+            "SELECT id FROM pay_periods WHERE week_start=?", (week_start,)
+        ).fetchone()
+        if existing:
+            db.execute(
+                """UPDATE pay_periods
+                   SET status=?, received_amount=?, expected_total=?, notes=?,
+                       paid_at=?, updated_at=datetime('now')
+                   WHERE week_start=?""",
+                (status, received_amount, expected_total, notes, paid_at, week_start)
+            )
+            pid = existing["id"]
+        else:
+            cur = db.execute(
+                """INSERT INTO pay_periods
+                   (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
+            )
+            pid = cur.lastrowid
+        row = row_to_dict(db.execute(
+            "SELECT * FROM pay_periods WHERE id=?", (pid,)
+        ).fetchone())
+    return 200, row
+
+
 # ── Settings ───────────────────────────────────────────────────────────────────
 
 def h_get_settings(req, _groups):
@@ -983,6 +1041,8 @@ ROUTES = [
     (r"/api/entries/(\d+)/photos",          ["GET"],    h_get_photos),
     (r"/api/entries/(\d+)/photos",          ["POST"],   h_post_photo),
     (r"/api/entries/(\d+)/photos/(\d+)",    ["DELETE"], h_delete_photo),
+    (r"/api/pay-periods",              ["GET"],  h_get_pay_periods),
+    (r"/api/pay-periods",              ["POST"], h_upsert_pay_period),
     (r"/api/organizations",             ["GET"],    h_get_orgs),
     (r"/api/organizations",             ["POST"],   h_post_org),
     (r"/api/organizations/(\d+)",       ["PUT"],    h_put_org),
