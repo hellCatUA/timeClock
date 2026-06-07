@@ -1,0 +1,9 @@
+{
+  "name": "timeclock",
+  "version": "1.0.0",
+  "description": "Mobile-optimized time clock web application",
+  "scripts": {
+    "start": "python3 server.py",
+    "dev":   "python3 server.py"
+  }
+}
