@@ -498,7 +498,7 @@ def h_clockout(req, groups):
     eid = groups[0]
     clock_out = data.get("clock_out") or now_iso()
     with get_db() as db:
-        entry = db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone()
+        entry = row_to_dict(db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone())
         if not entry:
             return 404, {"error": "Not found"}
         db.execute("UPDATE breaks SET break_end=? WHERE entry_id=? AND break_end IS NULL", (clock_out, eid))

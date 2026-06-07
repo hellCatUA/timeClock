@@ -801,19 +801,35 @@ function buildMaterialRow(index, name='', price='') {
 }
 
 function setupMaterialsUI(existing) {
-  let rows = [...existing];
+  let rows = existing.map(m => ({ name: m.name || '', price: m.price || '' }));
   const list = document.getElementById('materials-list');
   if (!list) return;
-  const rerender = () => {
-    list.innerHTML = rows.map((m,i) => buildMaterialRow(i, m.name, m.price)).join('');
-    list.querySelectorAll('.remove-mat').forEach((btn, i) => {
-      btn.addEventListener('click', () => { rows.splice(i, 1); rerender(); });
+
+  const syncFromDOM = () => {
+    list.querySelectorAll('.material-row').forEach((row, i) => {
+      if (rows[i] !== undefined) {
+        rows[i].name  = row.querySelector('.mat-name')?.value  ?? rows[i].name;
+        rows[i].price = row.querySelector('.mat-price')?.value ?? rows[i].price;
+      }
     });
   };
+
+  const rerender = () => {
+    syncFromDOM();
+    list.innerHTML = rows.map((m, i) => buildMaterialRow(i, m.name, m.price)).join('');
+    list.querySelectorAll('.remove-mat').forEach((btn, i) => {
+      btn.addEventListener('click', () => { syncFromDOM(); rows.splice(i, 1); rerender(); });
+    });
+  };
+
   rerender();
   document.getElementById('add-material-btn')?.addEventListener('click', () => {
+    syncFromDOM();
     rows.push({ name: '', price: '' });
     rerender();
+    // Focus the new name input
+    const newRow = list.querySelectorAll('.material-row');
+    newRow[newRow.length - 1]?.querySelector('.mat-name')?.focus();
   });
 }
 
