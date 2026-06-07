@@ -3,19 +3,33 @@ const state = {
   page: 'clock',
   currentEntry: null,
   organizations: [],
+  clients: [],
   payRates: [],
   settings: {},
-  // Clock timers
   elapsedInterval: null,
   breakElapsedInterval: null,
-  reminderTimeout: null,
+  reminderTimeout: null,       // break-due reminder (configurable interval)
+  breakReturnTimeout: null,    // 10-min return-from-break reminder
   showReminderBanner: false,
-  // Reports
+  showBreakReturnBanner: false,
   reportWeekDate: new Date(),
   reportData: null,
 };
 
-/* ===== Utilities ===== */
+/* ===== Time helpers ===== */
+
+function roundTo5(date) {
+  const ms = Math.round(date.getTime() / (5 * 60 * 1000)) * (5 * 60 * 1000);
+  return new Date(ms);
+}
+
+function adjustedTime(offsetMinutes) {
+  return roundTo5(new Date(Date.now() + offsetMinutes * 60000));
+}
+
+function fmtHHMM(date) {
+  return date.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+}
 
 function fmtDuration(totalSec) {
   const h = Math.floor(totalSec / 3600);
@@ -30,7 +44,7 @@ function fmtDurationShort(totalSec) {
   return h > 0 ? `${h}г ${m}хв` : `${m}хв`;
 }
 
-function fmtMoney(amount, currency) {
+function fmtMoney(amount) {
   const sym = state.settings.currency_symbol || '$';
   if (amount == null) return '—';
   return sym + amount.toFixed(2);
@@ -39,11 +53,6 @@ function fmtMoney(amount, currency) {
 function fmtTime(isoStr) {
   if (!isoStr) return '—';
   return new Date(isoStr).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
-}
-
-function fmtDate(isoStr) {
-  if (!isoStr) return '—';
-  return new Date(isoStr).toLocaleDateString('uk-UA', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 function fmtDateShort(isoStr) {
@@ -61,10 +70,16 @@ function toISOFull(localStr) {
   return new Date(localStr).toISOString();
 }
 
-function icon(paths, extra = '') {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${extra}>${paths}</svg>`;
+function escHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/* ===== Icons ===== */
+function icon(paths) {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+}
 const ICONS = {
   clock:    '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
   play:     '<polygon points="5 3 19 12 5 21 5 3"/>',
@@ -81,13 +96,15 @@ const ICONS = {
   chevL:    '<polyline points="15 18 9 12 15 6"/>',
   chevR:    '<polyline points="9 18 15 12 9 6"/>',
   org:      '<rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
+  user:     '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  tag:      '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
   dollar:   '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
-  info:     '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   check:    '<polyline points="20 6 9 17 4 12"/>',
   print:    '<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
+  hash:     '<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>',
+  return:   '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
 };
-
-function svg(name, extra = '') { return icon(ICONS[name], extra); }
+const svg = name => icon(ICONS[name] || '');
 
 /* ===== Toast ===== */
 let toastTimer;
@@ -100,18 +117,14 @@ function showToast(msg, type = '', duration = 2500) {
 }
 
 /* ===== Modal ===== */
-function openModal(html, onClose) {
+function openModal(html) {
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal-overlay').classList.remove('hidden');
-  state._modalClose = onClose;
 }
-
 function closeModal() {
   document.getElementById('modal-overlay').classList.add('hidden');
   document.getElementById('modal-body').innerHTML = '';
-  if (state._modalClose) { state._modalClose(); state._modalClose = null; }
 }
-
 document.getElementById('modal-overlay').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
 });
@@ -122,15 +135,13 @@ function navigateTo(page) {
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   renderPage();
 }
-
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => navigateTo(btn.dataset.page));
 });
 
 function renderPage() {
   clearTimers();
-  const p = document.getElementById('page');
-  p.innerHTML = '<div class="loading-page"><div class="spinner"></div></div>';
+  document.getElementById('page').innerHTML = '<div class="loading-page"><div class="spinner"></div></div>';
   switch (state.page) {
     case 'clock':    renderClockPage(); break;
     case 'history':  renderHistoryPage(); break;
@@ -142,20 +153,79 @@ function renderPage() {
 /* ===== Live clock in header ===== */
 function startLiveClock() {
   const el = document.getElementById('live-clock');
-  function tick() {
-    el.textContent = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
+  const tick = () => { el.textContent = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); };
   tick();
   setInterval(tick, 1000);
 }
 
-/* ===== Timer helpers ===== */
+/* ===== Timer cleanup ===== */
 function clearTimers() {
   clearInterval(state.elapsedInterval);
   clearInterval(state.breakElapsedInterval);
   clearTimeout(state.reminderTimeout);
+  clearTimeout(state.breakReturnTimeout);
   state.elapsedInterval = null;
   state.breakElapsedInterval = null;
+}
+
+/* ===================================================================
+   TIME SELECTOR — reusable two-step widget
+   Renders into `containerId`. Calls `onConfirm(isoString)` when done.
+   =================================================================== */
+function renderTimeSelector(containerId, label, onConfirm) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  function phase1() {
+    container.innerHTML = `
+      <div class="time-selector">
+        <div class="time-sel-label">${label}</div>
+        <div class="time-sel-row">
+          <button class="btn btn-primary flex-1" id="ts-now">Зараз</button>
+          <button class="btn btn-ghost flex-1" id="ts-later">Інший час →</button>
+        </div>
+      </div>`;
+    document.getElementById('ts-now').addEventListener('click', () => {
+      onConfirm(new Date().toISOString());
+    });
+    document.getElementById('ts-later').addEventListener('click', phase2);
+  }
+
+  function phase2() {
+    const t = (off) => fmtHHMM(adjustedTime(off));
+    container.innerHTML = `
+      <div class="time-selector">
+        <div class="time-sel-label">${label}</div>
+        <div class="time-sel-grid">
+          <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10 хв<span>${t(-10)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5 хв<span>${t(-5)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="5">+5 хв<span>${t(5)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="10">+10 хв<span>${t(10)}</span></button>
+        </div>
+        <button class="btn btn-ghost btn-full" id="ts-custom">Вибрати вручну...</button>
+        <div id="ts-custom-group" class="hidden" style="margin-top:8px;">
+          <input type="datetime-local" class="form-control" id="ts-custom-input" value="${localISOString()}">
+          <button class="btn btn-primary btn-full" id="ts-custom-confirm" style="margin-top:8px;">Підтвердити</button>
+        </div>
+      </div>`;
+
+    container.querySelectorAll('.time-adj-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const off = parseInt(btn.dataset.offset);
+        onConfirm(adjustedTime(off).toISOString());
+      });
+    });
+    document.getElementById('ts-custom').addEventListener('click', () => {
+      document.getElementById('ts-custom-group').classList.toggle('hidden');
+    });
+    document.getElementById('ts-custom-confirm').addEventListener('click', () => {
+      const val = document.getElementById('ts-custom-input').value;
+      if (!val) return showToast('Виберіть час', 'error');
+      onConfirm(toISOFull(val));
+    });
+  }
+
+  phase1();
 }
 
 /* ===== Clock Page ===== */
@@ -165,20 +235,18 @@ async function renderClockPage() {
   } catch (e) {
     state.currentEntry = null;
   }
-
-  if (state.currentEntry) {
-    renderActiveClockPage();
-  } else {
-    renderIdleClockPage();
-  }
+  if (state.currentEntry) renderActiveClockPage();
+  else renderIdleClockPage();
 }
 
 function renderIdleClockPage() {
-  const orgs = state.organizations;
+  const orgs  = state.organizations;
+  const clients = state.clients;
   const rates = state.payRates;
 
-  const orgOptions = orgs.map(o => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
-  const rateOptions = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${state.settings.currency_symbol || '$'}${r.rate}/год</option>`).join('');
+  const orgOpts    = orgs.map(o    => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
+  const clientOpts = clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+  const rateOpts   = rates.map(r   => `<option value="${r.id}">${escHtml(r.name)} — ${state.settings.currency_symbol || '$'}${r.rate}/год</option>`).join('');
 
   document.getElementById('page').innerHTML = `
     <div class="clock-idle">
@@ -188,33 +256,32 @@ function renderIdleClockPage() {
           <label class="form-label">Організація</label>
           <select class="form-control" id="org-select">
             <option value="">— Без організації —</option>
-            ${orgOptions}
+            ${orgOpts}
           </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Клієнт</label>
+          <select class="form-control" id="client-select">
+            <option value="">— Без клієнта —</option>
+            ${clientOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Site ID</label>
+          <input type="text" class="form-control" id="site-id-input" placeholder="Ідентифікатор об'єкта...">
         </div>
         <div class="form-group">
           <label class="form-label">Ставка оплати</label>
           <select class="form-control" id="rate-select">
             <option value="">— Без ставки —</option>
-            ${rateOptions}
+            ${rateOpts}
           </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Час початку</label>
-          <div class="toggle-group" id="time-toggle">
-            <button class="toggle-btn active" data-val="now">Зараз</button>
-            <button class="toggle-btn" data-val="custom">Вибрати</button>
-          </div>
-        </div>
-        <div class="form-group hidden" id="custom-time-group">
-          <input type="datetime-local" class="form-control" id="custom-time" value="${localISOString()}">
         </div>
         <div class="form-group">
           <label class="form-label">Адреса</label>
           <div class="location-row">
             <input type="text" class="form-control" id="addr-input" placeholder="Введіть адресу...">
-            <button class="btn btn-ghost location-btn" id="geo-btn" title="Визначити місце">
-              ${svg('location')}
-            </button>
+            <button class="btn btn-ghost location-btn" id="geo-btn" title="Визначити місце">${svg('location')}</button>
           </div>
           <div id="geo-status" style="font-size:12px;color:var(--text3);margin-top:4px;"></div>
         </div>
@@ -222,22 +289,10 @@ function renderIdleClockPage() {
           <label class="form-label">Коментар</label>
           <textarea class="form-control" id="comment-input" placeholder="Необов'язково..." rows="2"></textarea>
         </div>
-        <button class="btn btn-primary btn-full btn-lg" id="clockin-btn">
-          ${svg('play')} Почати роботу
-        </button>
-      </div>
-    </div>
-  `;
 
-  // Time toggle
-  let useCustomTime = false;
-  document.getElementById('time-toggle').addEventListener('click', e => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#time-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
-    useCustomTime = btn.dataset.val === 'custom';
-    document.getElementById('custom-time-group').classList.toggle('hidden', !useCustomTime);
-  });
+        <div id="clockin-time-selector"></div>
+      </div>
+    </div>`;
 
   // Geolocation
   let geoCoords = null;
@@ -259,42 +314,42 @@ function renderIdleClockPage() {
         document.getElementById('addr-input').value = `${geoCoords.lat.toFixed(5)}, ${geoCoords.lng.toFixed(5)}`;
         statusEl.textContent = 'Адресу не знайдено, збережено координати';
       }
-    } catch (e) {
+    } catch {
       statusEl.textContent = 'Геолокація недоступна або відхилена';
     }
   });
 
-  // Clock In
-  document.getElementById('clockin-btn').addEventListener('click', async () => {
-    const btn = document.getElementById('clockin-btn');
-    btn.disabled = true;
-    btn.textContent = 'Зберігаємо...';
+  // Time selector → clock in
+  renderTimeSelector('clockin-time-selector', 'Час початку', async (clockInISO) => {
+    const container = document.getElementById('clockin-time-selector');
+    container.innerHTML = '<div style="text-align:center;color:var(--text2);padding:12px;">Зберігаємо...</div>';
     try {
-      const clockIn = useCustomTime
-        ? toISOFull(document.getElementById('custom-time').value)
-        : new Date().toISOString();
-      const org = document.getElementById('org-select').value;
-      const rate = document.getElementById('rate-select').value;
-      const addr = document.getElementById('addr-input').value.trim();
+      const org     = document.getElementById('org-select').value;
+      const client  = document.getElementById('client-select').value;
+      const rate    = document.getElementById('rate-select').value;
+      const addr    = document.getElementById('addr-input').value.trim();
+      const siteId  = document.getElementById('site-id-input').value.trim();
       const comment = document.getElementById('comment-input').value.trim();
 
       state.currentEntry = await api.clockIn({
-        clock_in: clockIn,
-        organization_id: org ? Number(org) : null,
-        pay_rate_id: rate ? Number(rate) : null,
-        address: addr || null,
-        latitude: geoCoords?.lat || null,
+        clock_in: clockInISO,
+        organization_id: org    ? Number(org)    : null,
+        client_id:       client ? Number(client) : null,
+        pay_rate_id:     rate   ? Number(rate)   : null,
+        address:  addr    || null,
+        site_id:  siteId  || null,
+        comment:  comment || null,
+        latitude:  geoCoords?.lat || null,
         longitude: geoCoords?.lng || null,
-        comment: comment || null,
       });
 
       state.showReminderBanner = false;
+      state.showBreakReturnBanner = false;
       scheduleBreakReminder();
       renderActiveClockPage();
     } catch (err) {
       showToast(err.message || 'Помилка', 'error');
-      btn.disabled = false;
-      btn.innerHTML = svg('play') + ' Почати роботу';
+      renderTimeSelector('clockin-time-selector', 'Час початку', arguments.callee);
     }
   });
 }
@@ -304,15 +359,22 @@ function renderActiveClockPage() {
   if (!entry) { renderIdleClockPage(); return; }
 
   const onBreak = !!entry.active_break;
-  const org = entry.org_name || 'Без організації';
-  const rate = entry.rate_name ? `${entry.rate_name} — ${state.settings.currency_symbol || '$'}${entry.hourly_rate}/год` : 'Без ставки';
+  const org = entry.org_name || '';
+  const client = entry.client_name || '';
 
   document.getElementById('page').innerHTML = `
     ${state.showReminderBanner ? `
     <div class="reminder-banner">
       ${svg('bell')}
-      <p>Час зробити перерву! Ви працюєте вже давно.</p>
+      <p>Час зробити перерву!</p>
       <button class="btn btn-orange btn-sm" id="take-break-reminder">Перерва</button>
+    </div>` : ''}
+
+    ${state.showBreakReturnBanner ? `
+    <div class="reminder-banner" style="border-color:var(--green);background:var(--green-bg);">
+      ${svg('return')}
+      <p style="color:var(--green);">Перерва 10 хвилин — час повертатись!</p>
+      <button class="btn btn-primary btn-sm" id="end-break-banner-btn">Повернутись</button>
     </div>` : ''}
 
     <div class="clock-active-hero">
@@ -325,17 +387,19 @@ function renderActiveClockPage() {
         <div class="earnings-display" id="earnings-display">${fmtMoney(0)}</div>
         <div class="earning-rate">${state.settings.currency_symbol || '$'}${entry.hourly_rate}/год</div>
       ` : ''}
-      ${onBreak ? `<div class="break-timer">Перерва: <span id="break-elapsed">00:00</span></div>` : ''}
+      ${onBreak ? `<div class="break-timer">Перерва: <span id="break-elapsed">00:00:00</span></div>` : ''}
       <div class="clock-meta">
-        <div class="clock-meta-item">${svg('clock')} Початок: ${fmtTime(entry.clock_in)}</div>
-        ${org !== 'Без організації' ? `<div class="clock-meta-item">${svg('org')} ${escHtml(org)}</div>` : ''}
+        <div class="clock-meta-item">${svg('clock')} ${fmtTime(entry.clock_in)}</div>
+        ${org    ? `<div class="clock-meta-item">${svg('org')}  ${escHtml(org)}</div>`    : ''}
+        ${client ? `<div class="clock-meta-item">${svg('user')} ${escHtml(client)}</div>` : ''}
+        ${entry.site_id ? `<div class="clock-meta-item">${svg('hash')} ${escHtml(entry.site_id)}</div>` : ''}
         ${entry.address ? `<div class="clock-meta-item">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
       </div>
     </div>
 
     <div class="clock-actions">
       ${onBreak
-        ? `<button class="btn btn-primary btn-lg" id="end-break-btn">${svg('play')} Закінчити перерву</button>`
+        ? `<button class="btn btn-primary btn-lg" id="end-break-btn">${svg('play')} Повернутись</button>`
         : `<button class="btn btn-orange btn-lg" id="start-break-btn">${svg('coffee')} Перерва</button>`
       }
       <button class="btn btn-danger btn-lg" id="clockout-btn">${svg('stop')} Стоп</button>
@@ -353,27 +417,32 @@ function renderActiveClockPage() {
           ${entry.breaks.map(b => `<div>${fmtTime(b.break_start)} — ${b.break_end ? fmtTime(b.break_end) : 'зараз'}</div>`).join('')}
         </div>
       ` : ''}
-    </div>
-  `;
+    </div>`;
 
-  // Start/end break handlers
+  // Break buttons
   if (onBreak) {
-    document.getElementById('end-break-btn')?.addEventListener('click', async () => {
+    const endBreakAction = async () => {
       try {
         await api.endBreak(entry.id, { break_end: new Date().toISOString() });
         state.currentEntry = await api.getCurrentEntry();
-        state.showReminderBanner = false;
+        state.showBreakReturnBanner = false;
+        clearTimeout(state.breakReturnTimeout);
+        state.breakReturnTimeout = null;
         scheduleBreakReminder();
         renderActiveClockPage();
       } catch (e) { showToast(e.message, 'error'); }
-    });
+    };
+    document.getElementById('end-break-btn')?.addEventListener('click', endBreakAction);
+    document.getElementById('end-break-banner-btn')?.addEventListener('click', endBreakAction);
     startBreakElapsedTimer(entry.active_break.break_start);
+    scheduleBreakReturnReminder(entry.active_break.break_start);
   } else {
     document.getElementById('start-break-btn')?.addEventListener('click', async () => {
       try {
         const b = await api.startBreak(entry.id, { break_start: new Date().toISOString() });
         state.currentEntry = { ...entry, active_break: b, breaks: [...entry.breaks] };
         state.showReminderBanner = false;
+        state.showBreakReturnBanner = false;
         clearTimeout(state.reminderTimeout);
         renderActiveClockPage();
       } catch (e) { showToast(e.message, 'error'); }
@@ -384,32 +453,22 @@ function renderActiveClockPage() {
     document.getElementById('start-break-btn')?.click();
   });
 
-  // Clock out
-  document.getElementById('clockout-btn').addEventListener('click', () => {
-    showClockOutModal(entry);
-  });
+  document.getElementById('clockout-btn').addEventListener('click', () => showClockOutModal(entry));
 
-  // Live elapsed + earnings timer
   startElapsedTimer(entry);
 }
 
+/* ===== Elapsed & earnings timers ===== */
 function startElapsedTimer(entry) {
   clearInterval(state.elapsedInterval);
   function tick() {
     const now = Date.now();
     const startMs = new Date(entry.clock_in).getTime();
-
-    // If on break, don't advance break time in elapsed calculation (use frozen total_break_seconds)
     let breakMs = (entry.total_break_seconds || 0) * 1000;
-    if (entry.active_break) {
-      breakMs += (now - new Date(entry.active_break.break_start).getTime());
-    }
-
-    const elapsedMs = Math.max(0, now - startMs - breakMs);
-    const elapsedSec = Math.floor(elapsedMs / 1000);
+    if (entry.active_break) breakMs += (now - new Date(entry.active_break.break_start).getTime());
+    const elapsedSec = Math.max(0, Math.floor((now - startMs - breakMs) / 1000));
     const el = document.getElementById('elapsed-display');
     if (el) el.textContent = fmtDuration(elapsedSec);
-
     if (entry.hourly_rate) {
       const earnings = (elapsedSec / 3600) * entry.hourly_rate;
       const earn = document.getElementById('earnings-display');
@@ -423,85 +482,72 @@ function startElapsedTimer(entry) {
 
 function startBreakElapsedTimer(breakStart) {
   clearInterval(state.breakElapsedInterval);
-  function tick() {
-    const sec = Math.floor((Date.now() - new Date(breakStart).getTime()) / 1000);
+  const tick = () => {
     const el = document.getElementById('break-elapsed');
-    if (el) el.textContent = fmtDuration(sec);
-  }
+    if (el) el.textContent = fmtDuration(Math.floor((Date.now() - new Date(breakStart).getTime()) / 1000));
+  };
   tick();
   state.breakElapsedInterval = setInterval(tick, 1000);
 }
 
+/* ===== Reminders ===== */
 function scheduleBreakReminder() {
   clearTimeout(state.reminderTimeout);
   const minutes = parseInt(state.settings.break_reminder_minutes) || 0;
   if (!minutes || !state.currentEntry) return;
-
-  const ms = minutes * 60 * 1000;
   state.reminderTimeout = setTimeout(() => {
-    if (!state.currentEntry || state.currentEntry.clock_out) return;
-    if (state.currentEntry.active_break) return;
-
+    if (!state.currentEntry || state.currentEntry.clock_out || state.currentEntry.active_break) return;
     state.showReminderBanner = true;
-
-    // Browser notification
     if (Notification.permission === 'granted') {
       new Notification('TimeClock — Час для перерви!', {
         body: `Ви працюєте вже ${minutes} хвилин. Зробіть перерву!`,
-        icon: '/icon.png',
       });
     }
-
     if (state.page === 'clock') renderActiveClockPage();
-  }, ms);
+  }, minutes * 60 * 1000);
 }
 
+function scheduleBreakReturnReminder(breakStartISO) {
+  clearTimeout(state.breakReturnTimeout);
+  const minutes = parseInt(state.settings.break_return_minutes) || 10;
+  const elapsed = (Date.now() - new Date(breakStartISO).getTime()) / 1000 / 60;
+  const remaining = Math.max(0, minutes - elapsed);
+  if (remaining <= 0) {
+    // Already overdue
+    state.showBreakReturnBanner = true;
+    return;
+  }
+  state.breakReturnTimeout = setTimeout(() => {
+    if (!state.currentEntry?.active_break) return;
+    state.showBreakReturnBanner = true;
+    if (Notification.permission === 'granted') {
+      new Notification('TimeClock — Час повертатись!', {
+        body: `Перерва ${minutes} хвилин. Час повертатись до роботи!`,
+      });
+    }
+    if (state.page === 'clock') renderActiveClockPage();
+  }, remaining * 60 * 1000);
+}
+
+/* ===== Clock Out Modal ===== */
 function showClockOutModal(entry) {
   openModal(`
     <div class="modal-handle"></div>
     <div class="modal-title">Завершення зміни</div>
     <div class="modal-body">
       <div class="form-group">
-        <label class="form-label">Час завершення</label>
-        <div class="toggle-group" id="co-time-toggle">
-          <button class="toggle-btn active" data-val="now">Зараз</button>
-          <button class="toggle-btn" data-val="custom">Вибрати</button>
-        </div>
-      </div>
-      <div class="form-group hidden" id="co-custom-group">
-        <input type="datetime-local" class="form-control" id="co-custom-time" value="${localISOString()}">
-      </div>
-      <div class="form-group">
         <label class="form-label">Коментар</label>
         <textarea class="form-control" id="co-comment" rows="2" placeholder="Необов'язково...">${escHtml(entry.comment || '')}</textarea>
       </div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" id="co-cancel">Скасувати</button>
-      <button class="btn btn-danger" id="co-confirm">${svg('stop')} Завершити</button>
-    </div>
-  `);
+      <div id="clockout-time-selector"></div>
+    </div>`);
 
-  let useCustom = false;
-  document.getElementById('co-time-toggle').addEventListener('click', e => {
-    const btn = e.target.closest('.toggle-btn');
-    if (!btn) return;
-    document.querySelectorAll('#co-time-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
-    useCustom = btn.dataset.val === 'custom';
-    document.getElementById('co-custom-group').classList.toggle('hidden', !useCustom);
-  });
-
-  document.getElementById('co-cancel').addEventListener('click', closeModal);
-  document.getElementById('co-confirm').addEventListener('click', async () => {
+  renderTimeSelector('clockout-time-selector', 'Час завершення', async (clockOutISO) => {
     try {
-      const clockOut = useCustom
-        ? toISOFull(document.getElementById('co-custom-time').value)
-        : new Date().toISOString();
       const comment = document.getElementById('co-comment').value.trim();
-      await api.clockOut(entry.id, { clock_out: clockOut, comment: comment || null });
+      await api.clockOut(entry.id, { clock_out: clockOutISO, comment: comment || null });
       state.currentEntry = null;
       clearTimers();
-      clearTimeout(state.reminderTimeout);
       document.title = 'TimeClock';
       closeModal();
       showToast('Зміну завершено', 'success');
@@ -524,12 +570,9 @@ function buildHistoryPage(entries) {
   if (!entries.length) {
     document.getElementById('page').innerHTML = `
       <div class="history-header"><h2>Журнал</h2></div>
-      <div class="empty-state">${svg('clock')}<p>Записів немає</p></div>
-    `;
+      <div class="empty-state">${svg('clock')}<p>Записів немає</p></div>`;
     return;
   }
-
-  // Group by day
   const groups = {};
   entries.forEach(e => {
     const day = new Date(e.clock_in).toLocaleDateString('uk-UA', { weekday: 'long', day: 'numeric', month: 'long' });
@@ -537,43 +580,31 @@ function buildHistoryPage(entries) {
   });
 
   let html = `<div class="history-header"><h2>Журнал</h2></div>`;
-
   for (const [day, dayEntries] of Object.entries(groups)) {
     html += `<div class="day-group"><div class="day-label">${day}</div>`;
-    dayEntries.forEach(e => {
-      html += buildEntryCard(e);
-    });
+    dayEntries.forEach(e => { html += buildEntryCard(e); });
     html += `</div>`;
   }
-
   document.getElementById('page').innerHTML = html;
 
-  // Expand/edit/delete
   document.querySelectorAll('.entry-card').forEach(card => {
     card.addEventListener('click', e => {
       if (e.target.closest('.btn')) return;
-      const expanded = card.querySelector('.entry-expanded');
-      if (expanded) expanded.classList.toggle('hidden');
+      card.querySelector('.entry-expanded')?.classList.toggle('hidden');
     });
   });
-
   document.querySelectorAll('.delete-entry-btn').forEach(btn => {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       if (!confirm('Видалити цей запис?')) return;
-      try {
-        await api.deleteEntry(btn.dataset.id);
-        showToast('Запис видалено');
-        renderHistoryPage();
-      } catch (err) { showToast(err.message, 'error'); }
+      try { await api.deleteEntry(btn.dataset.id); showToast('Запис видалено'); renderHistoryPage(); }
+      catch (err) { showToast(err.message, 'error'); }
     });
   });
-
   document.querySelectorAll('.edit-entry-btn').forEach(btn => {
-    btn.addEventListener('click', async e => {
+    btn.addEventListener('click', e => {
       e.stopPropagation();
-      const id = btn.dataset.id;
-      const entry = entries.find(en => String(en.id) === id);
+      const entry = entries.find(en => String(en.id) === btn.dataset.id);
       if (entry) showEditEntryModal(entry);
     });
   });
@@ -581,10 +612,10 @@ function buildHistoryPage(entries) {
 
 function buildEntryCard(e) {
   const isActive = !e.clock_out;
-  const clockIn = new Date(e.clock_in);
+  const clockIn  = new Date(e.clock_in);
   const clockOut = e.clock_out ? new Date(e.clock_out) : null;
   const grossSec = clockOut ? Math.round((clockOut - clockIn) / 1000) : null;
-  const netSec = grossSec !== null ? grossSec - (e.total_break_seconds || 0) : null;
+  const netSec   = grossSec !== null ? grossSec - (e.total_break_seconds || 0) : null;
   const earnings = (netSec !== null && e.hourly_rate) ? (netSec / 3600) * e.hourly_rate : null;
 
   return `
@@ -595,12 +626,12 @@ function buildEntryCard(e) {
         ${earnings !== null ? `<div class="entry-earnings">${fmtMoney(earnings)}</div>` : ''}
       </div>
       <div class="entry-meta">
-        <div class="entry-meta-item">${svg('clock')}
-          ${fmtTime(e.clock_in)} — ${e.clock_out ? fmtTime(e.clock_out) : 'зараз'}
-        </div>
+        <div class="entry-meta-item">${svg('clock')} ${fmtTime(e.clock_in)} — ${e.clock_out ? fmtTime(e.clock_out) : 'зараз'}</div>
         ${netSec !== null ? `<div class="entry-meta-item">${svg('play')} ${fmtDurationShort(netSec)}</div>` : ''}
-        ${e.rate_name ? `<div class="entry-meta-item">${svg('dollar')} ${escHtml(e.rate_name)}</div>` : ''}
-        ${e.address ? `<div class="entry-meta-item">${svg('location')} ${escHtml(e.address)}</div>` : ''}
+        ${e.client_name ? `<div class="entry-meta-item">${svg('user')} ${escHtml(e.client_name)}</div>` : ''}
+        ${e.site_id     ? `<div class="entry-meta-item">${svg('hash')} ${escHtml(e.site_id)}</div>`     : ''}
+        ${e.rate_name   ? `<div class="entry-meta-item">${svg('dollar')} ${escHtml(e.rate_name)}</div>` : ''}
+        ${e.address     ? `<div class="entry-meta-item">${svg('location')} ${escHtml(e.address)}</div>` : ''}
       </div>
       ${e.comment ? `<div class="entry-comment">${svg('comment')} ${escHtml(e.comment)}</div>` : ''}
       <div class="entry-expanded hidden">
@@ -609,13 +640,13 @@ function buildEntryCard(e) {
           <button class="btn btn-secondary btn-sm delete-entry-btn" data-id="${e.id}" style="color:var(--red);">${svg('trash')} Видалити</button>
         </div>
       </div>
-    </div>
-  `;
+    </div>`;
 }
 
 function showEditEntryModal(entry) {
-  const orgOpts = state.organizations.map(o => `<option value="${o.id}" ${entry.organization_id == o.id ? 'selected' : ''}>${escHtml(o.name)}</option>`).join('');
-  const rateOpts = state.payRates.map(r => `<option value="${r.id}" ${entry.pay_rate_id == r.id ? 'selected' : ''}>${escHtml(r.name)}</option>`).join('');
+  const orgOpts    = state.organizations.map(o => `<option value="${o.id}" ${entry.organization_id == o.id ? 'selected' : ''}>${escHtml(o.name)}</option>`).join('');
+  const clientOpts = state.clients.map(c       => `<option value="${c.id}" ${entry.client_id       == c.id ? 'selected' : ''}>${escHtml(c.name)}</option>`).join('');
+  const rateOpts   = state.payRates.map(r      => `<option value="${r.id}" ${entry.pay_rate_id     == r.id ? 'selected' : ''}>${escHtml(r.name)}</option>`).join('');
 
   openModal(`
     <div class="modal-handle"></div>
@@ -633,17 +664,19 @@ function showEditEntryModal(entry) {
       </div>
       <div class="form-group">
         <label class="form-label">Організація</label>
-        <select class="form-control" id="edit-org">
-          <option value="">— Без організації —</option>
-          ${orgOpts}
-        </select>
+        <select class="form-control" id="edit-org"><option value="">— Без організації —</option>${orgOpts}</select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Клієнт</label>
+        <select class="form-control" id="edit-client"><option value="">— Без клієнта —</option>${clientOpts}</select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Site ID</label>
+        <input type="text" class="form-control" id="edit-site-id" value="${escHtml(entry.site_id || '')}">
       </div>
       <div class="form-group">
         <label class="form-label">Ставка</label>
-        <select class="form-control" id="edit-rate">
-          <option value="">— Без ставки —</option>
-          ${rateOpts}
-        </select>
+        <select class="form-control" id="edit-rate"><option value="">— Без ставки —</option>${rateOpts}</select>
       </div>
       <div class="form-group">
         <label class="form-label">Адреса</label>
@@ -657,24 +690,26 @@ function showEditEntryModal(entry) {
     <div class="modal-actions">
       <button class="btn btn-secondary" id="edit-cancel">Скасувати</button>
       <button class="btn btn-primary" id="edit-save">${svg('check')} Зберегти</button>
-    </div>
-  `);
+    </div>`);
 
   document.getElementById('edit-cancel').addEventListener('click', closeModal);
   document.getElementById('edit-save').addEventListener('click', async () => {
     try {
-      const clockIn = toISOFull(document.getElementById('edit-in').value);
-      const clockOutVal = document.getElementById('edit-out').value;
-      const clockOut = clockOutVal ? toISOFull(clockOutVal) : null;
-      const orgVal = document.getElementById('edit-org').value;
-      const rateVal = document.getElementById('edit-rate').value;
+      const clockIn    = toISOFull(document.getElementById('edit-in').value);
+      const coVal      = document.getElementById('edit-out').value;
+      const clockOut   = coVal ? toISOFull(coVal) : null;
+      const orgVal     = document.getElementById('edit-org').value;
+      const clientVal  = document.getElementById('edit-client').value;
+      const rateVal    = document.getElementById('edit-rate').value;
       await api.updateEntry(entry.id, {
-        clock_in: clockIn,
-        clock_out: clockOut,
-        organization_id: orgVal ? Number(orgVal) : null,
-        pay_rate_id: rateVal ? Number(rateVal) : null,
-        address: document.getElementById('edit-addr').value.trim() || null,
-        comment: document.getElementById('edit-comment').value.trim() || null,
+        clock_in:        clockIn,
+        clock_out:       clockOut,
+        organization_id: orgVal    ? Number(orgVal)    : null,
+        client_id:       clientVal ? Number(clientVal) : null,
+        pay_rate_id:     rateVal   ? Number(rateVal)   : null,
+        site_id:         document.getElementById('edit-site-id').value.trim() || null,
+        address:         document.getElementById('edit-addr').value.trim()    || null,
+        comment:         document.getElementById('edit-comment').value.trim() || null,
       });
       closeModal();
       showToast('Збережено', 'success');
@@ -696,27 +731,18 @@ async function renderReportsPage() {
 
 function buildReportsPage(data) {
   const weekStart = new Date(data.week_start);
-  const weekEnd = new Date(data.week_end);
+  const weekEnd   = new Date(data.week_end);
   const weekLabel = `${fmtDateShort(weekStart.toISOString())} — ${fmtDateShort(weekEnd.toISOString())}`;
-  const totalH = Math.floor(data.total_net_seconds / 3600);
-  const totalM = Math.floor((data.total_net_seconds % 3600) / 60);
-
-  // Group by org for summary
-  const orgTotals = {};
-  data.entries.forEach(e => {
-    const key = e.org_name || 'Без організації';
-    if (!orgTotals[key]) orgTotals[key] = { seconds: 0, earnings: 0 };
-    orgTotals[key].seconds += e.net_seconds || 0;
-    orgTotals[key].earnings += e.earnings || 0;
-  });
+  const totalH    = Math.floor(data.total_net_seconds / 3600);
+  const totalM    = Math.floor((data.total_net_seconds % 3600) / 60);
 
   let tableRows = data.entries.map(e => {
     const clockIn = new Date(e.clock_in);
-    const netSec = e.net_seconds || 0;
+    const netSec  = e.net_seconds || 0;
     const h = Math.floor(netSec / 3600), m = Math.floor((netSec % 3600) / 60);
     return `<tr>
       <td>${clockIn.toLocaleDateString('uk-UA', { weekday:'short', day:'numeric', month:'short' })}</td>
-      <td>${escHtml(e.org_name || '—')}</td>
+      <td>${escHtml(e.org_name || '—')}${e.client_name ? `<br><small style="color:var(--text2)">${escHtml(e.client_name)}</small>` : ''}</td>
       <td>${fmtTime(e.clock_in)} — ${e.clock_out ? fmtTime(e.clock_out) : '…'}</td>
       <td>${h}г ${m}хв</td>
       <td>${e.earnings !== null ? fmtMoney(e.earnings) : '—'}</td>
@@ -733,56 +759,26 @@ function buildReportsPage(data) {
         <button class="week-arrow" id="next-week">${svg('chevR')}</button>
       </div>
     </div>
-
     <div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">Всього годин</div>
-        <div class="stat-value">${totalH}г ${totalM}хв</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Заробіток</div>
-        <div class="stat-value green">${fmtMoney(data.total_earnings)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Змін</div>
-        <div class="stat-value">${data.entries.length}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Серед. зміна</div>
-        <div class="stat-value">${data.entries.length > 0 ? fmtDurationShort(Math.round(data.total_net_seconds / data.entries.length)) : '—'}</div>
-      </div>
+      <div class="stat-card"><div class="stat-label">Всього годин</div><div class="stat-value">${totalH}г ${totalM}хв</div></div>
+      <div class="stat-card"><div class="stat-label">Заробіток</div><div class="stat-value green">${fmtMoney(data.total_earnings)}</div></div>
+      <div class="stat-card"><div class="stat-label">Змін</div><div class="stat-value">${data.entries.length}</div></div>
+      <div class="stat-card"><div class="stat-label">Серед. зміна</div><div class="stat-value">${data.entries.length > 0 ? fmtDurationShort(Math.round(data.total_net_seconds / data.entries.length)) : '—'}</div></div>
     </div>
-
     <div class="section-label">Деталі</div>
     <div class="report-table">
       <table>
-        <thead>
-          <tr>
-            <th>Дата</th>
-            <th>Організація</th>
-            <th>Час</th>
-            <th>Год</th>
-            <th>Дохід</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Дата</th><th>Організація</th><th>Час</th><th>Год</th><th>Дохід</th></tr></thead>
         <tbody>${tableRows}</tbody>
-        <tfoot>
-          <tr class="total-row">
-            <td colspan="3"><strong>Разом</strong></td>
-            <td>${totalH}г ${totalM}хв</td>
-            <td>${fmtMoney(data.total_earnings)}</td>
-          </tr>
-        </tfoot>
+        <tfoot><tr class="total-row"><td colspan="3"><strong>Разом</strong></td><td>${totalH}г ${totalM}хв</td><td>${fmtMoney(data.total_earnings)}</td></tr></tfoot>
       </table>
     </div>
-
     <div class="section-label">Експорт</div>
     <div class="export-bar">
       <button class="btn btn-ghost" id="export-week-btn">${svg('download')} CSV цього тижня</button>
       <button class="btn btn-ghost" id="export-all-btn">${svg('download')} Весь CSV</button>
       <button class="btn btn-ghost" id="print-btn">${svg('print')} Друк</button>
-    </div>
-  `;
+    </div>`;
 
   document.getElementById('prev-week').addEventListener('click', () => {
     state.reportWeekDate = new Date(weekStart.getTime() - 7 * 86400000);
@@ -793,9 +789,7 @@ function buildReportsPage(data) {
     renderReportsPage();
   });
   document.getElementById('export-week-btn').addEventListener('click', () => {
-    const from = data.week_start;
-    const to = data.week_end;
-    window.location.href = api.getExportUrl(from, to);
+    window.location.href = api.getExportUrl(data.week_start, data.week_end);
   });
   document.getElementById('export-all-btn').addEventListener('click', () => {
     window.location.href = '/api/reports/export/csv';
@@ -806,26 +800,39 @@ function buildReportsPage(data) {
 /* ===== Settings Page ===== */
 async function renderSettingsPage() {
   try {
-    const [orgs, rates, settings] = await Promise.all([
-      api.getOrganizations(), api.getPayRates(), api.getSettings()
+    const [orgs, clients, rates, settings] = await Promise.all([
+      api.getOrganizations(), api.getClients(), api.getPayRates(), api.getSettings()
     ]);
     state.organizations = orgs;
+    state.clients = clients;
     state.payRates = rates;
     state.settings = settings;
-    buildSettingsPage(orgs, rates, settings);
+    buildSettingsPage(orgs, clients, rates, settings);
   } catch (e) {
     document.getElementById('page').innerHTML = `<div class="empty-state">${svg('alert')}<p>Помилка завантаження</p></div>`;
   }
 }
 
-function buildSettingsPage(orgs, rates, settings) {
+function buildSettingsPage(orgs, clients, rates, settings) {
   const notifSupported = 'Notification' in window;
-  const notifGranted = notifSupported && Notification.permission === 'granted';
+  const notifGranted   = notifSupported && Notification.permission === 'granted';
+
+  const makeList = (items, editClass, delClass, subtextFn = null) =>
+    items.map(it => `
+      <div class="settings-item">
+        <div class="settings-item-info">
+          <div class="settings-item-label">${escHtml(it.name)}</div>
+          ${subtextFn ? `<div class="settings-item-sub">${subtextFn(it)}</div>` : ''}
+        </div>
+        <div class="settings-item-actions">
+          <button class="btn btn-ghost btn-sm ${editClass}" data-id="${it.id}">${svg('edit')}</button>
+          <button class="btn btn-ghost btn-sm ${delClass}"  data-id="${it.id}" style="color:var(--red);">${svg('trash')}</button>
+        </div>
+      </div>`).join('');
 
   document.getElementById('page').innerHTML = `
     ${notifSupported && !notifGranted ? `
-    <div class="notif-prompt">
-      ${svg('bell')}
+    <div class="notif-prompt">${svg('bell')}
       <span>Дозвольте сповіщення для нагадувань про перерви</span>
       <button class="btn btn-ghost btn-sm" id="req-notif">Дозволити</button>
     </div>` : ''}
@@ -838,24 +845,33 @@ function buildSettingsPage(orgs, rates, settings) {
           <div class="settings-item-sub">Через скільки хвилин нагадати</div>
         </div>
         <select class="form-control" id="break-reminder-sel" style="width:auto;padding:8px 10px;font-size:14px;">
-          <option value="0" ${settings.break_reminder_minutes==='0'?'selected':''}>Вимкнено</option>
-          <option value="30" ${settings.break_reminder_minutes==='30'?'selected':''}>30 хв</option>
-          <option value="60" ${settings.break_reminder_minutes==='60'?'selected':''}>1 год</option>
-          <option value="90" ${settings.break_reminder_minutes==='90'?'selected':''}>1.5 год</option>
+          <option value="0"   ${settings.break_reminder_minutes==='0'  ?'selected':''}>Вимкнено</option>
+          <option value="30"  ${settings.break_reminder_minutes==='30' ?'selected':''}>30 хв</option>
+          <option value="60"  ${settings.break_reminder_minutes==='60' ?'selected':''}>1 год</option>
+          <option value="90"  ${settings.break_reminder_minutes==='90' ?'selected':''}>1.5 год</option>
           <option value="120" ${settings.break_reminder_minutes==='120'?'selected':''}>2 год</option>
           <option value="180" ${settings.break_reminder_minutes==='180'?'selected':''}>3 год</option>
         </select>
       </div>
       <div class="settings-item">
         <div class="settings-item-info">
-          <div class="settings-item-label">Символ валюти</div>
+          <div class="settings-item-label">Тривалість перерви</div>
+          <div class="settings-item-sub">Нагадування про повернення</div>
         </div>
+        <select class="form-control" id="break-return-sel" style="width:auto;padding:8px 10px;font-size:14px;">
+          <option value="5"  ${settings.break_return_minutes==='5' ?'selected':''}>5 хв</option>
+          <option value="10" ${settings.break_return_minutes==='10'?'selected':''}>10 хв</option>
+          <option value="15" ${settings.break_return_minutes==='15'?'selected':''}>15 хв</option>
+          <option value="20" ${settings.break_return_minutes==='20'?'selected':''}>20 хв</option>
+          <option value="30" ${settings.break_return_minutes==='30'?'selected':''}>30 хв</option>
+        </select>
+      </div>
+      <div class="settings-item">
+        <div class="settings-item-info"><div class="settings-item-label">Символ валюти</div></div>
         <input type="text" class="form-control" id="currency-sym" value="${escHtml(settings.currency_symbol || '$')}" style="width:60px;text-align:center;">
       </div>
       <div class="settings-item">
-        <div class="settings-item-info">
-          <div class="settings-item-label">Початок тижня</div>
-        </div>
+        <div class="settings-item-info"><div class="settings-item-label">Початок тижня</div></div>
         <select class="form-control" id="week-start-sel" style="width:auto;padding:8px 10px;font-size:14px;">
           <option value="1" ${settings.week_start==='1'?'selected':''}>Понеділок</option>
           <option value="0" ${settings.week_start==='0'?'selected':''}>Неділя</option>
@@ -867,58 +883,38 @@ function buildSettingsPage(orgs, rates, settings) {
     </div>
 
     <div class="section-label">Організації</div>
-    <div class="settings-list" id="org-list">
-      ${orgs.map(o => `
-        <div class="settings-item">
-          <div class="settings-item-info">
-            <div class="settings-item-label">${escHtml(o.name)}</div>
-            ${o.address ? `<div class="settings-item-sub">${escHtml(o.address)}</div>` : ''}
-          </div>
-          <div class="settings-item-actions">
-            <button class="btn btn-ghost btn-sm edit-org-btn" data-id="${o.id}">${svg('edit')}</button>
-            <button class="btn btn-ghost btn-sm delete-org-btn" data-id="${o.id}" style="color:var(--red);">${svg('trash')}</button>
-          </div>
-        </div>
-      `).join('')}
-      <div class="list-add-row">
-        <button class="btn btn-ghost btn-full" id="add-org-btn">${svg('plus')} Додати організацію</button>
-      </div>
+    <div class="settings-list">
+      ${makeList(orgs, 'edit-org-btn', 'delete-org-btn', o => o.address || '')}
+      <div class="list-add-row"><button class="btn btn-ghost btn-full" id="add-org-btn">${svg('plus')} Додати організацію</button></div>
+    </div>
+
+    <div class="section-label">Клієнти</div>
+    <div class="settings-list">
+      ${makeList(clients, 'edit-client-btn', 'delete-client-btn')}
+      <div class="list-add-row"><button class="btn btn-ghost btn-full" id="add-client-btn">${svg('plus')} Додати клієнта</button></div>
     </div>
 
     <div class="section-label">Ставки оплати</div>
-    <div class="settings-list" id="rate-list">
-      ${rates.map(r => `
-        <div class="settings-item">
-          <div class="settings-item-info">
-            <div class="settings-item-label">${escHtml(r.name)}</div>
-            <div class="settings-item-sub">${settings.currency_symbol || '$'}${r.rate}/год</div>
-          </div>
-          <div class="settings-item-actions">
-            <button class="btn btn-ghost btn-sm edit-rate-btn" data-id="${r.id}">${svg('edit')}</button>
-            <button class="btn btn-ghost btn-sm delete-rate-btn" data-id="${r.id}" style="color:var(--red);">${svg('trash')}</button>
-          </div>
-        </div>
-      `).join('')}
-      <div class="list-add-row">
-        <button class="btn btn-ghost btn-full" id="add-rate-btn">${svg('plus')} Додати ставку</button>
-      </div>
-    </div>
-  `;
+    <div class="settings-list">
+      ${makeList(rates, 'edit-rate-btn', 'delete-rate-btn', r => `${settings.currency_symbol || '$'}${r.rate}/год`)}
+      <div class="list-add-row"><button class="btn btn-ghost btn-full" id="add-rate-btn">${svg('plus')} Додати ставку</button></div>
+    </div>`;
 
-  // Notification permission
+  // Notification
   document.getElementById('req-notif')?.addEventListener('click', async () => {
     const perm = await Notification.requestPermission();
-    if (perm === 'granted') { showToast('Сповіщення дозволено', 'success'); renderSettingsPage(); }
-    else showToast('Сповіщення відхилено', 'error');
+    showToast(perm === 'granted' ? 'Сповіщення дозволено' : 'Сповіщення відхилено', perm === 'granted' ? 'success' : 'error');
+    if (perm === 'granted') renderSettingsPage();
   });
 
-  // Save general settings
+  // Save general
   document.getElementById('save-general-btn').addEventListener('click', async () => {
     try {
       const saved = await api.saveSettings({
         break_reminder_minutes: document.getElementById('break-reminder-sel').value,
-        currency_symbol: document.getElementById('currency-sym').value.trim() || '$',
-        week_start: document.getElementById('week-start-sel').value,
+        break_return_minutes:   document.getElementById('break-return-sel').value,
+        currency_symbol:        document.getElementById('currency-sym').value.trim() || '$',
+        week_start:             document.getElementById('week-start-sel').value,
       });
       state.settings = saved;
       showToast('Налаштування збережено', 'success');
@@ -926,83 +922,104 @@ function buildSettingsPage(orgs, rates, settings) {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-  // Org CRUD
+  // Orgs
   document.getElementById('add-org-btn').addEventListener('click', () => showOrgModal(null));
   document.querySelectorAll('.edit-org-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const org = state.organizations.find(o => o.id == btn.dataset.id);
-      if (org) showOrgModal(org);
-    });
+    btn.addEventListener('click', () => showOrgModal(state.organizations.find(o => o.id == btn.dataset.id)));
   });
   document.querySelectorAll('.delete-org-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('Видалити організацію?')) return;
-      try {
-        await api.deleteOrganization(btn.dataset.id);
-        state.organizations = state.organizations.filter(o => o.id != btn.dataset.id);
-        showToast('Видалено');
-        renderSettingsPage();
-      } catch (e) { showToast(e.message, 'error'); }
+      try { await api.deleteOrganization(btn.dataset.id); state.organizations = state.organizations.filter(o => o.id != btn.dataset.id); showToast('Видалено'); renderSettingsPage(); }
+      catch (e) { showToast(e.message, 'error'); }
     });
   });
 
-  // Rate CRUD
+  // Clients
+  document.getElementById('add-client-btn').addEventListener('click', () => showClientModal(null));
+  document.querySelectorAll('.edit-client-btn').forEach(btn => {
+    btn.addEventListener('click', () => showClientModal(state.clients.find(c => c.id == btn.dataset.id)));
+  });
+  document.querySelectorAll('.delete-client-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Видалити клієнта?')) return;
+      try { await api.deleteClient(btn.dataset.id); state.clients = state.clients.filter(c => c.id != btn.dataset.id); showToast('Видалено'); renderSettingsPage(); }
+      catch (e) { showToast(e.message, 'error'); }
+    });
+  });
+
+  // Rates
   document.getElementById('add-rate-btn').addEventListener('click', () => showRateModal(null));
   document.querySelectorAll('.edit-rate-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const rate = state.payRates.find(r => r.id == btn.dataset.id);
-      if (rate) showRateModal(rate);
-    });
+    btn.addEventListener('click', () => showRateModal(state.payRates.find(r => r.id == btn.dataset.id)));
   });
   document.querySelectorAll('.delete-rate-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('Видалити ставку?')) return;
-      try {
-        await api.deletePayRate(btn.dataset.id);
-        state.payRates = state.payRates.filter(r => r.id != btn.dataset.id);
-        showToast('Видалено');
-        renderSettingsPage();
-      } catch (e) { showToast(e.message, 'error'); }
+      try { await api.deletePayRate(btn.dataset.id); state.payRates = state.payRates.filter(r => r.id != btn.dataset.id); showToast('Видалено'); renderSettingsPage(); }
+      catch (e) { showToast(e.message, 'error'); }
     });
   });
 }
 
+/* ===== Settings modals ===== */
 function showOrgModal(org) {
   openModal(`
     <div class="modal-handle"></div>
     <div class="modal-title">${org ? 'Редагувати організацію' : 'Нова організація'}</div>
     <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label">Назва *</label>
-        <input type="text" class="form-control" id="org-name" value="${escHtml(org?.name || '')}" placeholder="Назва організації">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Адреса</label>
-        <input type="text" class="form-control" id="org-addr" value="${escHtml(org?.address || '')}" placeholder="Необов'язково">
-      </div>
+      <div class="form-group"><label class="form-label">Назва *</label>
+        <input type="text" class="form-control" id="org-name" value="${escHtml(org?.name || '')}" placeholder="Назва організації"></div>
+      <div class="form-group"><label class="form-label">Адреса</label>
+        <input type="text" class="form-control" id="org-addr" value="${escHtml(org?.address || '')}" placeholder="Необов'язково"></div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" id="org-cancel">Скасувати</button>
-      <button class="btn btn-primary" id="org-save">${svg('check')} Зберегти</button>
-    </div>
-  `);
+      <button class="btn btn-primary"   id="org-save">${svg('check')} Зберегти</button>
+    </div>`);
   document.getElementById('org-cancel').addEventListener('click', closeModal);
   document.getElementById('org-save').addEventListener('click', async () => {
     const name = document.getElementById('org-name').value.trim();
     const address = document.getElementById('org-addr').value.trim();
-    if (!name) { showToast('Введіть назву', 'error'); return; }
+    if (!name) return showToast('Введіть назву', 'error');
     try {
       if (org) {
-        const updated = await api.updateOrganization(org.id, { name, address: address || null });
-        const idx = state.organizations.findIndex(o => o.id === org.id);
-        if (idx >= 0) state.organizations[idx] = updated;
+        const u = await api.updateOrganization(org.id, { name, address: address || null });
+        const i = state.organizations.findIndex(o => o.id === org.id);
+        if (i >= 0) state.organizations[i] = u;
       } else {
-        const created = await api.createOrganization({ name, address: address || null });
-        state.organizations.push(created);
+        state.organizations.push(await api.createOrganization({ name, address: address || null }));
       }
-      closeModal();
-      showToast('Збережено', 'success');
-      renderSettingsPage();
+      closeModal(); showToast('Збережено', 'success'); renderSettingsPage();
+    } catch (e) { showToast(e.message, 'error'); }
+  });
+}
+
+function showClientModal(client) {
+  openModal(`
+    <div class="modal-handle"></div>
+    <div class="modal-title">${client ? 'Редагувати клієнта' : 'Новий клієнт'}</div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Назва *</label>
+        <input type="text" class="form-control" id="client-name" value="${escHtml(client?.name || '')}" placeholder="Назва клієнта"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" id="client-cancel">Скасувати</button>
+      <button class="btn btn-primary"   id="client-save">${svg('check')} Зберегти</button>
+    </div>`);
+  document.getElementById('client-cancel').addEventListener('click', closeModal);
+  document.getElementById('client-save').addEventListener('click', async () => {
+    const name = document.getElementById('client-name').value.trim();
+    if (!name) return showToast('Введіть назву', 'error');
+    try {
+      if (client) {
+        const u = await api.updateClient(client.id, { name });
+        const i = state.clients.findIndex(c => c.id === client.id);
+        if (i >= 0) state.clients[i] = u;
+      } else {
+        state.clients.push(await api.createClient({ name }));
+      }
+      closeModal(); showToast('Збережено', 'success'); renderSettingsPage();
     } catch (e) { showToast(e.message, 'error'); }
   });
 }
@@ -1012,80 +1029,61 @@ function showRateModal(rate) {
     <div class="modal-handle"></div>
     <div class="modal-title">${rate ? 'Редагувати ставку' : 'Нова ставка'}</div>
     <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label">Назва *</label>
-        <input type="text" class="form-control" id="rate-name" value="${escHtml(rate?.name || '')}" placeholder="Напр. Основна, Нічна...">
-      </div>
+      <div class="form-group"><label class="form-label">Назва *</label>
+        <input type="text" class="form-control" id="rate-name" value="${escHtml(rate?.name || '')}" placeholder="Напр. Основна, Нічна..."></div>
       <div class="row">
-        <div class="form-group">
-          <label class="form-label">Ставка/год *</label>
-          <input type="number" class="form-control" id="rate-val" value="${rate?.rate || ''}" min="0.01" step="0.01" placeholder="25.00">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Валюта</label>
-          <input type="text" class="form-control" id="rate-cur" value="${escHtml(rate?.currency || 'USD')}" placeholder="USD">
-        </div>
+        <div class="form-group"><label class="form-label">Ставка/год *</label>
+          <input type="number" class="form-control" id="rate-val" value="${rate?.rate || ''}" min="0.01" step="0.01" placeholder="25.00"></div>
+        <div class="form-group"><label class="form-label">Валюта</label>
+          <input type="text" class="form-control" id="rate-cur" value="${escHtml(rate?.currency || 'USD')}" placeholder="USD"></div>
       </div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" id="rate-cancel">Скасувати</button>
-      <button class="btn btn-primary" id="rate-save">${svg('check')} Зберегти</button>
-    </div>
-  `);
+      <button class="btn btn-primary"   id="rate-save">${svg('check')} Зберегти</button>
+    </div>`);
   document.getElementById('rate-cancel').addEventListener('click', closeModal);
   document.getElementById('rate-save').addEventListener('click', async () => {
-    const name = document.getElementById('rate-name').value.trim();
+    const name    = document.getElementById('rate-name').value.trim();
     const rateVal = parseFloat(document.getElementById('rate-val').value);
     const currency = document.getElementById('rate-cur').value.trim() || 'USD';
-    if (!name) { showToast('Введіть назву', 'error'); return; }
-    if (!rateVal || rateVal <= 0) { showToast('Введіть ставку', 'error'); return; }
+    if (!name)              return showToast('Введіть назву', 'error');
+    if (!rateVal || rateVal <= 0) return showToast('Введіть ставку', 'error');
     try {
       if (rate) {
-        const updated = await api.updatePayRate(rate.id, { name, rate: rateVal, currency });
-        const idx = state.payRates.findIndex(r => r.id === rate.id);
-        if (idx >= 0) state.payRates[idx] = updated;
+        const u = await api.updatePayRate(rate.id, { name, rate: rateVal, currency });
+        const i = state.payRates.findIndex(r => r.id === rate.id);
+        if (i >= 0) state.payRates[i] = u;
       } else {
-        const created = await api.createPayRate({ name, rate: rateVal, currency });
-        state.payRates.push(created);
+        state.payRates.push(await api.createPayRate({ name, rate: rateVal, currency }));
       }
-      closeModal();
-      showToast('Збережено', 'success');
-      renderSettingsPage();
+      closeModal(); showToast('Збережено', 'success'); renderSettingsPage();
     } catch (e) { showToast(e.message, 'error'); }
   });
-}
-
-/* ===== XSS protection ===== */
-function escHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /* ===== Init ===== */
 async function init() {
   startLiveClock();
-
   try {
-    const [orgs, rates, settings] = await Promise.all([
-      api.getOrganizations(), api.getPayRates(), api.getSettings()
+    const [orgs, clients, rates, settings] = await Promise.all([
+      api.getOrganizations(), api.getClients(), api.getPayRates(), api.getSettings()
     ]);
     state.organizations = orgs;
+    state.clients = clients;
     state.payRates = rates;
     state.settings = settings;
-  } catch (e) {
-    console.error('Init error:', e);
-  }
+  } catch (e) { console.error('Init error:', e); }
 
   try {
     state.currentEntry = await api.getCurrentEntry();
-    if (state.currentEntry) scheduleBreakReminder();
-  } catch (e) {
-    state.currentEntry = null;
-  }
+    if (state.currentEntry) {
+      scheduleBreakReminder();
+      if (state.currentEntry.active_break) {
+        scheduleBreakReturnReminder(state.currentEntry.active_break.break_start);
+      }
+    }
+  } catch { state.currentEntry = null; }
 
   renderPage();
 }

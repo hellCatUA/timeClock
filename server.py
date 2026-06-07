@@ -45,6 +45,11 @@ def init_db():
             address TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS pay_rates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -55,16 +60,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS time_entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             organization_id INTEGER,
+            client_id INTEGER,
             pay_rate_id INTEGER,
             clock_in TEXT NOT NULL,
             clock_out TEXT,
             address TEXT,
             latitude REAL,
             longitude REAL,
+            site_id TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (organization_id) REFERENCES organizations(id),
+            FOREIGN KEY (client_id) REFERENCES clients(id),
             FOREIGN KEY (pay_rate_id) REFERENCES pay_rates(id)
         );
         CREATE TABLE IF NOT EXISTS breaks (
@@ -80,9 +88,24 @@ def init_db():
         );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
+            ('break_return_minutes', '10'),
             ('currency_symbol', '$'),
             ('week_start', '1');
         """)
+
+
+def migrate_db():
+    """Non-destructively add new columns to existing databases."""
+    migrations = [
+        "ALTER TABLE time_entries ADD COLUMN client_id INTEGER",
+        "ALTER TABLE time_entries ADD COLUMN site_id TEXT",
+    ]
+    with get_db() as db:
+        for stmt in migrations:
+            try:
+                db.execute(stmt)
+            except Exception:
+                pass  # column already exists
 
 
 def row_to_dict(row):
@@ -98,14 +121,12 @@ def rows_to_list(rows):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def dt_diff_seconds(start_iso, end_iso):
-    """Seconds between two ISO strings."""
     def parse(s):
         s = s.replace("Z", "+00:00")
         try:
             return datetime.fromisoformat(s)
         except ValueError:
             return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-
     try:
         return max(0, int((parse(end_iso) - parse(start_iso)).total_seconds()))
     except Exception:
@@ -119,7 +140,6 @@ def now_iso():
 # ── Router ─────────────────────────────────────────────────────────────────────
 
 def route(path, method, routes):
-    """Return (handler, match_groups) or (None, None)."""
     for pattern, methods, handler in routes:
         if method not in methods:
             continue
@@ -172,6 +192,49 @@ def h_delete_org(req, groups):
     return 200, {"success": True}
 
 
+# ── Clients ────────────────────────────────────────────────────────────────────
+
+def h_get_clients(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("SELECT * FROM clients ORDER BY name").fetchall())
+    return 200, rows
+
+
+def h_post_client(req, _groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name is required"}
+    with get_db() as db:
+        cur = db.execute("INSERT INTO clients (name) VALUES (?)", (name,))
+        row = row_to_dict(db.execute("SELECT * FROM clients WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+
+def h_put_client(req, groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name is required"}
+    cid = groups[0]
+    with get_db() as db:
+        cur = db.execute("UPDATE clients SET name=? WHERE id=?", (name, cid))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+        row = row_to_dict(db.execute("SELECT * FROM clients WHERE id=?", (cid,)).fetchone())
+    return 200, row
+
+
+def h_delete_client(req, groups):
+    with get_db() as db:
+        cur = db.execute("DELETE FROM clients WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+
+# ── Pay Rates ──────────────────────────────────────────────────────────────────
+
 def h_get_rates(req, _groups):
     with get_db() as db:
         rows = rows_to_list(db.execute("SELECT * FROM pay_rates ORDER BY name").fetchall())
@@ -223,10 +286,14 @@ def h_delete_rate(req, groups):
     return 200, {"success": True}
 
 
+# ── Time Entries ───────────────────────────────────────────────────────────────
+
 ENTRY_SELECT = """
-    SELECT e.*, o.name as org_name, p.name as rate_name, p.rate as hourly_rate, p.currency
+    SELECT e.*, o.name as org_name, c.name as client_name,
+           p.name as rate_name, p.rate as hourly_rate, p.currency
     FROM time_entries e
     LEFT JOIN organizations o ON e.organization_id = o.id
+    LEFT JOIN clients c ON e.client_id = c.id
     LEFT JOIN pay_rates p ON e.pay_rate_id = p.id
 """
 
@@ -275,9 +342,10 @@ def h_post_entry(req, _groups):
         if existing:
             return 409, {"error": "Already clocked in", "entry_id": existing["id"]}
         cur = db.execute(
-            "INSERT INTO time_entries (organization_id, pay_rate_id, clock_in, address, latitude, longitude, comment) VALUES (?,?,?,?,?,?,?)",
-            (data.get("organization_id"), data.get("pay_rate_id"), clock_in,
-             data.get("address"), data.get("latitude"), data.get("longitude"), data.get("comment"))
+            "INSERT INTO time_entries (organization_id, client_id, pay_rate_id, clock_in, address, latitude, longitude, site_id, comment) VALUES (?,?,?,?,?,?,?,?,?)",
+            (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
+             clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
+             data.get("site_id"), data.get("comment"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -293,17 +361,19 @@ def h_put_entry(req, groups):
             return 404, {"error": "Not found"}
         db.execute("""
             UPDATE time_entries SET
-                organization_id=?, pay_rate_id=?, clock_in=?, clock_out=?,
-                address=?, latitude=?, longitude=?, comment=?
+                organization_id=?, client_id=?, pay_rate_id=?, clock_in=?, clock_out=?,
+                address=?, latitude=?, longitude=?, site_id=?, comment=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
+            data.get("client_id", ex.get("client_id")),
             data.get("pay_rate_id", ex["pay_rate_id"]),
             data.get("clock_in", ex["clock_in"]),
             data.get("clock_out", ex["clock_out"]),
             data.get("address", ex["address"]),
             data.get("latitude", ex["latitude"]),
             data.get("longitude", ex["longitude"]),
+            data.get("site_id", ex.get("site_id")),
             data.get("comment", ex["comment"]),
             eid
         ))
@@ -372,6 +442,8 @@ def h_delete_entry(req, groups):
     return 200, {"success": True}
 
 
+# ── Settings ───────────────────────────────────────────────────────────────────
+
 def h_get_settings(req, _groups):
     with get_db() as db:
         rows = db.execute("SELECT key, value FROM settings").fetchall()
@@ -387,6 +459,8 @@ def h_put_settings(req, _groups):
     return 200, {r["key"]: r["value"] for r in rows}
 
 
+# ── Reports ────────────────────────────────────────────────────────────────────
+
 def h_week_report(req, _groups):
     params = req.get("query", {})
     date_str = params.get("date", [None])[0]
@@ -401,13 +475,11 @@ def h_week_report(req, _groups):
         ref = datetime.now(timezone.utc)
 
     ref = ref.replace(hour=0, minute=0, second=0, microsecond=0)
-    current_weekday = ref.weekday()  # 0=Monday
-    # Convert week_start_day (0=Sunday,1=Monday) to Python weekday
-    start_weekday = (week_start_day - 1) % 7  # 0=Mon for week_start=1
+    current_weekday = ref.weekday()
+    start_weekday = (week_start_day - 1) % 7
     diff = (current_weekday - start_weekday) % 7
-    week_start = ref.replace(hour=0, minute=0, second=0, microsecond=0)
     from datetime import timedelta
-    week_start = week_start - timedelta(days=diff)
+    week_start = ref - timedelta(days=diff)
     week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
 
     ws_iso = week_start.isoformat()
@@ -463,7 +535,7 @@ def h_export_csv(req, _groups):
         rows = rows_to_list(db.execute(sql, args).fetchall())
 
     DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    lines = ["Date,Day,Organization,Pay Rate,Hourly Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Earnings,Address,Comment"]
+    lines = ["Date,Day,Organization,Client,Site ID,Pay Rate,Hourly Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Earnings,Address,Comment"]
 
     def fmth(s):
         return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
@@ -504,6 +576,8 @@ def h_export_csv(req, _groups):
             cell(fmt_date(e["clock_in"])),
             cell(day_name),
             cell(e["org_name"] or ""),
+            cell(e["client_name"] or ""),
+            cell(e.get("site_id") or ""),
             cell(e["rate_name"] or ""),
             cell(e["hourly_rate"] or ""),
             cell(e["currency"] or ""),
@@ -518,44 +592,45 @@ def h_export_csv(req, _groups):
         ]))
 
     th = total_net // 3600; tm = (total_net % 3600) // 60
-    lines.append(f'"","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","",""')
-    return "csv", "﻿" + "\n".join(lines)
+    lines.append(f'"","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","",""')
+    return "csv", "\n".join(lines)
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
+ROUTES = [
+    (r"/api/entries/current",           ["GET"],    h_get_current),
+    (r"/api/entries",                   ["GET"],    h_get_entries),
+    (r"/api/entries",                   ["POST"],   h_post_entry),
+    (r"/api/entries/(\d+)",             ["PUT"],    h_put_entry),
+    (r"/api/entries/(\d+)/clockout",    ["POST"],   h_clockout),
+    (r"/api/entries/(\d+)/break/start", ["POST"],   h_start_break),
+    (r"/api/entries/(\d+)/break/end",   ["POST"],   h_end_break),
+    (r"/api/entries/(\d+)",             ["DELETE"], h_delete_entry),
+    (r"/api/organizations",             ["GET"],    h_get_orgs),
+    (r"/api/organizations",             ["POST"],   h_post_org),
+    (r"/api/organizations/(\d+)",       ["PUT"],    h_put_org),
+    (r"/api/organizations/(\d+)",       ["DELETE"], h_delete_org),
+    (r"/api/clients",                   ["GET"],    h_get_clients),
+    (r"/api/clients",                   ["POST"],   h_post_client),
+    (r"/api/clients/(\d+)",             ["PUT"],    h_put_client),
+    (r"/api/clients/(\d+)",             ["DELETE"], h_delete_client),
+    (r"/api/pay-rates",                 ["GET"],    h_get_rates),
+    (r"/api/pay-rates",                 ["POST"],   h_post_rate),
+    (r"/api/pay-rates/(\d+)",           ["PUT"],    h_put_rate),
+    (r"/api/pay-rates/(\d+)",           ["DELETE"], h_delete_rate),
+    (r"/api/settings",                  ["GET"],    h_get_settings),
+    (r"/api/settings",                  ["PUT"],    h_put_settings),
+    (r"/api/reports/week",              ["GET"],    h_week_report),
+    (r"/api/reports/export/csv",        ["GET"],    h_export_csv),
+]
 
 
 # ── Request handler ─────────────────────────────────────────────────────────────
 
-ROUTES = [
-    # entries
-    (r"/api/entries/current",        ["GET"],    h_get_current),
-    (r"/api/entries",                ["GET"],    h_get_entries),
-    (r"/api/entries",                ["POST"],   h_post_entry),
-    (r"/api/entries/(\d+)",          ["PUT"],    h_put_entry),
-    (r"/api/entries/(\d+)/clockout", ["POST"],   h_clockout),
-    (r"/api/entries/(\d+)/break/start", ["POST"], h_start_break),
-    (r"/api/entries/(\d+)/break/end",   ["POST"], h_end_break),
-    (r"/api/entries/(\d+)",          ["DELETE"], h_delete_entry),
-    # organizations
-    (r"/api/organizations",          ["GET"],    h_get_orgs),
-    (r"/api/organizations",          ["POST"],   h_post_org),
-    (r"/api/organizations/(\d+)",    ["PUT"],    h_put_org),
-    (r"/api/organizations/(\d+)",    ["DELETE"], h_delete_org),
-    # pay rates
-    (r"/api/pay-rates",              ["GET"],    h_get_rates),
-    (r"/api/pay-rates",              ["POST"],   h_post_rate),
-    (r"/api/pay-rates/(\d+)",        ["PUT"],    h_put_rate),
-    (r"/api/pay-rates/(\d+)",        ["DELETE"], h_delete_rate),
-    # settings
-    (r"/api/settings",               ["GET"],    h_get_settings),
-    (r"/api/settings",               ["PUT"],    h_put_settings),
-    # reports
-    (r"/api/reports/week",           ["GET"],    h_week_report),
-    (r"/api/reports/export/csv",     ["GET"],    h_export_csv),
-]
-
-
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # silence default access log
+        pass
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -580,7 +655,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_csv(self, content):
         fn = f"timeclock-export-{datetime.now().strftime('%Y-%m-%d')}.csv"
-        data = content.encode("utf-8-sig")
+        data = ("﻿" + content).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
         self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
@@ -589,7 +664,6 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _serve_static(self, path):
-        # Sanitize path
         rel = path.lstrip("/") or "index.html"
         file_path = (PUBLIC / rel).resolve()
         try:
@@ -600,7 +674,6 @@ class Handler(BaseHTTPRequestHandler):
         if file_path.is_dir():
             file_path = file_path / "index.html"
         if not file_path.exists():
-            # SPA fallback
             file_path = PUBLIC / "index.html"
         suffix = file_path.suffix.lower()
         mime = MIME.get(suffix, "application/octet-stream")
@@ -644,7 +717,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(status, result)
 
     def do_GET(self):    self.handle_request("GET")
-    def do_HEAD(self):   self.handle_request("GET")  # serve same as GET, body omitted by BaseHTTP
+    def do_HEAD(self):   self.handle_request("GET")
     def do_POST(self):   self.handle_request("POST")
     def do_PUT(self):    self.handle_request("PUT")
     def do_DELETE(self): self.handle_request("DELETE")
@@ -658,6 +731,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     init_db()
+    migrate_db()
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"TimeClock running on http://localhost:{PORT}")
     try:

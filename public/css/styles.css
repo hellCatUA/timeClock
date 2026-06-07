@@ -503,6 +503,30 @@ textarea.form-control { resize: vertical; min-height: 80px; }
 .notif-prompt svg { width: 18px; height: 18px; flex-shrink: 0; }
 .notif-prompt .btn { flex-shrink: 0; }
 
+/* ===== Time Selector ===== */
+.time-selector { margin-top: 4px; }
+.time-sel-label { font-size: 13px; color: var(--text2); font-weight: 500; margin-bottom: 8px; }
+.time-sel-row { display: flex; gap: 8px; }
+.time-sel-row .btn { flex: 1; }
+
+.time-sel-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.time-adj-btn {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 2px !important;
+  padding: 10px 8px !important;
+  font-size: 14px !important;
+}
+.time-adj-btn span { font-size: 12px; color: var(--green); font-weight: 700; }
+
+.flex-1 { flex: 1; }
+
 /* ===== Responsive tweaks ===== */
 @media (min-width: 480px) {
   .elapsed-time { font-size: 5rem; }
