@@ -21,6 +21,11 @@ const api = (() => {
     clockOut:           (id, d)  => req('POST',   `/api/entries/${id}/clockout`, d),
     updateEntry:        (id, d)  => req('PUT',    `/api/entries/${id}`, d),
     deleteEntry:        (id)     => req('DELETE', `/api/entries/${id}`),
+
+    // Photos
+    getPhotos:          (id)      => req('GET',    `/api/entries/${id}/photos`),
+    uploadPhoto:        (id, d)   => req('POST',   `/api/entries/${id}/photos`, d),
+    deletePhoto:        (id, pid) => req('DELETE', `/api/entries/${id}/photos/${pid}`),
     startBreak:         (id, d)  => req('POST',   `/api/entries/${id}/break/start`, d),
     endBreak:           (id, d)  => req('POST',   `/api/entries/${id}/break/end`, d),
 

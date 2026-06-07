@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """TimeClock backend — stdlib only (sqlite3 + http.server)."""
 
+import base64
+import ftplib
 import json
 import os
 import re
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -23,7 +26,13 @@ MIME = {
     ".ico":  "image/x-icon",
     ".png":  "image/png",
     ".svg":  "image/svg+xml",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif":  "image/gif",
 }
+
+UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(Path(__file__).parent / "uploads")))
 
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -110,6 +119,16 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS entry_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (entry_id) REFERENCES time_entries(id) ON DELETE CASCADE
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -119,7 +138,13 @@ def init_db():
             ('breaks_enabled', '1'),
             ('paid_breaks', '0'),
             ('break_frequency_minutes', '120'),
-            ('break_length_minutes', '15');
+            ('break_length_minutes', '15'),
+            ('ftp_enabled', '0'),
+            ('ftp_host', ''),
+            ('ftp_port', '21'),
+            ('ftp_user', ''),
+            ('ftp_password', ''),
+            ('ftp_path', '/timeclock/photos');
         """)
 
 
@@ -157,6 +182,12 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('paid_breaks', '0')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_frequency_minutes', '120')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_length_minutes', '15')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_enabled', '0')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_host', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_port', '21')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_user', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_password', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_path', '/timeclock/photos')",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -174,6 +205,32 @@ def row_to_dict(row):
 
 def rows_to_list(rows):
     return [dict(r) for r in rows]
+
+
+def ftp_sync_photo(local_path, remote_filename, settings):
+    if settings.get('ftp_enabled') != '1' or not settings.get('ftp_host', '').strip():
+        return False
+    try:
+        ftp = ftplib.FTP()
+        ftp.connect(settings['ftp_host'], int(settings.get('ftp_port', 21)), timeout=15)
+        ftp.login(settings.get('ftp_user', ''), settings.get('ftp_password', ''))
+        remote_dir = settings.get('ftp_path', '/timeclock/photos').rstrip('/')
+        # Create directory tree
+        parts = remote_dir.lstrip('/').split('/')
+        ftp.cwd('/')
+        for part in parts:
+            try:
+                ftp.cwd(part)
+            except ftplib.error_perm:
+                ftp.mkd(part)
+                ftp.cwd(part)
+        with open(local_path, 'rb') as f:
+            ftp.storbinary(f'STOR {remote_filename}', f)
+        ftp.quit()
+        return True
+    except Exception as exc:
+        print(f"FTP sync failed: {exc}", file=sys.stderr)
+        return False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -589,6 +646,82 @@ def h_delete_entry(req, groups):
     return 200, {"success": True}
 
 
+# ── Photos ─────────────────────────────────────────────────────────────────────
+
+def h_get_photos(req, groups):
+    eid = groups[0]
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=? ORDER BY created_at", (eid,)
+        ).fetchall())
+    for r in rows:
+        r['url'] = f"/uploads/{eid}/{r['filename']}"
+    return 200, rows
+
+
+def h_post_photo(req, groups):
+    eid = groups[0]
+    data = req.get("body", {})
+    photo_type = (data.get("photo_type") or "before").strip()
+    b64data = data.get("data", "")
+    original_name = (data.get("filename") or "photo.jpg").strip()
+    mime = (data.get("mime") or "image/jpeg").lower()
+
+    if not b64data:
+        return 400, {"error": "No image data"}
+    try:
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return 400, {"error": "Invalid base64 data"}
+
+    ext = ".jpg"
+    if "png" in mime:
+        ext = ".png"
+    elif "webp" in mime:
+        ext = ".webp"
+    elif "gif" in mime:
+        ext = ".gif"
+
+    safe_name = f"{photo_type}_{uuid.uuid4().hex[:10]}{ext}"
+    entry_dir = UPLOADS_DIR / str(eid)
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    file_path = entry_dir / safe_name
+    file_path.write_bytes(img_bytes)
+
+    with get_db() as db:
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+
+    ftp_synced = 1 if ftp_sync_photo(str(file_path), f"{eid}_{safe_name}", settings) else 0
+
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO entry_photos (entry_id, photo_type, filename, original_name, ftp_synced) VALUES (?, ?, ?, ?, ?)",
+            (eid, photo_type, safe_name, original_name, ftp_synced)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM entry_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+
+    row['url'] = f"/uploads/{eid}/{safe_name}"
+    return 201, row
+
+
+def h_delete_photo(req, groups):
+    eid, photo_id = groups
+    with get_db() as db:
+        photo = row_to_dict(db.execute(
+            "SELECT * FROM entry_photos WHERE id=? AND entry_id=?", (photo_id, eid)
+        ).fetchone())
+        if not photo:
+            return 404, {"error": "Not found"}
+        db.execute("DELETE FROM entry_photos WHERE id=?", (photo_id,))
+
+    file_path = UPLOADS_DIR / str(eid) / photo['filename']
+    try:
+        file_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return 200, {"success": True}
+
+
 # ── Settings ───────────────────────────────────────────────────────────────────
 
 def h_get_settings(req, _groups):
@@ -828,6 +961,9 @@ ROUTES = [
     (r"/api/entries/(\d+)/break/start", ["POST"],   h_start_break),
     (r"/api/entries/(\d+)/break/end",   ["POST"],   h_end_break),
     (r"/api/entries/(\d+)",             ["DELETE"], h_delete_entry),
+    (r"/api/entries/(\d+)/photos",          ["GET"],    h_get_photos),
+    (r"/api/entries/(\d+)/photos",          ["POST"],   h_post_photo),
+    (r"/api/entries/(\d+)/photos/(\d+)",    ["DELETE"], h_delete_photo),
     (r"/api/organizations",             ["GET"],    h_get_orgs),
     (r"/api/organizations",             ["POST"],   h_post_org),
     (r"/api/organizations/(\d+)",       ["PUT"],    h_put_org),
@@ -886,6 +1022,26 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _serve_static(self, path):
+        if path.startswith('/uploads/'):
+            rel = path[len('/uploads/'):]
+            file_path = (UPLOADS_DIR / rel).resolve()
+            try:
+                file_path.relative_to(UPLOADS_DIR.resolve())
+            except ValueError:
+                self._send(403, {"error": "Forbidden"})
+                return
+            if not file_path.exists():
+                self._send(404, {"error": "Not found"})
+                return
+            img_mime = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                        '.gif': 'image/gif', '.webp': 'image/webp'}.get(file_path.suffix.lower(), 'application/octet-stream')
+            data = file_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", img_mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         rel = path.lstrip("/") or "index.html"
         file_path = (PUBLIC / rel).resolve()
         try:
@@ -954,6 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     migrate_db()
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"TimeClock running on http://localhost:{PORT}")
     try:

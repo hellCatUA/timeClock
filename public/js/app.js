@@ -152,6 +152,156 @@ function showToast(msg, type='', duration=2500) {
   toastTimer = setTimeout(() => el.classList.add('hidden'), duration);
 }
 
+/* ── Photo helpers ──────────────────────────────────────────────── */
+function compressImage(file, maxPx = 1920, quality = 0.82) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxPx || height > maxPx) {
+        if (width >= height) { height = Math.round(height * maxPx / width); width = maxPx; }
+        else { width = Math.round(width * maxPx / height); height = maxPx; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+}
+
+async function uploadPhoto(entryId, file, photoType) {
+  const blob = await compressImage(file);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const b64 = e.target.result.split(',')[1];
+        const result = await api.uploadPhoto(entryId, {
+          data: b64, filename: file.name, photo_type: photoType, mime: 'image/jpeg'
+        });
+        resolve(result);
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error('File read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function buildPhotoSlot(photoType, label, photo = null) {
+  const sym = svg('camera');
+  if (photo) {
+    return `<div class="photo-slot has-photo" data-type="${photoType}" data-photo-id="${photo.id}">
+      <img class="photo-thumb" src="${escHtml(photo.url)}" alt="${escHtml(label)}">
+      <div class="photo-slot-label">${escHtml(label)}</div>
+      <button class="photo-delete-btn" data-photo-id="${photo.id}" aria-label="Delete photo">×</button>
+    </div>`;
+  }
+  return `<div class="photo-slot empty" data-type="${photoType}">
+    <label class="photo-upload-zone" for="photo-inp-${photoType}">
+      ${sym}
+      <span>${escHtml(label)}</span>
+    </label>
+    <input type="file" accept="image/*;capture=camera" class="photo-input visually-hidden" id="photo-inp-${photoType}" data-type="${photoType}">
+  </div>`;
+}
+
+function renderPhotoSlots(container, entryId, photos) {
+  const photoMap = {};
+  photos.forEach(p => { photoMap[p.photo_type] = p; });
+
+  const slots = [
+    { type: 'before',       label: 'Before Photo' },
+    { type: 'serial_before',label: 'Serial Numbers (Before)' },
+    { type: 'after',        label: 'After Photo' },
+  ];
+  // new_serial slot added dynamically when replacement toggle is on
+
+  container.querySelectorAll('.photo-slot-wrap[data-always]').forEach(wrap => {
+    const type = wrap.dataset.type;
+    wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photoMap[type] || null);
+  });
+
+  const newSerialWrap = container.querySelector('.photo-slot-wrap[data-type="new_serial"]');
+  if (newSerialWrap) {
+    newSerialWrap.innerHTML = buildPhotoSlot('new_serial', 'New Serial Numbers', photoMap['new_serial'] || null);
+  }
+
+  // Wire up file inputs and delete buttons
+  container.querySelectorAll('.photo-input').forEach(inp => {
+    inp.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const type = inp.dataset.type;
+      const wrap = inp.closest('.photo-slot-wrap');
+      inp.disabled = true;
+      wrap.querySelector('.photo-upload-zone')?.classList.add('uploading');
+      try {
+        const photo = await uploadPhoto(entryId, file, type);
+        wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photo);
+        rewirePhotoSlot(wrap, entryId);
+        showToast('Photo uploaded', 'success');
+      } catch (err) {
+        showToast(err.message || 'Upload failed', 'error');
+        inp.disabled = false;
+        wrap.querySelector('.photo-upload-zone')?.classList.remove('uploading');
+      }
+    });
+  });
+
+  container.querySelectorAll('.photo-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const photoId = btn.dataset.photoId;
+      const slot = btn.closest('.photo-slot');
+      const wrap = slot.closest('.photo-slot-wrap');
+      try {
+        await api.deletePhoto(entryId, photoId);
+        wrap.innerHTML = buildPhotoSlot(wrap.dataset.type, wrap.dataset.label, null);
+        rewirePhotoSlot(wrap, entryId);
+        showToast('Photo deleted', 'success');
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  });
+}
+
+function rewirePhotoSlot(wrap, entryId) {
+  const inp = wrap.querySelector('.photo-input');
+  if (!inp) return;
+  inp.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const type = inp.dataset.type;
+    inp.disabled = true;
+    wrap.querySelector('.photo-upload-zone')?.classList.add('uploading');
+    try {
+      const photo = await uploadPhoto(entryId, file, type);
+      wrap.innerHTML = buildPhotoSlot(type, wrap.dataset.label, photo);
+      rewirePhotoSlot(wrap, entryId);
+      showToast('Photo uploaded', 'success');
+    } catch (err) {
+      showToast(err.message || 'Upload failed', 'error');
+      inp.disabled = false;
+      wrap.querySelector('.photo-upload-zone')?.classList.remove('uploading');
+    }
+  });
+  const deleteBtn = wrap.querySelector('.photo-delete-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', async () => {
+      const photoId = deleteBtn.dataset.photoId;
+      try {
+        await api.deletePhoto(entryId, photoId);
+        wrap.innerHTML = buildPhotoSlot(wrap.dataset.type, wrap.dataset.label, null);
+        rewirePhotoSlot(wrap, entryId);
+        showToast('Photo deleted', 'success');
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  }
+}
+
 /* ── Modal ──────────────────────────────────────────────────────── */
 function openModal(html) {
   document.getElementById('modal-body').innerHTML = html;
@@ -616,30 +766,43 @@ function renderActiveClockPage() {
       <span>Pictures</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-pictures" class="card sec-body">
-      <div class="photo-notice">${svg('camera')} Photo upload — configure FTP / NextCloud in Settings</div>
       <div class="subsection-label">Before</div>
-      <div class="photo-placeholder"><span>${svg('camera')} Before Photo</span></div>
-      <div class="photo-placeholder"><span>${svg('camera')} Serial Numbers <span class="opt-label">optional</span></span></div>
-      <div class="form-group" style="margin-top:8px;">
-        <label class="form-label">Issues / Additional Info <span class="opt-label">optional</span></label>
-        <textarea class="form-control" id="jd-additional" rows="2" placeholder="Describe any issues...">${escHtml(entry.additional_info||'')}</textarea>
+      <div class="photo-grid" id="photos-before-grid">
+        <div class="photo-slot-wrap" data-type="before" data-label="Before Photo" data-always="1">
+          <div class="photo-slot empty" data-type="before">
+            <label class="photo-upload-zone photo-loading" for="photo-inp-before">${svg('camera')}<span>Loading...</span></label>
+          </div>
+        </div>
+        <div class="photo-slot-wrap" data-type="serial_before" data-label="Serial Numbers" data-always="1">
+          <div class="photo-slot empty" data-type="serial_before">
+            <label class="photo-upload-zone photo-loading" for="photo-inp-serial_before">${svg('camera')}<span>Loading...</span></label>
+          </div>
+        </div>
       </div>
       <div class="divider"></div>
       <div class="subsection-label">After</div>
-      <div class="photo-placeholder"><span>${svg('camera')} After Photo</span></div>
-      <div class="form-group">
+      <div class="photo-grid">
+        <div class="photo-slot-wrap" data-type="after" data-label="After Photo" data-always="1">
+          <div class="photo-slot empty" data-type="after">
+            <label class="photo-upload-zone photo-loading" for="photo-inp-after">${svg('camera')}<span>Loading...</span></label>
+          </div>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:8px;">
         <div class="toggle-row">
           <label class="form-label" style="margin:0;">Removal / Replacement?</label>
           <label class="switch"><input type="checkbox" id="jd-replacement" ${entry.is_replacement?'checked':''}><span class="slider"></span></label>
         </div>
       </div>
       <div id="replacement-fields" class="${entry.is_replacement?'':'hidden'}">
-        <div class="photo-placeholder"><span>${svg('camera')} New Serial Numbers</span></div>
-        <div class="form-group">
-          <label class="form-label">Old Serial Numbers</label>
-          <textarea class="form-control" id="jd-old-serial" rows="2">${escHtml(entry.old_serial||'')}</textarea>
+        <div class="photo-grid">
+          <div class="photo-slot-wrap" data-type="new_serial" data-label="New Serial Numbers">
+            <div class="photo-slot empty" data-type="new_serial">
+              <label class="photo-upload-zone photo-loading" for="photo-inp-new_serial">${svg('camera')}<span>Loading...</span></label>
+            </div>
+          </div>
         </div>
-        <div class="form-group">
+        <div class="form-group" style="margin-top:8px;">
           <label class="form-label">Return Track #</label>
           <div class="input-row">
             <input type="text" class="form-control" id="jd-return-track" value="${escHtml(entry.return_track||'')}" ${entry.no_return_track?'disabled':''}>
@@ -767,6 +930,10 @@ function renderActiveClockPage() {
   let noReturn = !!entry.no_return_track;
   document.getElementById('jd-replacement').addEventListener('change', e => {
     document.getElementById('replacement-fields').classList.toggle('hidden', !e.target.checked);
+    if (e.target.checked) {
+      const newSerialWrap = document.querySelector('.photo-slot-wrap[data-type="new_serial"]');
+      if (newSerialWrap) rewirePhotoSlot(newSerialWrap, entry.id);
+    }
   });
   document.getElementById('no-return-btn')?.addEventListener('click', () => {
     noReturn = !noReturn;
@@ -780,13 +947,25 @@ function renderActiveClockPage() {
   document.getElementById('save-pictures-btn').addEventListener('click', () => {
     const isReplacement = document.getElementById('jd-replacement').checked;
     saveSection(entry, {
-      additional_info: document.getElementById('jd-additional').value.trim() || null,
       is_replacement:  isReplacement,
-      old_serial:      isReplacement ? document.getElementById('jd-old-serial')?.value.trim() || null : null,
       return_track:    (!noReturn && isReplacement) ? document.getElementById('jd-return-track')?.value.trim() || null : null,
       no_return_track: noReturn && isReplacement,
     });
   });
+
+  // Load photos for this entry
+  (async () => {
+    try {
+      const photos = await api.getPhotos(entry.id);
+      const picSection = document.getElementById('sec-pictures');
+      renderPhotoSlots(picSection, entry.id, photos);
+    } catch (e) {
+      // fail silently
+      document.getElementById('sec-pictures').querySelectorAll('.photo-loading').forEach(el => {
+        el.classList.remove('photo-loading');
+      });
+    }
+  })();
 
   // Work summary
   document.getElementById('jd-work-summary').addEventListener('input', e => {

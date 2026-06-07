@@ -379,6 +379,51 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .photo-placeholder span { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text3); }
 .photo-placeholder svg { width: 16px; height: 16px; }
 
+/* ===== Photo Slots ===== */
+.photo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.photo-slot-wrap { position: relative; }
+.photo-slot { border-radius: 10px; overflow: hidden; position: relative; aspect-ratio: 4/3; background: var(--bg3); }
+.photo-upload-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  color: var(--text3);
+  font-size: 12px;
+  text-align: center;
+  padding: 8px;
+  transition: background .15s;
+}
+.photo-upload-zone:active, .photo-upload-zone:hover { background: var(--bg4); color: var(--text2); }
+.photo-upload-zone svg { width: 24px; height: 24px; }
+.photo-upload-zone.uploading { opacity: 0.5; pointer-events: none; }
+.photo-upload-zone.photo-loading { opacity: 0.4; pointer-events: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.photo-slot.has-photo .photo-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-slot-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 10px; padding: 3px 6px; }
+.photo-delete-btn {
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: rgba(0,0,0,.6);
+  color: #fff;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+
 /* ===== Material Row ===== */
 .material-row {
   display: flex;
