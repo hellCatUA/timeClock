@@ -2,14 +2,15 @@
 const state = {
   page: 'clock',
   currentEntry: null,
+  lastCompletedEntry: null,
   organizations: [],
   clients: [],
   payRates: [],
   settings: {},
   elapsedInterval: null,
   breakElapsedInterval: null,
-  reminderTimeout: null,       // break-due reminder (configurable interval)
-  breakReturnTimeout: null,    // 10-min return-from-break reminder
+  reminderTimeout: null,
+  breakReturnTimeout: null,
   showReminderBanner: false,
   showBreakReturnBanner: false,
   reportWeekDate: new Date(),
@@ -17,63 +18,57 @@ const state = {
 };
 
 /* ===== Time helpers ===== */
-
 function roundTo5(date) {
   const ms = Math.round(date.getTime() / (5 * 60 * 1000)) * (5 * 60 * 1000);
   return new Date(ms);
 }
-
 function adjustedTime(offsetMinutes) {
   return roundTo5(new Date(Date.now() + offsetMinutes * 60000));
 }
-
 function fmtHHMM(date) {
   return date.toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
 }
-
 function fmtDuration(totalSec) {
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
-
 function fmtDurationShort(totalSec) {
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   return h > 0 ? `${h}г ${m}хв` : `${m}хв`;
 }
-
 function fmtMoney(amount) {
   const sym = state.settings.currency_symbol || '$';
   if (amount == null) return '—';
   return sym + amount.toFixed(2);
 }
-
 function fmtTime(isoStr) {
   if (!isoStr) return '—';
   return new Date(isoStr).toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
 }
-
 function fmtDateShort(isoStr) {
   if (!isoStr) return '—';
   return new Date(isoStr).toLocaleDateString('uk-UA', { day: 'numeric', month: 'short' });
 }
-
 function localISOString(date) {
   const d = date || new Date();
   const pad = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-
 function toISOFull(localStr) {
   return new Date(localStr).toISOString();
 }
-
 function escHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function parseMaterials(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try { return JSON.parse(raw); } catch { return []; }
 }
 
 /* ===== Icons ===== */
@@ -103,6 +98,9 @@ const ICONS = {
   print:    '<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
   hash:     '<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="10" y1="3" x2="8" y2="21"/><line x1="16" y1="3" x2="14" y2="21"/>',
   return:   '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+  copy:     '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  tool:     '<circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>',
+  wrench:   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -170,7 +168,6 @@ function clearTimers() {
 
 /* ===================================================================
    TIME SELECTOR — reusable two-step widget
-   Renders into `containerId`. Calls `onConfirm(isoString)` when done.
    =================================================================== */
 function renderTimeSelector(containerId, label, onConfirm) {
   const container = document.getElementById(containerId);
@@ -236,13 +233,15 @@ async function renderClockPage() {
     state.currentEntry = null;
   }
   if (state.currentEntry) renderActiveClockPage();
+  else if (state.lastCompletedEntry) renderSummaryPage();
   else renderIdleClockPage();
 }
 
+/* ===== Idle Clock Page ===== */
 function renderIdleClockPage() {
-  const orgs  = state.organizations;
+  const orgs    = state.organizations;
   const clients = state.clients;
-  const rates = state.payRates;
+  const rates   = state.payRates;
 
   const orgOpts    = orgs.map(o    => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
   const clientOpts = clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
@@ -271,11 +270,22 @@ function renderIdleClockPage() {
           <input type="text" class="form-control" id="site-id-input" placeholder="Ідентифікатор об'єкта...">
         </div>
         <div class="form-group">
+          <label class="form-label">Тип оплати</label>
+          <div class="toggle-group" id="rate-type-toggle">
+            <button class="toggle-btn active" data-type="hourly">Погодинна</button>
+            <button class="toggle-btn" data-type="flat">Фіксована</button>
+          </div>
+        </div>
+        <div class="form-group" id="hourly-rate-group">
           <label class="form-label">Ставка оплати</label>
           <select class="form-control" id="rate-select">
             <option value="">— Без ставки —</option>
             ${rateOpts}
           </select>
+        </div>
+        <div class="form-group hidden" id="flat-rate-group">
+          <label class="form-label">Фіксована сума (${state.settings.currency_symbol || '$'})</label>
+          <input type="number" class="form-control" id="flat-amount-input" min="0" step="0.01" placeholder="0.00">
         </div>
         <div class="form-group">
           <label class="form-label">Адреса</label>
@@ -285,14 +295,21 @@ function renderIdleClockPage() {
           </div>
           <div id="geo-status" style="font-size:12px;color:var(--text3);margin-top:4px;"></div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Коментар</label>
-          <textarea class="form-control" id="comment-input" placeholder="Необов'язково..." rows="2"></textarea>
-        </div>
 
         <div id="clockin-time-selector"></div>
       </div>
     </div>`;
+
+  // Rate type toggle
+  let rateType = 'hourly';
+  document.getElementById('rate-type-toggle').addEventListener('click', e => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    rateType = btn.dataset.type;
+    document.querySelectorAll('#rate-type-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('hourly-rate-group').classList.toggle('hidden', rateType === 'flat');
+    document.getElementById('flat-rate-group').classList.toggle('hidden', rateType === 'hourly');
+  });
 
   // Geolocation
   let geoCoords = null;
@@ -324,21 +341,23 @@ function renderIdleClockPage() {
     const container = document.getElementById('clockin-time-selector');
     container.innerHTML = '<div style="text-align:center;color:var(--text2);padding:12px;">Зберігаємо...</div>';
     try {
-      const org     = document.getElementById('org-select').value;
-      const client  = document.getElementById('client-select').value;
-      const rate    = document.getElementById('rate-select').value;
-      const addr    = document.getElementById('addr-input').value.trim();
-      const siteId  = document.getElementById('site-id-input').value.trim();
-      const comment = document.getElementById('comment-input').value.trim();
+      const org       = document.getElementById('org-select').value;
+      const client    = document.getElementById('client-select').value;
+      const rate      = document.getElementById('rate-select').value;
+      const flatAmt   = parseFloat(document.getElementById('flat-amount-input').value) || null;
+      const addr      = document.getElementById('addr-input').value.trim();
+      const siteId    = document.getElementById('site-id-input').value.trim();
 
       state.currentEntry = await api.clockIn({
         clock_in: clockInISO,
         organization_id: org    ? Number(org)    : null,
         client_id:       client ? Number(client) : null,
-        pay_rate_id:     rate   ? Number(rate)   : null,
-        address:  addr    || null,
-        site_id:  siteId  || null,
-        comment:  comment || null,
+        pay_rate_id:     (rateType === 'hourly' && rate) ? Number(rate) : null,
+        rate_type:       rateType,
+        flat_amount:     rateType === 'flat' ? flatAmt : null,
+        address:  addr   || null,
+        site_id:  siteId || null,
+        status:   'pending',
         latitude:  geoCoords?.lat || null,
         longitude: geoCoords?.lng || null,
       });
@@ -354,13 +373,16 @@ function renderIdleClockPage() {
   });
 }
 
+/* ===== Active Clock Page ===== */
 function renderActiveClockPage() {
   const entry = state.currentEntry;
   if (!entry) { renderIdleClockPage(); return; }
 
-  const onBreak = !!entry.active_break;
-  const org = entry.org_name || '';
-  const client = entry.client_name || '';
+  const onBreak  = !!entry.active_break;
+  const org      = entry.org_name || '';
+  const client   = entry.client_name || '';
+  const isFlat   = entry.rate_type === 'flat';
+  const materials = parseMaterials(entry.materials);
 
   document.getElementById('page').innerHTML = `
     ${state.showReminderBanner ? `
@@ -373,7 +395,7 @@ function renderActiveClockPage() {
     ${state.showBreakReturnBanner ? `
     <div class="reminder-banner" style="border-color:var(--green);background:var(--green-bg);">
       ${svg('return')}
-      <p style="color:var(--green);">Перерва 10 хвилин — час повертатись!</p>
+      <p style="color:var(--green);">Перерва — час повертатись!</p>
       <button class="btn btn-primary btn-sm" id="end-break-banner-btn">Повернутись</button>
     </div>` : ''}
 
@@ -383,10 +405,13 @@ function renderActiveClockPage() {
         ${onBreak ? 'На перерві' : 'Працюю'}
       </div>
       <div class="elapsed-time" id="elapsed-display">00:00:00</div>
-      ${entry.hourly_rate ? `
+      ${isFlat && entry.flat_amount ? `
+        <div class="earnings-display">${fmtMoney(entry.flat_amount)}</div>
+        <div class="earning-rate">Фіксована ставка</div>
+      ` : (entry.hourly_rate ? `
         <div class="earnings-display" id="earnings-display">${fmtMoney(0)}</div>
         <div class="earning-rate">${state.settings.currency_symbol || '$'}${entry.hourly_rate}/год</div>
-      ` : ''}
+      ` : '')}
       ${onBreak ? `<div class="break-timer">Перерва: <span id="break-elapsed">00:00:00</span></div>` : ''}
       <div class="clock-meta">
         <div class="clock-meta-item">${svg('clock')} ${fmtTime(entry.clock_in)}</div>
@@ -405,18 +430,96 @@ function renderActiveClockPage() {
       <button class="btn btn-danger btn-lg" id="clockout-btn">${svg('stop')} Стоп</button>
     </div>
 
-    <div class="section-label">Деталі зміни</div>
-    <div class="card">
+    <div class="section-label">Деталі завдання</div>
+    <div class="card" id="job-details-card">
       <div class="form-group">
-        <label class="form-label">Коментар</label>
-        <textarea class="form-control" id="live-comment" rows="2" placeholder="Додати коментар...">${escHtml(entry.comment || '')}</textarea>
+        <label class="form-label">Assignment ID <span style="color:var(--red)">*</span></label>
+        <input type="text" class="form-control" id="jd-assignment" value="${escHtml(entry.assignment_id || '')}" placeholder="Обов'язково">
       </div>
+      <div class="row">
+        <div class="form-group">
+          <label class="form-label">Ticket #</label>
+          <input type="text" class="form-control" id="jd-ticket" value="${escHtml(entry.ticket_num || '')}" placeholder="Необов'язково">
+        </div>
+        <div class="form-group">
+          <label class="form-label">INC #</label>
+          <input type="text" class="form-control" id="jd-inc" value="${escHtml(entry.inc_num || '')}" placeholder="Необов'язково">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">MOD Name <span style="color:var(--red)">*</span></label>
+        <input type="text" class="form-control" id="jd-mod" value="${escHtml(entry.mod_name || '')}" placeholder="Обов'язково">
+      </div>
+      <div class="form-group">
+        <label class="form-label">NOC Name</label>
+        <input type="text" class="form-control" id="jd-noc" value="${escHtml(entry.noc_name || '')}" placeholder="Необов'язково">
+      </div>
+      <div class="form-group">
+        <label class="form-label">PM/PC Name</label>
+        <input type="text" class="form-control" id="jd-pmpc" value="${escHtml(entry.pm_pc_name || '')}" placeholder="Необов'язково">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Parking/Tolls</label>
+        <input type="text" class="form-control" id="jd-parking" value="${escHtml(entry.parking_tolls || '')}" placeholder="Напр. $15 parking">
+      </div>
+
+      <div class="divider" style="margin:8px 0 16px;"></div>
+
+      <div class="form-group">
+        <label class="form-label replacement-toggle-label">
+          <input type="checkbox" id="jd-replacement" ${entry.is_replacement ? 'checked' : ''} style="margin-right:8px;accent-color:var(--green);">
+          Replacement? (Заміна обладнання)
+        </label>
+      </div>
+      <div id="replacement-fields" class="${entry.is_replacement ? '' : 'hidden'}">
+        <div class="form-group">
+          <label class="form-label">Old Serial Numbers</label>
+          <textarea class="form-control" id="jd-old-serial" rows="2" placeholder="Старі серійні номери">${escHtml(entry.old_serial || '')}</textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Return Track #</label>
+          <div class="input-group">
+            <input type="text" class="form-control" id="jd-return-track" value="${escHtml(entry.return_track || '')}" placeholder="Номер відстеження">
+            <button class="btn btn-ghost btn-sm" id="no-return-track-btn" style="white-space:nowrap;flex-shrink:0;">Немає</button>
+          </div>
+          <div id="no-return-track-label" class="${entry.no_return_track ? '' : 'hidden'}" style="font-size:12px;color:var(--orange);margin-top:4px;">⚠ No Return Track # Provided</div>
+        </div>
+      </div>
+
+      <div class="divider" style="margin:8px 0 16px;"></div>
+
+      <div class="form-group">
+        <label class="form-label">Опис роботи (Work Summary)
+          <span id="ws-counter" style="float:right;font-weight:400;">${(entry.work_summary || '').length}/500</span>
+        </label>
+        <textarea class="form-control" id="jd-work-summary" rows="3" maxlength="500" placeholder="Опис виконаних робіт...">${escHtml(entry.work_summary || '')}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Additional Info / Issues</label>
+        <textarea class="form-control" id="jd-additional" rows="2" placeholder="Додаткова інформація...">${escHtml(entry.additional_info || '')}</textarea>
+      </div>
+
+      <div class="divider" style="margin:8px 0 16px;"></div>
+
+      <div class="form-group">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <label class="form-label" style="margin:0;">Матеріали</label>
+          <button class="btn btn-ghost btn-sm" id="add-material-btn">${svg('plus')} Додати</button>
+        </div>
+        <div id="materials-list">
+          ${materials.map((m, i) => buildMaterialRow(i, m.name, m.price)).join('')}
+        </div>
+      </div>
+
       ${entry.breaks.length > 0 ? `
+        <div class="divider" style="margin:8px 0 16px;"></div>
         <div style="font-size:13px;color:var(--text2);">
           <div style="font-weight:600;margin-bottom:4px;">Перерви:</div>
           ${entry.breaks.map(b => `<div>${fmtTime(b.break_start)} — ${b.break_end ? fmtTime(b.break_end) : 'зараз'}</div>`).join('')}
         </div>
       ` : ''}
+
+      <button class="btn btn-primary btn-full" id="save-details-btn" style="margin-top:12px;">${svg('check')} Зберегти деталі</button>
     </div>`;
 
   // Break buttons
@@ -455,12 +558,114 @@ function renderActiveClockPage() {
 
   document.getElementById('clockout-btn').addEventListener('click', () => showClockOutModal(entry));
 
+  // Replacement toggle
+  document.getElementById('jd-replacement').addEventListener('change', e => {
+    document.getElementById('replacement-fields').classList.toggle('hidden', !e.target.checked);
+  });
+
+  // No return track button
+  let noReturnTrack = !!entry.no_return_track;
+  document.getElementById('no-return-track-btn')?.addEventListener('click', () => {
+    noReturnTrack = !noReturnTrack;
+    document.getElementById('jd-return-track').value = noReturnTrack ? '' : (entry.return_track || '');
+    document.getElementById('jd-return-track').disabled = noReturnTrack;
+    document.getElementById('no-return-track-label').classList.toggle('hidden', !noReturnTrack);
+    document.getElementById('no-return-track-btn').textContent = noReturnTrack ? 'Скасувати' : 'Немає';
+  });
+  if (noReturnTrack) {
+    document.getElementById('jd-return-track').disabled = true;
+    document.getElementById('no-return-track-btn').textContent = 'Скасувати';
+  }
+
+  // Work summary counter
+  document.getElementById('jd-work-summary').addEventListener('input', e => {
+    document.getElementById('ws-counter').textContent = `${e.target.value.length}/500`;
+  });
+
+  // Materials
+  setupMaterialsUI(materials);
+
+  // Save details
+  document.getElementById('save-details-btn').addEventListener('click', () => saveJobDetails(entry));
+
   startElapsedTimer(entry);
+}
+
+function buildMaterialRow(index, name = '', price = '') {
+  return `
+    <div class="material-row" data-index="${index}">
+      <input type="text" class="form-control mat-name" placeholder="Назва матеріалу" value="${escHtml(name)}" style="flex:2;">
+      <input type="number" class="form-control mat-price" placeholder="Ціна" value="${escHtml(String(price))}" min="0" step="0.01" style="flex:1;">
+      <button class="btn btn-ghost btn-sm remove-material-btn" style="flex-shrink:0;color:var(--red);">${svg('trash')}</button>
+    </div>`;
+}
+
+function setupMaterialsUI(initialMaterials) {
+  let materials = [...initialMaterials];
+
+  function refreshList() {
+    const list = document.getElementById('materials-list');
+    if (!list) return;
+    list.innerHTML = materials.map((m, i) => buildMaterialRow(i, m.name, m.price)).join('');
+    list.querySelectorAll('.remove-material-btn').forEach((btn, i) => {
+      btn.addEventListener('click', () => {
+        materials.splice(i, 1);
+        refreshList();
+      });
+    });
+  }
+
+  refreshList();
+
+  document.getElementById('add-material-btn')?.addEventListener('click', () => {
+    materials.push({ name: '', price: '' });
+    refreshList();
+    const list = document.getElementById('materials-list');
+    list?.querySelector('.material-row:last-child .mat-name')?.focus();
+  });
+}
+
+function collectMaterials() {
+  const rows = document.querySelectorAll('#materials-list .material-row');
+  const materials = [];
+  rows.forEach(row => {
+    const name = row.querySelector('.mat-name')?.value.trim();
+    const price = row.querySelector('.mat-price')?.value.trim();
+    if (name) materials.push({ name, price: price ? parseFloat(price) : null });
+  });
+  return materials;
+}
+
+async function saveJobDetails(entry) {
+  const isReplacement = document.getElementById('jd-replacement').checked;
+  const noReturnTrack = !!(document.getElementById('jd-return-track')?.disabled);
+
+  try {
+    await api.updateEntry(entry.id, {
+      assignment_id:  document.getElementById('jd-assignment').value.trim() || null,
+      ticket_num:     document.getElementById('jd-ticket').value.trim() || null,
+      inc_num:        document.getElementById('jd-inc').value.trim() || null,
+      mod_name:       document.getElementById('jd-mod').value.trim() || null,
+      noc_name:       document.getElementById('jd-noc').value.trim() || null,
+      pm_pc_name:     document.getElementById('jd-pmpc').value.trim() || null,
+      parking_tolls:  document.getElementById('jd-parking').value.trim() || null,
+      is_replacement: isReplacement,
+      old_serial:     document.getElementById('jd-old-serial')?.value.trim() || null,
+      return_track:   noReturnTrack ? null : (document.getElementById('jd-return-track')?.value.trim() || null),
+      no_return_track: noReturnTrack,
+      work_summary:   document.getElementById('jd-work-summary').value.trim() || null,
+      additional_info:document.getElementById('jd-additional').value.trim() || null,
+      materials:      collectMaterials(),
+    });
+    state.currentEntry = await api.getCurrentEntry();
+    showToast('Деталі збережено', 'success');
+  } catch (e) { showToast(e.message, 'error'); }
 }
 
 /* ===== Elapsed & earnings timers ===== */
 function startElapsedTimer(entry) {
   clearInterval(state.elapsedInterval);
+  const isFlat = entry.rate_type === 'flat';
   function tick() {
     const now = Date.now();
     const startMs = new Date(entry.clock_in).getTime();
@@ -469,7 +674,7 @@ function startElapsedTimer(entry) {
     const elapsedSec = Math.max(0, Math.floor((now - startMs - breakMs) / 1000));
     const el = document.getElementById('elapsed-display');
     if (el) el.textContent = fmtDuration(elapsedSec);
-    if (entry.hourly_rate) {
+    if (!isFlat && entry.hourly_rate) {
       const earnings = (elapsedSec / 3600) * entry.hourly_rate;
       const earn = document.getElementById('earnings-display');
       if (earn) earn.textContent = fmtMoney(earnings);
@@ -513,7 +718,6 @@ function scheduleBreakReturnReminder(breakStartISO) {
   const elapsed = (Date.now() - new Date(breakStartISO).getTime()) / 1000 / 60;
   const remaining = Math.max(0, minutes - elapsed);
   if (remaining <= 0) {
-    // Already overdue
     state.showBreakReturnBanner = true;
     return;
   }
@@ -536,23 +740,144 @@ function showClockOutModal(entry) {
     <div class="modal-title">Завершення зміни</div>
     <div class="modal-body">
       <div class="form-group">
-        <label class="form-label">Коментар</label>
-        <textarea class="form-control" id="co-comment" rows="2" placeholder="Необов'язково...">${escHtml(entry.comment || '')}</textarea>
+        <label class="form-label">Статус завдання</label>
+        <div class="status-selector" id="job-status-sel">
+          <button class="status-opt ${(entry.status || 'pending') === 'pending'    ? 'active' : ''}" data-status="pending">Pending</button>
+          <button class="status-opt ${entry.status === 'completed' ? 'active' : ''}" data-status="completed">Completed</button>
+          <button class="status-opt ${entry.status === 'fail'      ? 'active' : ''}" data-status="fail">Fail</button>
+          <button class="status-opt ${entry.status === 'canceled'  ? 'active' : ''}" data-status="canceled">Canceled</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Release Code</label>
+        <div class="input-group">
+          <input type="text" class="form-control" id="co-release-code" value="${escHtml(entry.release_code || '')}" placeholder="Код підтвердження">
+          <button class="btn btn-ghost btn-sm" id="no-release-code-btn" style="white-space:nowrap;flex-shrink:0;">Немає</button>
+        </div>
+        <div id="no-release-label" class="${entry.no_release_code ? '' : 'hidden'}" style="font-size:12px;color:var(--orange);margin-top:4px;">⚠ No Release Code Provided</div>
       </div>
       <div id="clockout-time-selector"></div>
     </div>`);
 
+  let selectedStatus = entry.status || 'pending';
+  document.getElementById('job-status-sel').addEventListener('click', e => {
+    const btn = e.target.closest('.status-opt');
+    if (!btn) return;
+    selectedStatus = btn.dataset.status;
+    document.querySelectorAll('.status-opt').forEach(b => b.classList.toggle('active', b === btn));
+  });
+
+  let noReleaseCode = !!entry.no_release_code;
+  document.getElementById('no-release-code-btn').addEventListener('click', () => {
+    noReleaseCode = !noReleaseCode;
+    document.getElementById('co-release-code').disabled = noReleaseCode;
+    document.getElementById('co-release-code').value = noReleaseCode ? '' : (entry.release_code || '');
+    document.getElementById('no-release-label').classList.toggle('hidden', !noReleaseCode);
+    document.getElementById('no-release-code-btn').textContent = noReleaseCode ? 'Скасувати' : 'Немає';
+  });
+  if (noReleaseCode) {
+    document.getElementById('co-release-code').disabled = true;
+    document.getElementById('no-release-code-btn').textContent = 'Скасувати';
+  }
+
   renderTimeSelector('clockout-time-selector', 'Час завершення', async (clockOutISO) => {
     try {
-      const comment = document.getElementById('co-comment').value.trim();
-      await api.clockOut(entry.id, { clock_out: clockOutISO, comment: comment || null });
+      const releaseCode = noReleaseCode ? null : (document.getElementById('co-release-code').value.trim() || null);
+      const completedEntry = await api.clockOut(entry.id, {
+        clock_out: clockOutISO,
+        status: selectedStatus,
+        release_code: releaseCode,
+        no_release_code: noReleaseCode,
+      });
       state.currentEntry = null;
+      state.lastCompletedEntry = completedEntry;
       clearTimers();
       document.title = 'TimeClock';
       closeModal();
       showToast('Зміну завершено', 'success');
-      renderIdleClockPage();
+      renderSummaryPage();
     } catch (e) { showToast(e.message, 'error'); }
+  });
+}
+
+/* ===== Summary Page (post clock-out) ===== */
+function renderSummaryPage() {
+  const entry = state.lastCompletedEntry;
+  if (!entry) { renderIdleClockPage(); return; }
+
+  const techName    = state.settings.tech_name || '';
+  const netSec      = Math.max(0, (entry.gross_seconds || 0) - (entry.total_break_seconds || 0));
+
+  // Calculate net time if gross_seconds not provided
+  let displayNetSec = netSec;
+  if (!entry.gross_seconds && entry.clock_in && entry.clock_out) {
+    const g = Math.round((new Date(entry.clock_out) - new Date(entry.clock_in)) / 1000);
+    displayNetSec = Math.max(0, g - (entry.total_break_seconds || 0));
+  }
+
+  const materials = parseMaterials(entry.materials);
+  const materialsStr = materials.length > 0
+    ? materials.map(m => m.price != null ? `${m.name} ($${parseFloat(m.price).toFixed(2)})` : m.name).join(', ')
+    : '';
+
+  const returnTrack = entry.no_return_track ? 'No Return Track #' : (entry.return_track || '');
+  const releaseCode = entry.no_release_code ? 'No Release Code Provided' : (entry.release_code || '');
+  const siteAndId   = [entry.org_name, entry.site_id].filter(Boolean).join(' / ');
+
+  const summaryText =
+`Tech name: ${techName}
+Assignment ID: ${entry.assignment_id || ''}
+Site name & ID: ${siteAndId}
+Address: ${entry.address || ''}
+Buyer/Representing company: ${entry.org_name || ''}
+Onsite (Check in): ${fmtTime(entry.clock_in)}
+Offsite (Check out): ${fmtTime(entry.clock_out)}
+Total time: ${fmtDurationShort(displayNetSec)}
+Parking/Tolls: ${entry.parking_tolls || ''}
+PM/PC name: ${entry.pm_pc_name || ''}
+MOD name: ${entry.mod_name || ''}
+NOC name: ${entry.noc_name || ''}
+Ticket #: ${entry.ticket_num || ''}
+INC #: ${entry.inc_num || ''}
+Release code: ${releaseCode}
+Return track #: ${returnTrack}
+Materials used: ${materialsStr}
+Work summary (< 500 char.): ${entry.work_summary || ''}`;
+
+  const statusColors = { pending: 'orange', completed: 'green', fail: 'red', canceled: 'red' };
+  const statusColor  = statusColors[entry.status] || 'text2';
+
+  document.getElementById('page').innerHTML = `
+    <div style="padding:12px 0 20px;">
+      <div class="section-label">Зміну завершено</div>
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <div>
+            <div style="font-weight:600;font-size:15px;">${escHtml(entry.org_name || 'Без організації')}</div>
+            <div style="font-size:13px;color:var(--text2);margin-top:2px;">${fmtTime(entry.clock_in)} — ${fmtTime(entry.clock_out)}</div>
+          </div>
+          <span class="badge badge-${statusColor === 'green' ? 'green' : statusColor === 'orange' ? 'orange' : 'red'}">${entry.status || 'pending'}</span>
+        </div>
+        <div class="summary-output" id="summary-text-block">${escHtml(summaryText)}</div>
+        <button class="btn btn-ghost btn-full" id="copy-summary-btn" style="margin-top:12px;">${svg('copy')} Копіювати в буфер</button>
+      </div>
+      <div style="padding:0 12px;">
+        <button class="btn btn-primary btn-full" id="new-shift-btn">${svg('plus')} Нова зміна</button>
+      </div>
+    </div>`;
+
+  document.getElementById('copy-summary-btn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(summaryText);
+      showToast('Скопійовано!', 'success');
+    } catch {
+      showToast('Не вдалося скопіювати', 'error');
+    }
+  });
+
+  document.getElementById('new-shift-btn').addEventListener('click', () => {
+    state.lastCompletedEntry = null;
+    renderIdleClockPage();
   });
 }
 
@@ -611,29 +936,40 @@ function buildHistoryPage(entries) {
 }
 
 function buildEntryCard(e) {
-  const isActive = !e.clock_out;
-  const clockIn  = new Date(e.clock_in);
-  const clockOut = e.clock_out ? new Date(e.clock_out) : null;
-  const grossSec = clockOut ? Math.round((clockOut - clockIn) / 1000) : null;
-  const netSec   = grossSec !== null ? grossSec - (e.total_break_seconds || 0) : null;
-  const earnings = (netSec !== null && e.hourly_rate) ? (netSec / 3600) * e.hourly_rate : null;
+  const isActive  = !e.clock_out;
+  const clockIn   = new Date(e.clock_in);
+  const clockOut  = e.clock_out ? new Date(e.clock_out) : null;
+  const grossSec  = clockOut ? Math.round((clockOut - clockIn) / 1000) : null;
+  const netSec    = grossSec !== null ? grossSec - (e.total_break_seconds || 0) : null;
+  const isFlat    = e.rate_type === 'flat';
+  const earnings  = isFlat
+    ? (e.flat_amount ?? null)
+    : (netSec !== null && e.hourly_rate ? (netSec / 3600) * e.hourly_rate : null);
+
+  const statusColors = { pending: 'orange', completed: 'green', fail: 'red', canceled: 'red' };
+  const sc = statusColors[e.status] || '';
 
   return `
     <div class="entry-card" data-id="${e.id}">
       <div class="entry-header">
         <div class="entry-org">${escHtml(e.org_name || 'Без організації')}</div>
-        ${isActive ? '<span class="entry-active-badge">Активна</span>' : ''}
-        ${earnings !== null ? `<div class="entry-earnings">${fmtMoney(earnings)}</div>` : ''}
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${e.status && !isActive ? `<span class="badge badge-${sc === 'green' ? 'green' : sc === 'orange' ? 'orange' : 'red'}" style="font-size:10px;">${e.status}</span>` : ''}
+          ${isActive ? '<span class="entry-active-badge">Активна</span>' : ''}
+          ${earnings !== null ? `<div class="entry-earnings">${fmtMoney(earnings)}</div>` : ''}
+        </div>
       </div>
       <div class="entry-meta">
         <div class="entry-meta-item">${svg('clock')} ${fmtTime(e.clock_in)} — ${e.clock_out ? fmtTime(e.clock_out) : 'зараз'}</div>
         ${netSec !== null ? `<div class="entry-meta-item">${svg('play')} ${fmtDurationShort(netSec)}</div>` : ''}
-        ${e.client_name ? `<div class="entry-meta-item">${svg('user')} ${escHtml(e.client_name)}</div>` : ''}
-        ${e.site_id     ? `<div class="entry-meta-item">${svg('hash')} ${escHtml(e.site_id)}</div>`     : ''}
-        ${e.rate_name   ? `<div class="entry-meta-item">${svg('dollar')} ${escHtml(e.rate_name)}</div>` : ''}
-        ${e.address     ? `<div class="entry-meta-item">${svg('location')} ${escHtml(e.address)}</div>` : ''}
+        ${e.client_name    ? `<div class="entry-meta-item">${svg('user')}     ${escHtml(e.client_name)}</div>`    : ''}
+        ${e.site_id        ? `<div class="entry-meta-item">${svg('hash')}     ${escHtml(e.site_id)}</div>`        : ''}
+        ${e.assignment_id  ? `<div class="entry-meta-item">${svg('tag')}      ${escHtml(e.assignment_id)}</div>`  : ''}
+        ${e.rate_name && !isFlat ? `<div class="entry-meta-item">${svg('dollar')} ${escHtml(e.rate_name)}</div>` : ''}
+        ${isFlat ? `<div class="entry-meta-item">${svg('dollar')} Фіксована</div>` : ''}
+        ${e.address        ? `<div class="entry-meta-item">${svg('location')} ${escHtml(e.address)}</div>`        : ''}
       </div>
-      ${e.comment ? `<div class="entry-comment">${svg('comment')} ${escHtml(e.comment)}</div>` : ''}
+      ${e.work_summary ? `<div class="entry-comment">${svg('comment')} ${escHtml(e.work_summary)}</div>` : ''}
       <div class="entry-expanded hidden">
         <div style="display:flex;gap:8px;margin-top:4px;">
           <button class="btn btn-ghost btn-sm edit-entry-btn" data-id="${e.id}">${svg('edit')} Редагувати</button>
@@ -683,8 +1019,8 @@ function showEditEntryModal(entry) {
         <input type="text" class="form-control" id="edit-addr" value="${escHtml(entry.address || '')}">
       </div>
       <div class="form-group">
-        <label class="form-label">Коментар</label>
-        <textarea class="form-control" id="edit-comment" rows="2">${escHtml(entry.comment || '')}</textarea>
+        <label class="form-label">Опис роботи</label>
+        <textarea class="form-control" id="edit-work-summary" rows="2">${escHtml(entry.work_summary || '')}</textarea>
       </div>
     </div>
     <div class="modal-actions">
@@ -707,9 +1043,9 @@ function showEditEntryModal(entry) {
         organization_id: orgVal    ? Number(orgVal)    : null,
         client_id:       clientVal ? Number(clientVal) : null,
         pay_rate_id:     rateVal   ? Number(rateVal)   : null,
-        site_id:         document.getElementById('edit-site-id').value.trim() || null,
-        address:         document.getElementById('edit-addr').value.trim()    || null,
-        comment:         document.getElementById('edit-comment').value.trim() || null,
+        site_id:         document.getElementById('edit-site-id').value.trim()     || null,
+        address:         document.getElementById('edit-addr').value.trim()         || null,
+        work_summary:    document.getElementById('edit-work-summary').value.trim() || null,
       });
       closeModal();
       showToast('Збережено', 'success');
@@ -740,12 +1076,14 @@ function buildReportsPage(data) {
     const clockIn = new Date(e.clock_in);
     const netSec  = e.net_seconds || 0;
     const h = Math.floor(netSec / 3600), m = Math.floor((netSec % 3600) / 60);
+    const isFlat = e.rate_type === 'flat';
+    const earn = isFlat ? (e.flat_amount != null ? fmtMoney(e.flat_amount) : '—') : (e.earnings !== null ? fmtMoney(e.earnings) : '—');
     return `<tr>
       <td>${clockIn.toLocaleDateString('uk-UA', { weekday:'short', day:'numeric', month:'short' })}</td>
       <td>${escHtml(e.org_name || '—')}${e.client_name ? `<br><small style="color:var(--text2)">${escHtml(e.client_name)}</small>` : ''}</td>
       <td>${fmtTime(e.clock_in)} — ${e.clock_out ? fmtTime(e.clock_out) : '…'}</td>
       <td>${h}г ${m}хв</td>
-      <td>${e.earnings !== null ? fmtMoney(e.earnings) : '—'}</td>
+      <td>${earn}</td>
     </tr>`;
   }).join('');
 
@@ -840,6 +1178,10 @@ function buildSettingsPage(orgs, clients, rates, settings) {
     <div class="section-label">Загальні</div>
     <div class="settings-list">
       <div class="settings-item">
+        <div class="settings-item-info"><div class="settings-item-label">Ім'я техніка</div></div>
+        <input type="text" class="form-control" id="tech-name" value="${escHtml(settings.tech_name || '')}" placeholder="Your name" style="width:160px;">
+      </div>
+      <div class="settings-item">
         <div class="settings-item-info">
           <div class="settings-item-label">Нагадування про перерву</div>
           <div class="settings-item-sub">Через скільки хвилин нагадати</div>
@@ -911,6 +1253,7 @@ function buildSettingsPage(orgs, clients, rates, settings) {
   document.getElementById('save-general-btn').addEventListener('click', async () => {
     try {
       const saved = await api.saveSettings({
+        tech_name:              document.getElementById('tech-name').value.trim(),
         break_reminder_minutes: document.getElementById('break-reminder-sel').value,
         break_return_minutes:   document.getElementById('break-return-sel').value,
         currency_symbol:        document.getElementById('currency-sym').value.trim() || '$',

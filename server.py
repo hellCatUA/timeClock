@@ -62,12 +62,32 @@ def init_db():
             organization_id INTEGER,
             client_id INTEGER,
             pay_rate_id INTEGER,
+            rate_type TEXT DEFAULT 'hourly',
+            flat_amount REAL,
             clock_in TEXT NOT NULL,
             clock_out TEXT,
             address TEXT,
             latitude REAL,
             longitude REAL,
             site_id TEXT,
+            assignment_id TEXT,
+            ticket_num TEXT,
+            inc_num TEXT,
+            mod_name TEXT,
+            noc_name TEXT,
+            pm_pc_name TEXT,
+            parking_tolls TEXT,
+            is_replacement INTEGER DEFAULT 0,
+            old_serial TEXT,
+            new_serial TEXT,
+            return_track TEXT,
+            no_return_track INTEGER DEFAULT 0,
+            work_summary TEXT,
+            additional_info TEXT,
+            status TEXT DEFAULT 'pending',
+            release_code TEXT,
+            no_release_code INTEGER DEFAULT 0,
+            materials TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -90,7 +110,8 @@ def init_db():
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
             ('currency_symbol', '$'),
-            ('week_start', '1');
+            ('week_start', '1'),
+            ('tech_name', '');
         """)
 
 
@@ -99,13 +120,34 @@ def migrate_db():
     migrations = [
         "ALTER TABLE time_entries ADD COLUMN client_id INTEGER",
         "ALTER TABLE time_entries ADD COLUMN site_id TEXT",
+        "ALTER TABLE time_entries ADD COLUMN rate_type TEXT DEFAULT 'hourly'",
+        "ALTER TABLE time_entries ADD COLUMN flat_amount REAL",
+        "ALTER TABLE time_entries ADD COLUMN assignment_id TEXT",
+        "ALTER TABLE time_entries ADD COLUMN ticket_num TEXT",
+        "ALTER TABLE time_entries ADD COLUMN inc_num TEXT",
+        "ALTER TABLE time_entries ADD COLUMN mod_name TEXT",
+        "ALTER TABLE time_entries ADD COLUMN noc_name TEXT",
+        "ALTER TABLE time_entries ADD COLUMN pm_pc_name TEXT",
+        "ALTER TABLE time_entries ADD COLUMN parking_tolls TEXT",
+        "ALTER TABLE time_entries ADD COLUMN is_replacement INTEGER DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN old_serial TEXT",
+        "ALTER TABLE time_entries ADD COLUMN new_serial TEXT",
+        "ALTER TABLE time_entries ADD COLUMN return_track TEXT",
+        "ALTER TABLE time_entries ADD COLUMN no_return_track INTEGER DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN work_summary TEXT",
+        "ALTER TABLE time_entries ADD COLUMN additional_info TEXT",
+        "ALTER TABLE time_entries ADD COLUMN status TEXT DEFAULT 'pending'",
+        "ALTER TABLE time_entries ADD COLUMN release_code TEXT",
+        "ALTER TABLE time_entries ADD COLUMN no_release_code INTEGER DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN materials TEXT",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('tech_name', '')",
     ]
     with get_db() as db:
         for stmt in migrations:
             try:
                 db.execute(stmt)
             except Exception:
-                pass  # column already exists
+                pass  # column or row already exists
 
 
 def row_to_dict(row):
@@ -337,15 +379,32 @@ def h_post_entry(req, _groups):
     clock_in = data.get("clock_in")
     if not clock_in:
         return 400, {"error": "clock_in is required"}
+    materials = data.get("materials")
+    materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else None
     with get_db() as db:
         existing = db.execute("SELECT id FROM time_entries WHERE clock_out IS NULL").fetchone()
         if existing:
             return 409, {"error": "Already clocked in", "entry_id": existing["id"]}
         cur = db.execute(
-            "INSERT INTO time_entries (organization_id, client_id, pay_rate_id, clock_in, address, latitude, longitude, site_id, comment) VALUES (?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO time_entries
+            (organization_id, client_id, pay_rate_id, rate_type, flat_amount,
+             clock_in, address, latitude, longitude, site_id, comment,
+             assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
+             parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
+             work_summary, additional_info, status, release_code, no_release_code, materials)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
+             data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
-             data.get("site_id"), data.get("comment"))
+             data.get("site_id"), data.get("comment"),
+             data.get("assignment_id"), data.get("ticket_num"), data.get("inc_num"),
+             data.get("mod_name"), data.get("noc_name"), data.get("pm_pc_name"),
+             data.get("parking_tolls"), 1 if data.get("is_replacement") else 0,
+             data.get("old_serial"), data.get("new_serial"), data.get("return_track"),
+             1 if data.get("no_return_track") else 0,
+             data.get("work_summary"), data.get("additional_info"),
+             data.get("status", "pending"), data.get("release_code"),
+             1 if data.get("no_release_code") else 0, materials_str)
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -359,22 +418,51 @@ def h_put_entry(req, groups):
         ex = row_to_dict(db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone())
         if not ex:
             return 404, {"error": "Not found"}
+        materials = data.get("materials")
+        if materials is not None:
+            materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else materials
+        else:
+            materials_str = ex.get("materials")
         db.execute("""
             UPDATE time_entries SET
-                organization_id=?, client_id=?, pay_rate_id=?, clock_in=?, clock_out=?,
-                address=?, latitude=?, longitude=?, site_id=?, comment=?
+                organization_id=?, client_id=?, pay_rate_id=?, rate_type=?, flat_amount=?,
+                clock_in=?, clock_out=?, address=?, latitude=?, longitude=?, site_id=?, comment=?,
+                assignment_id=?, ticket_num=?, inc_num=?, mod_name=?, noc_name=?, pm_pc_name=?,
+                parking_tolls=?, is_replacement=?, old_serial=?, new_serial=?,
+                return_track=?, no_return_track=?, work_summary=?, additional_info=?,
+                status=?, release_code=?, no_release_code=?, materials=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
             data.get("client_id", ex.get("client_id")),
             data.get("pay_rate_id", ex["pay_rate_id"]),
+            data.get("rate_type", ex.get("rate_type", "hourly")),
+            data.get("flat_amount", ex.get("flat_amount")),
             data.get("clock_in", ex["clock_in"]),
             data.get("clock_out", ex["clock_out"]),
             data.get("address", ex["address"]),
             data.get("latitude", ex["latitude"]),
             data.get("longitude", ex["longitude"]),
             data.get("site_id", ex.get("site_id")),
-            data.get("comment", ex["comment"]),
+            data.get("comment", ex.get("comment")),
+            data.get("assignment_id", ex.get("assignment_id")),
+            data.get("ticket_num", ex.get("ticket_num")),
+            data.get("inc_num", ex.get("inc_num")),
+            data.get("mod_name", ex.get("mod_name")),
+            data.get("noc_name", ex.get("noc_name")),
+            data.get("pm_pc_name", ex.get("pm_pc_name")),
+            data.get("parking_tolls", ex.get("parking_tolls")),
+            1 if data.get("is_replacement", ex.get("is_replacement", 0)) else 0,
+            data.get("old_serial", ex.get("old_serial")),
+            data.get("new_serial", ex.get("new_serial")),
+            data.get("return_track", ex.get("return_track")),
+            1 if data.get("no_return_track", ex.get("no_return_track", 0)) else 0,
+            data.get("work_summary", ex.get("work_summary")),
+            data.get("additional_info", ex.get("additional_info")),
+            data.get("status", ex.get("status", "pending")),
+            data.get("release_code", ex.get("release_code")),
+            1 if data.get("no_release_code", ex.get("no_release_code", 0)) else 0,
+            materials_str,
             eid
         ))
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
@@ -393,8 +481,38 @@ def h_clockout(req, groups):
         db.execute("UPDATE breaks SET break_end=? WHERE entry_id=? AND break_end IS NULL", (clock_out, eid))
         breaks = rows_to_list(db.execute("SELECT * FROM breaks WHERE entry_id=? AND break_end IS NOT NULL", (eid,)).fetchall())
         total_break = sum(dt_diff_seconds(b["break_start"], b["break_end"]) for b in breaks)
-        db.execute("UPDATE time_entries SET clock_out=?, comment=?, total_break_seconds=? WHERE id=?",
-                   (clock_out, data.get("comment", entry["comment"]), total_break, eid))
+        materials = data.get("materials")
+        if materials is not None:
+            materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else materials
+        else:
+            materials_str = entry["materials"]
+        db.execute("""UPDATE time_entries SET
+            clock_out=?, comment=?, total_break_seconds=?,
+            status=?, release_code=?, no_release_code=?,
+            work_summary=?, assignment_id=?, ticket_num=?, inc_num=?,
+            mod_name=?, noc_name=?, pm_pc_name=?, parking_tolls=?,
+            is_replacement=?, old_serial=?, new_serial=?, return_track=?, no_return_track=?,
+            additional_info=?, materials=?
+            WHERE id=?""",
+            (clock_out, data.get("comment", entry["comment"]), total_break,
+             data.get("status", entry["status"] or "pending"),
+             data.get("release_code", entry["release_code"]),
+             1 if data.get("no_release_code", entry["no_release_code"]) else 0,
+             data.get("work_summary", entry["work_summary"]),
+             data.get("assignment_id", entry["assignment_id"]),
+             data.get("ticket_num", entry["ticket_num"]),
+             data.get("inc_num", entry["inc_num"]),
+             data.get("mod_name", entry["mod_name"]),
+             data.get("noc_name", entry["noc_name"]),
+             data.get("pm_pc_name", entry["pm_pc_name"]),
+             data.get("parking_tolls", entry["parking_tolls"]),
+             1 if data.get("is_replacement", entry["is_replacement"]) else 0,
+             data.get("old_serial", entry["old_serial"]),
+             data.get("new_serial", entry["new_serial"]),
+             data.get("return_track", entry["return_track"]),
+             1 if data.get("no_return_track", entry["no_return_track"]) else 0,
+             data.get("additional_info", entry["additional_info"]),
+             materials_str, eid))
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
         result = row_to_dict(row)
         result["breaks"] = breaks
@@ -535,7 +653,7 @@ def h_export_csv(req, _groups):
         rows = rows_to_list(db.execute(sql, args).fetchall())
 
     DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    lines = ["Date,Day,Organization,Client,Site ID,Pay Rate,Hourly Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Earnings,Address,Comment"]
+    lines = ["Date,Day,Organization,Client,Site ID,Assignment ID,Ticket #,INC #,MOD Name,NOC Name,PM/PC Name,Pay Rate,Rate Type,Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Earnings,Parking/Tolls,Status,Release Code,Return Track #,Materials,Address,Work Summary,Comment"]
 
     def fmth(s):
         return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
@@ -572,14 +690,22 @@ def h_export_csv(req, _groups):
             day_name = DAYS[wd]
         except Exception:
             day_name = ""
+        rate_val = e["hourly_rate"] if e.get("rate_type","hourly") == "hourly" else e.get("flat_amount","")
         lines.append(",".join([
             cell(fmt_date(e["clock_in"])),
             cell(day_name),
             cell(e["org_name"] or ""),
             cell(e["client_name"] or ""),
             cell(e.get("site_id") or ""),
+            cell(e.get("assignment_id") or ""),
+            cell(e.get("ticket_num") or ""),
+            cell(e.get("inc_num") or ""),
+            cell(e.get("mod_name") or ""),
+            cell(e.get("noc_name") or ""),
+            cell(e.get("pm_pc_name") or ""),
             cell(e["rate_name"] or ""),
-            cell(e["hourly_rate"] or ""),
+            cell(e.get("rate_type") or "hourly"),
+            cell(rate_val or ""),
             cell(e["currency"] or ""),
             cell(fmt_time(e["clock_in"])),
             cell(fmt_time(e["clock_out"])),
@@ -587,12 +713,18 @@ def h_export_csv(req, _groups):
             cell(fmth(e["total_break_seconds"] or 0)),
             cell(fmth(net)),
             cell(f"{earn:.2f}"),
+            cell(e.get("parking_tolls") or ""),
+            cell(e.get("status") or ""),
+            cell(e.get("release_code") or ("No Release Code" if e.get("no_release_code") else "")),
+            cell(e.get("return_track") or ("No Return Track #" if e.get("no_return_track") else "")),
+            cell(e.get("materials") or ""),
             cell(e["address"] or ""),
+            cell(e.get("work_summary") or ""),
             cell(e["comment"] or ""),
         ]))
 
     th = total_net // 3600; tm = (total_net % 3600) // 60
-    lines.append(f'"","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","",""')
+    lines.append(f'"","","","","","","","","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","","","","","","",""')
     return "csv", "\n".join(lines)
 
 
