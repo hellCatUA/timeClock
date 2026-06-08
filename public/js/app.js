@@ -19,6 +19,7 @@ const state = {
   showBreakReturnBanner: false,
   journalDate: new Date(),
   overviewPeriod: 'month',
+  overviewOffset: 0,
 };
 
 /* ── Time helpers ───────────────────────────────────────────────── */
@@ -109,6 +110,17 @@ function getISOWeekLabel(date) {
   d.setUTCDate(d.getUTCDate() + 4 - dow);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return `Week ${Math.ceil(((d - yearStart) / 86400000 + 1) / 7)}`;
+}
+function getISOWeekNum(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dow = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dow);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
+}
+function fmtMMMWk(weekStartStr) {
+  const d = new Date(weekStartStr + 'T12:00:00');
+  return `${d.toLocaleDateString('en-US', { month: 'short' })}/W${getISOWeekNum(d)}`;
 }
 function dateToISODate(date) {
   const pad = n => String(n).padStart(2,'0');
@@ -1837,16 +1849,30 @@ async function renderOverviewPage() {
     const now = new Date();
     const ws  = state.settings.week_start === '7' ? 0 : 1;
 
-    const { start: wkStart, end: wkEnd } = getWeekBounds(now, ws);
-    const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
     const period = state.overviewPeriod;
+    const offset = state.overviewOffset || 0;
+
+    // Compute date range
+    let fromDate = null, toDate = null;
+    if (period === 'week') {
+      const ref = new Date(now); ref.setDate(now.getDate() - offset * 7);
+      const { start, end } = getWeekBounds(ref, ws);
+      fromDate = start; toDate = end;
+    } else if (period === 'month') {
+      const m = now.getMonth() - offset;
+      const yr = now.getFullYear() + Math.floor(m / 12);
+      const mo = ((m % 12) + 12) % 12;
+      fromDate = new Date(yr, mo, 1);
+      toDate   = new Date(yr, mo + 1, 0, 23, 59, 59);
+    }
+
     const filtered = all.filter(e => {
+      if (!e.clock_out) return false;
       const d = new Date(e.clock_in);
-      if (period === 'week')  return d >= wkStart && d <= wkEnd;
-      if (period === 'month') return d >= mStart  && d <= now;
+      if (fromDate && d < fromDate) return false;
+      if (toDate   && d > toDate)   return false;
       return true;
-    }).filter(e => e.clock_out);
+    });
 
     const totalExpected = filtered.reduce((s,e) => s + calcTotalExpected(e), 0);
     const totalHrs = filtered.reduce((s,e) => s + getNetSeconds(e)/3600, 0);
@@ -1867,32 +1893,47 @@ async function renderOverviewPage() {
       const k = e.org_name || 'Unknown';
       if (!byCompany[k]) byCompany[k] = { jobs: 0, hrs: 0, earned: 0 };
       byCompany[k].jobs++;
-      byCompany[k].hrs += getNetSeconds(e)/3600;
+      byCompany[k].hrs   += getNetSeconds(e)/3600;
       byCompany[k].earned += calcTotalExpected(e);
     }
 
-    // By status (all, not just closed)
+    // By status
     const allFiltered = all.filter(e => {
       const d = new Date(e.clock_in);
-      if (period === 'week')  return d >= wkStart && d <= wkEnd;
-      if (period === 'month') return d >= mStart  && d <= now;
+      if (fromDate && d < fromDate) return false;
+      if (toDate   && d > toDate)   return false;
       return true;
     });
     const byStatus = { pending:0, completed:0, fail:0, cancel:0 };
     for (const e of allFiltered) byStatus[e.status || 'pending']++;
 
-    // Last 8 weeks earnings for chart
+    // Last 8 weeks bar chart
     const weekBars = [];
+    let prevBarMonth = null;
     for (let w = 7; w >= 0; w--) {
       const refDate = new Date(now); refDate.setDate(refDate.getDate() - w * 7);
       const { start: ws2, end: we2 } = getWeekBounds(refDate, ws);
       const wEntries = all.filter(e => { const d = new Date(e.clock_in); return d >= ws2 && d <= we2 && e.clock_out; });
-      weekBars.push({ label: fmtDateShort(ws2.toISOString()), earned: wEntries.reduce((s,e) => s+calcTotalExpected(e),0) });
+      const monStr  = ws2.toLocaleDateString('en-US', { month: 'short' });
+      const wkNum   = getISOWeekNum(ws2);
+      const newMon  = monStr !== prevBarMonth;
+      prevBarMonth  = monStr;
+      weekBars.push({
+        monLabel: newMon ? monStr : '',
+        wkLabel:  `W${wkNum}`,
+        earned:   wEntries.reduce((s,e) => s + calcTotalExpected(e), 0),
+        newMon,
+      });
     }
     const maxBar = Math.max(...weekBars.map(w => w.earned), 1);
 
-    // Pay period summary (all-time, not filtered by period toggle)
-    const payStat = { pending:{weeks:0,expected:0}, delayed:{weeks:0,expected:0}, problem:{weeks:0,expected:0,received:0}, received:{weeks:0,expected:0,received:0} };
+    // Pay period summary (all-time)
+    const payStat = {
+      pending:  { list:[], expected:0 },
+      delayed:  { list:[], expected:0 },
+      problem:  { list:[], expected:0, received:0 },
+      received: { list:[], expected:0, received:0 },
+    };
     for (const pp of allPayPeriods) {
       const st = pp.status || 'pending';
       if (!payStat[st]) continue;
@@ -1900,20 +1941,30 @@ async function renderOverviewPage() {
       const weD = new Date(pp.week_end   + 'T23:59:59');
       const exp = all.filter(e => e.clock_out && new Date(e.clock_in) >= wsD && new Date(e.clock_in) <= weD)
                      .reduce((s,e) => s + calcTotalExpected(e), 0);
-      payStat[st].weeks++;
+      payStat[st].list.push(pp.week_start);
       payStat[st].expected += exp;
       if (pp.received_amount != null) payStat[st].received += pp.received_amount;
     }
     const outstanding = payStat.pending.expected + payStat.delayed.expected + Math.max(0, payStat.problem.expected - payStat.problem.received);
     const hasPayData  = allPayPeriods.length > 0;
 
+    // Sub-select options
+    const weekOpts  = ['This Week','Last Week','2 Wks Ago','3 Wks Ago','4 Wks Ago'];
+    const monthOpts = ['This Month','Last Month','2 Mo Ago','3 Mo Ago','4 Mo Ago'];
+
     page.innerHTML = `
       <div class="p-16">
         <div class="period-toggle" id="period-toggle">
-          <button class="toggle-btn ${period==='week'?'active':''}"  data-p="week">This Week</button>
-          <button class="toggle-btn ${period==='month'?'active':''}" data-p="month">This Month</button>
-          <button class="toggle-btn ${period==='all'?'active':''}"   data-p="all">All Time</button>
+          <button class="toggle-btn ${period==='week' ?'active':''}" data-p="week">Week</button>
+          <button class="toggle-btn ${period==='month'?'active':''}" data-p="month">Month</button>
+          <button class="toggle-btn ${period==='all'  ?'active':''}" data-p="all">All Time</button>
         </div>
+        ${period !== 'all' ? `
+        <select class="period-sub-select" id="period-offset-select">
+          ${(period === 'week' ? weekOpts : monthOpts).map((lbl,i) =>
+            `<option value="${i}"${offset===i?' selected':''}>${lbl}</option>`
+          ).join('')}
+        </select>` : ''}
 
         <div class="stats-grid">
           <div class="stat-card">
@@ -1935,9 +1986,12 @@ async function renderOverviewPage() {
         <div class="card">
           <div class="bar-chart">
             ${weekBars.map(w => `
-              <div class="bar-item">
+              <div class="bar-item${w.newMon ? ' bar-new-month' : ''}">
                 <div class="bar-fill" style="height:${Math.round((w.earned/maxBar)*100)}%;" title="${sym}${w.earned.toFixed(2)}"></div>
-                <div class="bar-label">${w.label}</div>
+                <div class="bar-label">
+                  <span class="bar-mon-lbl">${w.monLabel || '&nbsp;'}</span>
+                  <span>${w.wkLabel}</span>
+                </div>
               </div>`).join('')}
           </div>
         </div>
@@ -1967,10 +2021,10 @@ async function renderOverviewPage() {
         <div class="section-label">Pay Status</div>
         <div class="card" style="padding:4px 16px;">
           ${!hasPayData ? '<div class="empty-state-sm" style="padding:12px 0;">No pay periods tracked yet — mark pay in the Journal tab</div>' : `
-          ${payStat.pending.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip pending">PAY PENDING</span> <span class="pay-summary-count">${payStat.pending.weeks} wk</span></div><b>${sym}${payStat.pending.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.delayed.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip delayed">PAY DELAYED</span> <span class="pay-summary-count">${payStat.delayed.weeks} wk</span></div><b>${sym}${payStat.delayed.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.problem.weeks  ? `<div class="pay-summary-row"><div><span class="pay-status-chip problem">PAY PROBLEM</span> <span class="pay-summary-count">${payStat.problem.weeks} wk</span></div><div style="text-align:right;"><b>${sym}${payStat.problem.expected.toFixed(2)}</b><div style="font-size:11px;color:var(--red);">rcvd ${sym}${payStat.problem.received.toFixed(2)} · Δ −${sym}${(payStat.problem.expected-payStat.problem.received).toFixed(2)}</div></div></div>` : ''}
-          ${payStat.received.weeks ? `<div class="pay-summary-row"><div><span class="pay-status-chip received">PAY RECEIVED</span> <span class="pay-summary-count">${payStat.received.weeks} wk</span></div><b style="color:var(--green)">${sym}${payStat.received.received.toFixed(2)}</b></div>` : ''}
+          ${payStat.pending.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip pending">PAY PENDING</span><div class="pay-week-tags">${payStat.pending.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.pending.expected.toFixed(2)}</b></div>` : ''}
+          ${payStat.delayed.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip delayed">PAY DELAYED</span><div class="pay-week-tags">${payStat.delayed.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.delayed.expected.toFixed(2)}</b></div>` : ''}
+          ${payStat.problem.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip problem">PAY PROBLEM</span><div class="pay-week-tags">${payStat.problem.list.map(fmtMMMWk).join(' · ')}</div></div><div style="text-align:right;"><b>${sym}${payStat.problem.expected.toFixed(2)}</b><div style="font-size:11px;color:var(--red);">rcvd ${sym}${payStat.problem.received.toFixed(2)} · Δ −${sym}${(payStat.problem.expected-payStat.problem.received).toFixed(2)}</div></div></div>` : ''}
+          ${payStat.received.list.length ? `<div class="pay-summary-row"><div><span class="pay-status-chip received">PAY RECEIVED</span><div class="pay-week-tags">${payStat.received.list.map(fmtMMMWk).join(' · ')}</div></div><b style="color:var(--green)">${sym}${payStat.received.received.toFixed(2)}</b></div>` : ''}
           ${outstanding > 0 ? `<div class="pay-summary-outstanding"><span>Outstanding</span><span style="color:var(--red);">−${sym}${outstanding.toFixed(2)}</span></div>` : ''}`}
         </div>
       </div>`;
@@ -1978,7 +2032,12 @@ async function renderOverviewPage() {
     document.getElementById('period-toggle').addEventListener('click', e => {
       const btn = e.target.closest('.toggle-btn');
       if (!btn) return;
+      if (btn.dataset.p !== state.overviewPeriod) state.overviewOffset = 0;
       state.overviewPeriod = btn.dataset.p;
+      renderOverviewPage();
+    });
+    document.getElementById('period-offset-select')?.addEventListener('change', e => {
+      state.overviewOffset = parseInt(e.target.value);
       renderOverviewPage();
     });
 
