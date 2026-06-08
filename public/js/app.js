@@ -1433,7 +1433,6 @@ async function renderJournalPage() {
 
     // Month totals
     const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
-    const mTotalReceived = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + (parseFloat(e.received_pay) || calcTotalExpected(e)), 0);
     const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
 
     const sym = state.settings.currency_symbol || '$';
@@ -1447,7 +1446,6 @@ async function renderJournalPage() {
       <div class="journal-month-totals">
         <span>${mTotalHrs.toFixed(2)} hrs</span>
         <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
-        <span>${sym}${mTotalReceived.toFixed(2)} received</span>
         <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
       </div>
       <div id="journal-body">
@@ -1844,12 +1842,16 @@ async function renderOverviewPage() {
     }).filter(e => e.clock_out);
 
     const totalExpected = filtered.reduce((s,e) => s + calcTotalExpected(e), 0);
-    const totalReceived = filtered.reduce((s,e) => s + (parseFloat(e.received_pay) || calcTotalExpected(e)), 0);
     const totalHrs = filtered.reduce((s,e) => s + getNetSeconds(e)/3600, 0);
     const jobCount = filtered.length;
-    const hourlyJobs = filtered.filter(e => e.rate_type !== 'flat' && e.hourly_rate);
-    const avgRate = hourlyJobs.length
-      ? hourlyJobs.reduce((s,e) => s + e.hourly_rate, 0) / hourlyJobs.length
+    const effectiveRates = filtered.map(e => {
+      const hrs = getNetSeconds(e) / 3600;
+      if (hrs <= 0) return null;
+      const labor = calcLabor(e, getNetSeconds(e));
+      return labor > 0 ? labor / hrs : null;
+    }).filter(r => r != null);
+    const avgRate = effectiveRates.length
+      ? effectiveRates.reduce((a,b) => a+b, 0) / effectiveRates.length
       : null;
 
     // By company
@@ -1882,8 +1884,6 @@ async function renderOverviewPage() {
     }
     const maxBar = Math.max(...weekBars.map(w => w.earned), 1);
 
-    const variance = totalReceived - totalExpected;
-
     // Pay period summary (all-time, not filtered by period toggle)
     const payStat = { pending:{weeks:0,expected:0}, delayed:{weeks:0,expected:0}, problem:{weeks:0,expected:0,received:0}, received:{weeks:0,expected:0,received:0} };
     for (const pp of allPayPeriods) {
@@ -1914,10 +1914,6 @@ async function renderOverviewPage() {
             <div class="stat-value">${sym}${totalExpected.toFixed(2)}</div>
           </div>
           <div class="stat-card">
-            <div class="stat-label">Total Received</div>
-            <div class="stat-value">${sym}${totalReceived.toFixed(2)}</div>
-          </div>
-          <div class="stat-card">
             <div class="stat-label">Hours Worked</div>
             <div class="stat-value">${totalHrs.toFixed(1)}</div>
           </div>
@@ -1925,11 +1921,7 @@ async function renderOverviewPage() {
             <div class="stat-label">Jobs Done</div>
             <div class="stat-value">${jobCount}</div>
           </div>
-          ${avgRate ? `<div class="stat-card"><div class="stat-label">Avg Rate</div><div class="stat-value">${sym}${avgRate.toFixed(0)}/hr</div></div>` : ''}
-          <div class="stat-card ${variance >= 0 ? 'positive' : 'negative'}">
-            <div class="stat-label">Variance</div>
-            <div class="stat-value">${variance >= 0 ? '+' : ''}${sym}${Math.abs(variance).toFixed(2)}</div>
-          </div>
+          ${avgRate ? `<div class="stat-card"><div class="stat-label">Avg Rate</div><div class="stat-value">${sym}${avgRate.toFixed(1)}/hr</div></div>` : ''}
         </div>
 
         <div class="section-label">Earnings — Last 8 Weeks</div>
