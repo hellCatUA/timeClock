@@ -1751,12 +1751,21 @@ function openEntryDetail(entry) {
 }
 
 function openEntryEdit(entry) {
-  const sym = state.settings.currency_symbol || '$';
+  const sym    = state.settings.currency_symbol || '$';
+  const isFlat = entry.rate_type === 'flat';
+  const mats   = parseMaterials(entry.materials);
+
+  const rateOpts = state.payRates.map(r =>
+    `<option value="${r.id}" ${Number(entry.pay_rate_id) === r.id ? 'selected' : ''}>${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`
+  ).join('');
+
   openModal(`
     <div class="modal-header">
       <h3>${svg('edit')} Edit Work Order</h3>
+      <button class="btn btn-ghost btn-sm" id="ee-close-btn">✕</button>
     </div>
     <div class="modal-body">
+
       <div class="form-group">
         <label class="form-label">WO Title</label>
         <input type="text" class="form-control" id="ee-wo-title" value="${escHtml(entry.wo_title||'')}">
@@ -1777,6 +1786,18 @@ function openEntryEdit(entry) {
       </div>
       <div class="row-2">
         <div class="form-group">
+          <label class="form-label">Site ID</label>
+          <input type="text" class="form-control" id="ee-site-id" value="${escHtml(entry.site_id||'')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Assignment ID</label>
+          <input type="text" class="form-control" id="ee-assignment" value="${escHtml(entry.assignment_id||'')}">
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="row-2">
+        <div class="form-group">
           <label class="form-label">Clock In</label>
           <input type="datetime-local" class="form-control" id="ee-clock-in" value="${localISOString(new Date(entry.clock_in))}">
         </div>
@@ -1789,20 +1810,121 @@ function openEntryEdit(entry) {
         <label class="form-label">Address</label>
         <input type="text" class="form-control" id="ee-address" value="${escHtml(entry.address||'')}">
       </div>
+
+      <div class="divider"></div>
+      <div class="row-2">
+        <div class="form-group">
+          <label class="form-label">Ticket #</label>
+          <input type="text" class="form-control" id="ee-ticket" value="${escHtml(entry.ticket_num||'')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">INC #</label>
+          <input type="text" class="form-control" id="ee-inc" value="${escHtml(entry.inc_num||'')}">
+        </div>
+      </div>
       <div class="form-group">
-        <label class="form-label">Assignment ID</label>
-        <input type="text" class="form-control" id="ee-assignment" value="${escHtml(entry.assignment_id||'')}">
+        <label class="form-label">MOD Name</label>
+        <input type="text" class="form-control" id="ee-mod" value="${escHtml(entry.mod_name||'')}">
+      </div>
+      <div class="row-2">
+        <div class="form-group">
+          <label class="form-label">NOC Name</label>
+          <input type="text" class="form-control" id="ee-noc" value="${escHtml(entry.noc_name||'')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">PM/PC Name</label>
+          <input type="text" class="form-control" id="ee-pmpc" value="${escHtml(entry.pm_pc_name||'')}">
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="form-group">
+        <label class="form-label">Pay Type</label>
+        <div class="toggle-group" id="ee-pay-type-toggle">
+          <button class="toggle-btn ${!isFlat?'active':''}" data-type="hourly">Hourly</button>
+          <button class="toggle-btn ${isFlat?'active':''}" data-type="flat">Flat</button>
+        </div>
+      </div>
+      <div class="form-group ${isFlat?'hidden':''}" id="ee-hourly-rate-group">
+        <label class="form-label">Hourly Rate</label>
+        <select class="form-control" id="ee-rate-select">
+          <option value="">— Select Rate —</option>
+          ${rateOpts}
+        </select>
+      </div>
+      <div class="form-group ${!isFlat?'hidden':''}" id="ee-flat-rate-group">
+        <label class="form-label">Flat Rate (${sym})</label>
+        <div class="money-wrap">
+          <span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="ee-flat-amount" min="0" step="0.01" value="${entry.flat_amount||''}">
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Removal / Replacement?</label>
+          <label class="switch"><input type="checkbox" id="ee-replacement" ${entry.is_replacement?'checked':''}><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="ee-replacement-fields" class="${entry.is_replacement?'':'hidden'}">
+        <div class="form-group">
+          <label class="form-label">Return Track #</label>
+          <div class="input-row">
+            <input type="text" class="form-control" id="ee-return-track" value="${escHtml(entry.return_track||'')}" ${entry.no_return_track?'disabled':''}>
+            <button class="btn btn-ghost btn-sm" id="ee-no-return-btn" style="white-space:nowrap;">${entry.no_return_track?'Undo N/a':'No Return'}</button>
+          </div>
+          <div id="ee-no-return-label" class="${entry.no_return_track?'':'hidden'} field-hint" style="color:var(--orange);">⚠ Marked as N/a</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="form-group">
+        <label class="form-label">Travel Reimb (${sym})</label>
+        <div class="money-wrap">
+          <span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="ee-travel-reimb" min="0" step="0.01" value="${entry.travel_reimb||''}">
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Parking / Tolls?</label>
+          <label class="switch"><input type="checkbox" id="ee-parking-toggle" ${entry.parking_tolls?'checked':''}><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="ee-parking-group" class="${entry.parking_tolls?'':'hidden'} form-group">
+        <label class="form-label">Parking Amount</label>
+        <div class="money-wrap">
+          <span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="ee-parking-amount" min="0" step="0.01" value="${entry.parking_tolls||''}">
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Materials?</label>
+          <label class="switch"><input type="checkbox" id="ee-materials-toggle" ${mats.length?'checked':''}><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="ee-materials-group" class="${mats.length?'':'hidden'}">
+        <div id="materials-list"></div>
+        <button class="btn btn-ghost btn-sm" id="add-material-btn" style="margin-top:8px;">${svg('plus')} Add Material</button>
+      </div>
+
+      <div class="divider"></div>
+      <div class="form-group">
+        <label class="form-label">Release Code</label>
+        <div class="input-row">
+          <input type="text" class="form-control" id="ee-release-code" value="${escHtml(entry.release_code||'')}" ${entry.no_release_code?'disabled':''}>
+          <button class="btn btn-ghost btn-sm" id="ee-no-code-btn" style="white-space:nowrap;">${entry.no_release_code?'Undo N/a':'No Code'}</button>
+        </div>
+        <div id="ee-no-code-label" class="${entry.no_release_code?'':'hidden'} field-hint" style="color:var(--orange);">⚠ Marked as N/a</div>
       </div>
       <div class="form-group">
         <label class="form-label">Work Summary</label>
-        <textarea class="form-control" id="ee-work-summary" rows="3">${escHtml(entry.work_summary||'')}</textarea>
+        <textarea class="form-control" id="ee-work-summary" rows="4">${escHtml(entry.work_summary||'')}</textarea>
       </div>
       <div class="form-group">
-        <label class="form-label">Received Pay (${sym})</label>
-        <input type="number" class="form-control" id="ee-received-pay" value="${parseFloat(entry.received_pay||calcTotalExpected(entry)).toFixed(2)}" min="0" step="0.01">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Status</label>
+        <label class="form-label">WO Status</label>
         <select class="form-control" id="ee-status">
           <option value="pending"   ${entry.status==='pending'  ?'selected':''}>Pending</option>
           <option value="completed" ${entry.status==='completed'?'selected':''}>Completed</option>
@@ -1811,24 +1933,91 @@ function openEntryEdit(entry) {
         </select>
       </div>
     </div>
+
     <div class="modal-footer">
       <button class="btn btn-ghost" id="ee-cancel-btn">Cancel</button>
       <button class="btn btn-primary" id="ee-save-btn">Save Changes</button>
     </div>`);
 
+  // Pay type toggle
+  let eeRateType = isFlat ? 'flat' : 'hourly';
+  document.getElementById('ee-pay-type-toggle').addEventListener('click', e => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    eeRateType = btn.dataset.type;
+    document.querySelectorAll('#ee-pay-type-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('ee-hourly-rate-group').classList.toggle('hidden', eeRateType === 'flat');
+    document.getElementById('ee-flat-rate-group').classList.toggle('hidden', eeRateType === 'hourly');
+  });
+
+  // Replacement toggle
+  let eeNoReturn = !!entry.no_return_track;
+  document.getElementById('ee-replacement').addEventListener('change', e => {
+    document.getElementById('ee-replacement-fields').classList.toggle('hidden', !e.target.checked);
+  });
+  document.getElementById('ee-no-return-btn').addEventListener('click', () => {
+    eeNoReturn = !eeNoReturn;
+    document.getElementById('ee-return-track').disabled = eeNoReturn;
+    document.getElementById('ee-return-track').value = eeNoReturn ? '' : (entry.return_track || '');
+    document.getElementById('ee-no-return-label').classList.toggle('hidden', !eeNoReturn);
+    document.getElementById('ee-no-return-btn').textContent = eeNoReturn ? 'Undo N/a' : 'No Return';
+  });
+
+  // Parking toggle
+  document.getElementById('ee-parking-toggle').addEventListener('change', e => {
+    document.getElementById('ee-parking-group').classList.toggle('hidden', !e.target.checked);
+  });
+
+  // Materials toggle + editor
+  document.getElementById('ee-materials-toggle').addEventListener('change', e => {
+    document.getElementById('ee-materials-group').classList.toggle('hidden', !e.target.checked);
+  });
+  setupMaterialsUI(mats);
+
+  // Release code toggle
+  let eeNoCode = !!entry.no_release_code;
+  document.getElementById('ee-no-code-btn').addEventListener('click', () => {
+    eeNoCode = !eeNoCode;
+    document.getElementById('ee-release-code').disabled = eeNoCode;
+    document.getElementById('ee-release-code').value = eeNoCode ? '' : (entry.release_code || '');
+    document.getElementById('ee-no-code-label').classList.toggle('hidden', !eeNoCode);
+    document.getElementById('ee-no-code-btn').textContent = eeNoCode ? 'Undo N/a' : 'No Code';
+  });
+
+  document.getElementById('ee-close-btn').addEventListener('click', closeModal);
   document.getElementById('ee-cancel-btn').addEventListener('click', closeModal);
   document.getElementById('ee-save-btn').addEventListener('click', async () => {
+    const parkingOn = document.getElementById('ee-parking-toggle').checked;
+    const matsOn    = document.getElementById('ee-materials-toggle').checked;
+    const isRepl    = document.getElementById('ee-replacement').checked;
     try {
       await api.updateEntry(entry.id, {
-        wo_title:        document.getElementById('ee-wo-title').value.trim()||null,
-        organization_id: document.getElementById('ee-company').value   ? Number(document.getElementById('ee-company').value)   : null,
-        client_id:       document.getElementById('ee-customer').value  ? Number(document.getElementById('ee-customer').value)  : null,
+        wo_title:        document.getElementById('ee-wo-title').value.trim() || null,
+        organization_id: document.getElementById('ee-company').value    ? Number(document.getElementById('ee-company').value)    : null,
+        client_id:       document.getElementById('ee-customer').value   ? Number(document.getElementById('ee-customer').value)   : null,
+        site_id:         document.getElementById('ee-site-id').value.trim() || null,
+        assignment_id:   document.getElementById('ee-assignment').value.trim() || null,
         clock_in:        toISOFull(document.getElementById('ee-clock-in').value),
         clock_out:       document.getElementById('ee-clock-out').value ? toISOFull(document.getElementById('ee-clock-out').value) : null,
-        address:         document.getElementById('ee-address').value.trim()||null,
-        assignment_id:   document.getElementById('ee-assignment').value.trim()||null,
-        work_summary:    document.getElementById('ee-work-summary').value.trim()||null,
-        received_pay:    parseFloat(document.getElementById('ee-received-pay').value)||null,
+        address:         document.getElementById('ee-address').value.trim() || null,
+        ticket_num:      document.getElementById('ee-ticket').value.trim() || null,
+        inc_num:         document.getElementById('ee-inc').value.trim() || null,
+        mod_name:        document.getElementById('ee-mod').value.trim() || null,
+        noc_name:        document.getElementById('ee-noc').value.trim() || null,
+        pm_pc_name:      document.getElementById('ee-pmpc').value.trim() || null,
+        rate_type:       eeRateType,
+        pay_rate_id:     (eeRateType === 'hourly' && document.getElementById('ee-rate-select').value)
+                           ? Number(document.getElementById('ee-rate-select').value) : null,
+        flat_amount:     eeRateType === 'flat' ? (parseFloat(document.getElementById('ee-flat-amount').value) || null) : null,
+        is_replacement:  isRepl ? 1 : 0,
+        no_return_track: (isRepl && eeNoReturn) ? 1 : 0,
+        return_track:    (isRepl && !eeNoReturn) ? document.getElementById('ee-return-track').value.trim() || null : null,
+        travel_reimb:    parseFloat(document.getElementById('ee-travel-reimb').value) || null,
+        parking_tolls:   parkingOn ? (parseFloat(document.getElementById('ee-parking-amount').value) || null) : null,
+        materials:       matsOn ? readMaterialsFromDOM() : null,
+        release_code:    eeNoCode ? null : (document.getElementById('ee-release-code').value.trim() || null),
+        no_release_code: eeNoCode ? 1 : 0,
+        work_summary:    document.getElementById('ee-work-summary').value.trim() || null,
         status:          document.getElementById('ee-status').value,
       });
       showToast('Saved', 'success');

@@ -663,16 +663,16 @@ def h_delete_entry(req, groups):
 # ── Photos ─────────────────────────────────────────────────────────────────────
 
 def _photo_folder(entry_row, eid):
-    """Compute folder path: MM/DD/YY-AssignmentID"""
+    """Compute folder path: YYYY/MM/DD-AssignmentID"""
     clock_in = (entry_row or {}).get('clock_in') or ''
     assignment_id = re.sub(r'[^\w-]', '', ((entry_row or {}).get('assignment_id') or '').strip())
     try:
         dt = datetime.fromisoformat(clock_in.replace('Z', '+00:00'))
-        mm, dd, yy = dt.strftime('%m'), dt.strftime('%d'), dt.strftime('%y')
+        yyyy, mm, dd = dt.strftime('%Y'), dt.strftime('%m'), dt.strftime('%d')
     except Exception:
-        mm, dd, yy = 'XX', 'XX', 'XX'
+        yyyy, mm, dd = 'XXXX', 'XX', 'XX'
     suffix = assignment_id if assignment_id else str(eid)
-    return f"{mm}/{dd}/{yy}-{suffix}"
+    return f"{yyyy}/{mm}/{dd}-{suffix}"
 
 
 def h_get_photos(req, groups):
@@ -920,110 +920,181 @@ def h_month_report(req, _groups):
 
 
 def h_export_csv(req, _groups):
+    from datetime import timedelta
+
     params = req.get("query", {})
     frm = params.get("from", [None])[0]
-    to  = params.get("to", [None])[0]
+    to  = params.get("to",  [None])[0]
 
     sql = ENTRY_SELECT + " WHERE 1=1"
     args = []
-    if frm:
-        sql += " AND e.clock_in >= ?"; args.append(frm)
-    if to:
-        sql += " AND e.clock_in <= ?"; args.append(to)
+    if frm: sql += " AND e.clock_in >= ?"; args.append(frm)
+    if to:  sql += " AND e.clock_in <= ?"; args.append(to)
     sql += " ORDER BY e.clock_in ASC"
 
     with get_db() as db:
-        rows = rows_to_list(db.execute(sql, args).fetchall())
+        rows       = rows_to_list(db.execute(sql, args).fetchall())
+        pp_rows    = rows_to_list(db.execute("SELECT * FROM pay_periods ORDER BY week_start").fetchall())
+        ws_setting = db.execute("SELECT value FROM settings WHERE key='week_start'").fetchone()
+        pb_setting = db.execute("SELECT value FROM settings WHERE key='paid_breaks'").fetchone()
 
-    DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    lines = ["Date,Day,WO Title,Company,Customer,Site ID,Assignment ID,Ticket #,INC #,MOD Name,NOC Name,PM/PC Name,Pay Rate,Rate Type,Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Total Labor,Travel Reimb,Parking/Tolls,Total Expected,Received Pay,Pay Status,Status,Release Code,Return Track #,Materials,Address,Work Summary"]
+    week_start_wd = ((int(ws_setting["value"]) if ws_setting else 1) - 1) % 7  # Mon=0..Sun=6
+    paid_breaks   = (pb_setting["value"] if pb_setting else "0") == "1"
+    pay_map       = {pp["week_start"]: pp for pp in pp_rows}
 
-    def fmth(s):
-        return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+    multi_week = False
+    if frm and to:
+        try:
+            multi_week = (datetime.fromisoformat(to[:10]) - datetime.fromisoformat(frm[:10])).days > 8
+        except Exception:
+            pass
 
     def cell(v):
         return '"' + str(v or "").replace('"', '""') + '"'
 
     def fmt_time(iso):
-        if not iso:
-            return ""
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.strftime("%H:%M")
-        except Exception:
-            return iso[:16]
+        if not iso: return ""
+        try: return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%H:%M")
+        except Exception: return iso[:16]
 
     def fmt_date(iso):
-        if not iso:
-            return ""
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
-        except Exception:
-            return iso[:10]
+        if not iso: return ""
+        try: return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        except Exception: return iso[:10]
 
-    total_net = 0; total_earn = 0
-    for e in rows:
-        gross = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else 0
-        net = max(0, gross - (e["total_break_seconds"] or 0))
-        earn = (net / 3600 * e["hourly_rate"]) if (e["hourly_rate"] and net > 0) else 0
-        total_net += net; total_earn += earn
+    def fmth(s):
+        if s is None: return ""
+        s = int(s); return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+
+    def get_week_start(dt_obj):
+        return (dt_obj.date() - timedelta(days=(dt_obj.weekday() - week_start_wd) % 7))
+
+    def mat_total(mat_str):
         try:
-            wd = datetime.fromisoformat(e["clock_in"].replace("Z","+00:00")).weekday()
-            day_name = DAYS[wd]
+            mats = json.loads(mat_str or "[]")
+            return sum(float(m.get("price") or 0) for m in (mats if isinstance(mats, list) else []))
         except Exception:
-            day_name = ""
-        rate_val = e["hourly_rate"] if e.get("rate_type","hourly") == "hourly" else e.get("flat_amount","")
-        labor = earn
-        travel = float(e.get("travel_reimb") or 0)
-        parking_amt = 0
-        try:
-            parking_amt = float(e.get("parking_tolls") or 0)
-        except (ValueError, TypeError):
-            parking_amt = 0
-        total_exp = labor + travel + parking_amt
-        recv = e.get("received_pay")
-        if recv is None:
-            recv = total_exp
-        pay_status = "PAID" if recv >= total_exp else ("PARTIAL" if recv > 0 else "PENDING")
-        lines.append(",".join([
+            return 0.0
+
+    def calc_entry(e):
+        gross  = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else 0
+        net    = gross if paid_breaks else max(0, gross - (e["total_break_seconds"] or 0))
+        if e.get("rate_type") == "flat":
+            labor = float(e.get("flat_amount") or 0)
+        elif e.get("hourly_rate") and net > 0:
+            labor = (net / 3600) * float(e["hourly_rate"])
+        else:
+            labor = 0.0
+        travel  = float(e.get("travel_reimb")  or 0)
+        parking = float(e.get("parking_tolls") or 0)
+        mats    = mat_total(e.get("materials"))
+        return net, labor, travel, mats, parking, labor + travel + parking + mats
+
+    def pay_type_str(e):
+        return "Flat" if e.get("rate_type") == "flat" else "Hourly"
+
+    def pay_rate_str(e):
+        if e.get("rate_type") == "flat":
+            return f"${float(e.get('flat_amount') or 0):.2f} flat"
+        return f"${e['hourly_rate']}/hr" if e.get("hourly_rate") else ""
+
+    HEADERS = [
+        "Date","WO Title","WO Status","Company","Customer","Assignment ID",
+        "Pay Type","Pay Rate","Clock In","Clock Out","Total Hours",
+        "Total Labor","Travel Reimb","Materials Reimb","Parking/Tolls",
+        "Total Expected Pay","Pay Status","Total Received","Pay Notes",
+    ]
+    lines = [",".join(f'"{h}"' for h in HEADERS)]
+
+    def entry_row(e):
+        net, labor, travel, mats, parking, total = calc_entry(e)
+        return ",".join([
             cell(fmt_date(e["clock_in"])),
-            cell(day_name),
             cell(e.get("wo_title") or ""),
-            cell(e["org_name"] or ""),
-            cell(e["client_name"] or ""),
-            cell(e.get("site_id") or ""),
+            cell((e.get("status") or "pending").upper()),
+            cell(e.get("org_name") or ""),
+            cell(e.get("client_name") or ""),
             cell(e.get("assignment_id") or ""),
-            cell(e.get("ticket_num") or ""),
-            cell(e.get("inc_num") or ""),
-            cell(e.get("mod_name") or ""),
-            cell(e.get("noc_name") or ""),
-            cell(e.get("pm_pc_name") or ""),
-            cell(e["rate_name"] or ""),
-            cell(e.get("rate_type") or "hourly"),
-            cell(rate_val or ""),
-            cell(e["currency"] or ""),
+            cell(pay_type_str(e)),
+            cell(pay_rate_str(e)),
             cell(fmt_time(e["clock_in"])),
             cell(fmt_time(e["clock_out"])),
-            cell(fmth(gross)),
-            cell(fmth(e["total_break_seconds"] or 0)),
             cell(fmth(net)),
             cell(f"{labor:.2f}"),
-            cell(f"{travel:.2f}"),
-            cell(e.get("parking_tolls") or ""),
-            cell(f"{total_exp:.2f}"),
-            cell(f"{recv:.2f}"),
-            cell(pay_status),
-            cell(e.get("status") or ""),
-            cell(e.get("release_code") or ("N/a" if e.get("no_release_code") else "")),
-            cell(e.get("return_track") or ("N/a" if e.get("no_return_track") else "")),
-            cell(e.get("materials") or ""),
-            cell(e["address"] or ""),
-            cell(e.get("work_summary") or ""),
-        ]))
+            cell(f"{travel:.2f}" if travel else ""),
+            cell(f"{mats:.2f}"   if mats   else ""),
+            cell(f"{parking:.2f}" if parking else ""),
+            cell(f"{total:.2f}"),
+            cell(""), cell(""), cell(""),
+        ])
 
-    th = total_net // 3600; tm = (total_net % 3600) // 60
-    lines.append(f'"","","","","","","","","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","","","","","","","","","","","","",""')
+    def summary_row(label, exp, pay_status="", received="", notes=""):
+        return ",".join([
+            cell(label), *[cell("")] * 14,
+            cell(f"{exp:.2f}"),
+            cell(pay_status),
+            cell(received),
+            cell(notes),
+        ])
+
+    if not multi_week:
+        for e in rows:
+            lines.append(entry_row(e))
+        if rows:
+            try:
+                dt0    = datetime.fromisoformat(rows[0]["clock_in"].replace("Z", "+00:00"))
+                ws_str = str(get_week_start(dt0))
+                pp     = pay_map.get(ws_str)
+                if pp:
+                    week_exp = sum(calc_entry(e)[5] for e in rows)
+                    lines.append(summary_row(
+                        f"Week: {ws_str}",
+                        week_exp,
+                        (pp.get("status") or "pending").upper(),
+                        f"{float(pp.get('received_amount') or 0):.2f}",
+                        pp.get("notes") or "",
+                    ))
+            except Exception:
+                pass
+    else:
+        weeks_map = {}
+        for e in rows:
+            try:
+                dt     = datetime.fromisoformat(e["clock_in"].replace("Z", "+00:00"))
+                ws_str = str(get_week_start(dt))
+            except Exception:
+                ws_str = "0000-00-00"
+            weeks_map.setdefault(ws_str, []).append(e)
+
+        month_exp = 0.0
+        month_rcv = 0.0
+        for ws_str in sorted(weeks_map.keys()):
+            entries  = weeks_map[ws_str]
+            pp       = pay_map.get(ws_str)
+            week_exp = sum(calc_entry(e)[5] for e in entries)
+            rcv_amt  = float(pp.get("received_amount") or 0) if pp else 0.0
+            month_exp += week_exp
+            month_rcv += rcv_amt
+
+            try:
+                ws_dt   = datetime.strptime(ws_str, "%Y-%m-%d")
+                we_dt   = ws_dt + timedelta(days=6)
+                hdr_lbl = f"Week: {ws_dt.strftime('%b %d')} – {we_dt.strftime('%b %d')}"
+            except Exception:
+                hdr_lbl = f"Week: {ws_str}"
+
+            lines.append(summary_row(
+                hdr_lbl, week_exp,
+                (pp.get("status") or "").upper() if pp else "",
+                f"{rcv_amt:.2f}" if pp else "",
+                pp.get("notes") or "" if pp else "",
+            ))
+            for e in entries:
+                lines.append(entry_row(e))
+            lines.append("")
+
+        lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", ""))
+
     return "csv", "\n".join(lines)
 
 
