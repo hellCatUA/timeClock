@@ -78,6 +78,7 @@ function parseMaterials(raw) {
 function getNetSeconds(entry) {
   if (!entry.clock_out) return 0;
   const gross = Math.max(0, Math.floor((new Date(entry.clock_out) - new Date(entry.clock_in)) / 1000));
+  if (state.settings?.paid_breaks === '1') return gross;
   return Math.max(0, gross - (entry.total_break_seconds || 0));
 }
 function calcLabor(entry, netSec) {
@@ -369,7 +370,9 @@ function startElapsedTimer(entry) {
       : 0;
     const paidBreaks = state.settings.paid_breaks === '1';
     const grossSec = Math.floor((Date.now() - new Date(entry.clock_in)) / 1000);
-    const netSec = Math.max(0, grossSec - (entry.total_break_seconds || 0) - ((!paidBreaks && onBreak) ? breakSecs : 0));
+    const netSec = paidBreaks
+      ? grossSec
+      : Math.max(0, grossSec - (entry.total_break_seconds || 0) - (onBreak ? breakSecs : 0));
 
     const ed = document.getElementById('elapsed-display');
     if (ed) ed.textContent = fmtDuration(netSec);
@@ -834,6 +837,7 @@ function renderActiveClockPage() {
         state.currentEntry = await api.getCurrentEntry();
         state.showBreakReturnBanner = false;
         clearTimeout(state.breakReturnTimeout);
+        clearTimers();
         scheduleBreakReminder();
         renderActiveClockPage();
       } catch (e) { showToast(e.message, 'error'); }
@@ -850,6 +854,7 @@ function renderActiveClockPage() {
         state.currentEntry = { ...entry, active_break: b };
         state.showReminderBanner = false;
         clearTimeout(state.reminderTimeout);
+        clearTimers();
         renderActiveClockPage();
       } catch (e) { showToast(e.message, 'error'); }
     });
@@ -1258,7 +1263,9 @@ function showFinalReview(entry, coData) {
   const techName = state.settings.tech_name || '—';
   const clockOutTime = new Date(coData.clockOutISO);
   const grossSec = Math.max(0, Math.floor((clockOutTime - new Date(entry.clock_in)) / 1000));
-  const netSec   = Math.max(0, grossSec - (entry.total_break_seconds || 0));
+  const netSec   = state.settings.paid_breaks === '1'
+    ? grossSec
+    : Math.max(0, grossSec - (entry.total_break_seconds || 0));
   const labor    = calcLabor(entry, netSec);
   const travel   = parseFloat(entry.travel_reimb) || 0;
   const parking  = parseFloat(entry.parking_tolls) || 0;
