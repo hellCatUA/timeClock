@@ -1544,7 +1544,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
           <button class="btn btn-ghost btn-sm pay-btn" data-week-start="${weekKey}" data-week-end="${weekEnd}">${svg('dollar')} Pay</button>
         </div>
       </div>
-      ${wg.entries.map(e => renderEntryCard(e)).join('')}
+      ${[...wg.entries].sort((a,b) => new Date(a.clock_in) - new Date(b.clock_in)).map(e => renderEntryCard(e)).join('')}
       <div class="week-summary">
         <span>Expected: <b>${sym}${wExp.toFixed(2)}</b></span>
         ${payRec !== null
