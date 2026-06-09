@@ -142,6 +142,29 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS trips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            assignment_id TEXT,
+            trip_id TEXT,
+            folder TEXT,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            mileage_start REAL,
+            mileage_end REAL,
+            distance REAL,
+            tax_deduction REAL,
+            notes TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS trip_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -157,7 +180,8 @@ def init_db():
             ('ftp_port', '21'),
             ('ftp_user', ''),
             ('ftp_password', ''),
-            ('ftp_path', '/timeclock/photos');
+            ('ftp_path', '/timeclock/photos'),
+            ('mileage_rate', '0.67');
         """)
 
 
@@ -202,6 +226,7 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_password', '')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_path', '/timeclock/photos')",
         "ALTER TABLE entry_photos ADD COLUMN folder TEXT",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('mileage_rate', '0.67')",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -209,6 +234,10 @@ def migrate_db():
                 db.execute(stmt)
             except Exception:
                 pass  # column or row already exists
+    with get_db() as db:
+        if db.execute("SELECT COUNT(*) FROM trip_categories").fetchone()[0] == 0:
+            for i, name in enumerate(["In Route to WO","Returning Home","OffClock Tools/Supplies","OnClock Tools/Supplies","Other"]):
+                db.execute("INSERT OR IGNORE INTO trip_categories (name, sort_order) VALUES (?,?)", (name, i))
 
 
 def row_to_dict(row):
@@ -702,6 +731,35 @@ def _photo_folder(entry_row, eid):
         yyyy, mm, dd = 'XXXX', 'XX', 'XX'
     suffix = assignment_id if assignment_id else str(eid)
     return f"{yyyy}/{mm}/{dd}-{suffix}"
+
+
+def _trip_folder(category, assignment_id, start_time_iso):
+    try:
+        dt = datetime.fromisoformat(start_time_iso.replace('Z', '+00:00'))
+        yyyy, mm, dd = dt.strftime('%Y'), dt.strftime('%m'), dt.strftime('%d')
+    except Exception:
+        yyyy, mm, dd = 'XXXX', 'XX', 'XX'
+    if category == "In Route to WO" and assignment_id:
+        safe = re.sub(r'[^\w-]', '', assignment_id.strip())
+        return f"Trips/{yyyy}/{mm}/{dd}-{safe}"
+    return f"Trips/{yyyy}/{mm}/{dd}/Other Mileage"
+
+def _generate_trip_id(db, category, assignment_id, start_time_iso):
+    try:
+        dt = datetime.fromisoformat(start_time_iso.replace('Z', '+00:00'))
+        yy_mm_dd = dt.strftime('%y-%m-%d')
+        day_prefix = dt.strftime('%Y-%m-%d')
+    except Exception:
+        yy_mm_dd = 'XX-XX-XX'; day_prefix = 'XXXX-XX-XX'
+    if category == "In Route to WO" and assignment_id:
+        safe = re.sub(r'[^\w-]', '', assignment_id.strip())
+        n = db.execute("SELECT COUNT(*) FROM trips WHERE assignment_id=?", (assignment_id,)).fetchone()[0]
+        return f"{safe}-{n+1}"
+    n = db.execute(
+        "SELECT COUNT(*) FROM trips WHERE (category IS NULL OR category != 'In Route to WO') AND start_time LIKE ?",
+        (f"{day_prefix}%",)
+    ).fetchone()[0]
+    return f"{yy_mm_dd}-{n+1}"
 
 
 def h_get_photos(req, groups):
