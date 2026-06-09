@@ -1185,6 +1185,249 @@ def h_export_csv(req, _groups):
     return "csv", "\n".join(lines)
 
 
+# ── Trips ──────────────────────────────────────────────────────────────────────
+
+def h_get_trips(req, _groups):
+    params = req.get("query", {})
+    frm = params.get("from", [None])[0]
+    to  = params.get("to",  [None])[0]
+    sql = "SELECT * FROM trips WHERE 1=1"
+    args = []
+    if frm: sql += " AND start_time >= ?"; args.append(frm)
+    if to:  sql += " AND start_time <= ?"; args.append(to)
+    sql += " ORDER BY start_time DESC"
+    with get_db() as db:
+        rows = rows_to_list(db.execute(sql, args).fetchall())
+    return 200, rows
+
+def h_get_current_trip(req, _groups):
+    with get_db() as db:
+        row = row_to_dict(db.execute(
+            "SELECT * FROM trips WHERE status='active' ORDER BY start_time DESC LIMIT 1"
+        ).fetchone())
+    if not row:
+        return 404, {"error": "No active trip"}
+    return 200, row
+
+def h_start_trip(req, _groups):
+    data = req.get("body", {})
+    category      = (data.get("category") or "Other").strip()
+    assignment_id = (data.get("assignment_id") or "").strip() or None
+    start_time    = data.get("start_time") or now_iso()
+    mileage_start = data.get("mileage_start")
+    notes         = data.get("notes")
+    with get_db() as db:
+        trip_id = _generate_trip_id(db, category, assignment_id, start_time)
+        folder  = _trip_folder(category, assignment_id, start_time)
+        cur = db.execute(
+            "INSERT INTO trips (category, assignment_id, trip_id, folder, start_time, mileage_start, notes) VALUES (?,?,?,?,?,?,?)",
+            (category, assignment_id, trip_id, folder, start_time, mileage_start, notes)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+def h_stop_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    end_time    = data.get("end_time") or now_iso()
+    mileage_end = data.get("mileage_end")
+    notes       = data.get("notes")
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+        rate = float(settings.get("mileage_rate") or "0.67")
+        distance = None
+        tax_ded  = None
+        if mileage_end is not None and trip.get("mileage_start") is not None:
+            distance = round(float(mileage_end) - float(trip["mileage_start"]), 2)
+            tax_ded  = round(max(0, distance) * rate, 2)
+        merged_notes = data.get("notes", trip.get("notes"))
+        db.execute(
+            "UPDATE trips SET end_time=?, mileage_end=?, distance=?, tax_deduction=?, notes=?, status='completed', updated_at=datetime('now') WHERE id=?",
+            (end_time, mileage_end, distance, tax_ded, merged_notes, tid)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    return 200, row
+
+def h_get_trip(req, groups):
+    tid = groups[0]
+    with get_db() as db:
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    if not row:
+        return 404, {"error": "Not found"}
+    return 200, row
+
+def h_update_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        for field in ("category","assignment_id","notes","mileage_start","mileage_end","distance","tax_deduction"):
+            if field in data:
+                trip[field] = data[field]
+        db.execute(
+            "UPDATE trips SET category=?,assignment_id=?,notes=?,mileage_start=?,mileage_end=?,distance=?,tax_deduction=?,updated_at=datetime('now') WHERE id=?",
+            (trip["category"],trip["assignment_id"],trip["notes"],trip["mileage_start"],trip["mileage_end"],trip["distance"],trip["tax_deduction"],tid)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    return 200, row
+
+def h_delete_trip(req, groups):
+    tid = groups[0]
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        db.execute("DELETE FROM trips WHERE id=?", (tid,))
+    return 200, {"success": True}
+
+def h_get_trip_photos(req, groups):
+    tid = groups[0]
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=? AND photo_type LIKE 'trip_%' ORDER BY created_at", (tid,)
+        ).fetchall())
+        trip = row_to_dict(db.execute("SELECT folder FROM trips WHERE id=?", (tid,)).fetchone())
+    if not trip:
+        return 404, {"error": "Not found"}
+    folder = trip.get("folder") or str(tid)
+    for r in rows:
+        r['url'] = f"/uploads/{folder}/{r['filename']}"
+    return 200, rows
+
+def h_post_trip_photo(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    photo_type = (data.get("photo_type") or "before").strip()
+    b64data = data.get("data", "")
+    original_name = (data.get("filename") or "photo.jpg").strip()
+    mime = (data.get("mime") or "image/jpeg").lower()
+    if not b64data:
+        return 400, {"error": "No image data"}
+    try:
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return 400, {"error": "Invalid base64 data"}
+    ext = ".jpg"
+    if "png" in mime: ext = ".png"
+    elif "webp" in mime: ext = ".webp"
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+    folder = trip.get("folder") or f"Trips/{tid}"
+    cat_short = re.sub(r'[^\w]', '', (trip.get("category") or "Other").replace(" ",""))[:8]
+    trip_id_safe = re.sub(r'[^\w-]', '', (trip.get("trip_id") or str(tid)))
+    safe_name = f"Mil-{cat_short}-{photo_type.capitalize()}-{trip_id_safe}{ext}"
+    entry_dir = UPLOADS_DIR / folder
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    file_path = entry_dir / safe_name
+    file_path.write_bytes(img_bytes)
+    ftp_remote = f"{folder.replace('/', '_')}_{safe_name}"
+    ftp_synced = 1 if ftp_sync_photo(str(file_path), ftp_remote, settings) else 0
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO entry_photos (entry_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?,?,?,?,?,?)",
+            (tid, f"trip_{photo_type}", safe_name, folder, original_name, ftp_synced)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM entry_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+    row['url'] = f"/uploads/{folder}/{safe_name}"
+    return 201, row
+
+# ── Trip categories ─────────────────────────────────────────────────────────────
+
+def h_get_trip_categories(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("SELECT * FROM trip_categories ORDER BY sort_order, name").fetchall())
+    return 200, rows
+
+def h_create_trip_category(req, _groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name required"}
+    with get_db() as db:
+        try:
+            cur = db.execute("INSERT INTO trip_categories (name, sort_order) VALUES (?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM trip_categories))", (name,))
+            row = row_to_dict(db.execute("SELECT * FROM trip_categories WHERE id=?", (cur.lastrowid,)).fetchone())
+        except Exception:
+            return 409, {"error": "Category already exists"}
+    return 201, row
+
+def h_delete_trip_category(req, groups):
+    cid = groups[0]
+    with get_db() as db:
+        cur = db.execute("DELETE FROM trip_categories WHERE id=?", (cid,))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+# ── Mileage CSV export ──────────────────────────────────────────────────────────
+
+def h_export_mileage_csv(req, _groups):
+    from datetime import timedelta
+    params = req.get("query", {})
+    frm = params.get("from", [None])[0]
+    to  = params.get("to",  [None])[0]
+    sql = "SELECT * FROM trips WHERE status='completed'"
+    args = []
+    if frm: sql += " AND start_time >= ?"; args.append(frm)
+    if to:  sql += " AND start_time <= ?"; args.append(to)
+    sql += " ORDER BY start_time ASC"
+    with get_db() as db:
+        rows = rows_to_list(db.execute(sql, args).fetchall())
+
+    def cell(v): return '"' + str(v or "").replace('"','""') + '"'
+    def fmt_dt(iso):
+        if not iso: return ""
+        try: return datetime.fromisoformat(iso.replace("Z","+00:00")).strftime("%Y-%m-%d %H:%M")
+        except: return iso[:16]
+    def fmth(s):
+        if not s and s != 0: return ""
+        s = int(s); return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+
+    headers = ["Date/Time","TripID","Driving Time","Mileage Start","Mileage End","Distance","Write-Off Amount","Trip Category","Note"]
+    lines = [",".join(f'"{h}"' for h in headers)]
+
+    total_dist = 0.0; total_tax = 0.0; total_sec = 0
+    for t in rows:
+        start_sec = 0
+        if t.get("start_time") and t.get("end_time"):
+            try:
+                s = datetime.fromisoformat(t["start_time"].replace("Z","+00:00"))
+                e = datetime.fromisoformat(t["end_time"].replace("Z","+00:00"))
+                start_sec = int((e - s).total_seconds())
+            except: pass
+        dist = float(t.get("distance") or 0)
+        tax  = float(t.get("tax_deduction") or 0)
+        total_dist += dist; total_tax += tax; total_sec += start_sec
+        lines.append(",".join([
+            cell(fmt_dt(t.get("start_time"))),
+            cell(t.get("trip_id") or ""),
+            cell(fmth(start_sec)),
+            cell(str(t.get("mileage_start") or "")),
+            cell(str(t.get("mileage_end") or "")),
+            cell(f"{dist:.2f}" if t.get("distance") is not None else ""),
+            cell(f"{tax:.2f}" if t.get("tax_deduction") is not None else ""),
+            cell(t.get("category") or ""),
+            cell(t.get("notes") or ""),
+        ]))
+
+    lines.append(",".join([
+        cell("TOTALS"), cell(""), cell(fmth(total_sec)),
+        cell(""), cell(""),
+        cell(f"{total_dist:.2f}"),
+        cell(f"{total_tax:.2f}"),
+        cell(""), cell(""),
+    ]))
+    return "csv", "\n".join(lines)
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 ROUTES = [
@@ -1201,6 +1444,14 @@ ROUTES = [
     (r"/api/entries/(\d+)/photos/(\d+)",    ["DELETE"], h_delete_photo),
     (r"/api/pay-periods",              ["GET"],  h_get_pay_periods),
     (r"/api/pay-periods",              ["POST"], h_upsert_pay_period),
+    (r"/api/trips/current",                ["GET"],    h_get_current_trip),
+    (r"/api/trips/(\d+)/stop",             ["POST"],   h_stop_trip),
+    (r"/api/trips/(\d+)/photos",           ["GET","POST"], lambda req,g: h_get_trip_photos(req,g) if req["method"]=="GET" else h_post_trip_photo(req,g)),
+    (r"/api/trips/(\d+)",                  ["GET","PUT","DELETE"], lambda req,g: h_get_trip(req,g) if req["method"]=="GET" else h_update_trip(req,g) if req["method"]=="PUT" else h_delete_trip(req,g)),
+    (r"/api/trips",                        ["GET","POST"], lambda req,g: h_get_trips(req,g) if req["method"]=="GET" else h_start_trip(req,g)),
+    (r"/api/trip-categories/(\d+)",        ["DELETE"], h_delete_trip_category),
+    (r"/api/trip-categories",              ["GET","POST"], lambda req,g: h_get_trip_categories(req,g) if req["method"]=="GET" else h_create_trip_category(req,g)),
+    (r"/api/reports/mileage/export/csv",   ["GET"],    h_export_mileage_csv),
     (r"/api/organizations",             ["GET"],    h_get_orgs),
     (r"/api/organizations",             ["POST"],   h_post_org),
     (r"/api/organizations/(\d+)",       ["PUT"],    h_put_org),

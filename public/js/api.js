@@ -58,5 +58,22 @@ const api = (() => {
     // Pay Periods
     getPayPeriods:    ()  => req('GET',  '/api/pay-periods'),
     upsertPayPeriod:  (d) => req('POST', '/api/pay-periods', d),
+
+    // Trips
+    getTrips:            (params) => req('GET',    '/api/trips' + (params ? '?' + new URLSearchParams(params) : '')),
+    getCurrentTrip:      ()       => req('GET',    '/api/trips/current'),
+    startTrip:           (d)      => req('POST',   '/api/trips', d),
+    stopTrip:            (id, d)  => req('POST',   `/api/trips/${id}/stop`, d),
+    updateTrip:          (id, d)  => req('PUT',    `/api/trips/${id}`, d),
+    deleteTrip:          (id)     => req('DELETE', `/api/trips/${id}`),
+    getTripPhotos:       (id)     => req('GET',    `/api/trips/${id}/photos`),
+    uploadTripPhoto:     (id, d)  => req('POST',   `/api/trips/${id}/photos`, d),
+
+    // Trip categories
+    getTripCategories:   ()       => req('GET',    '/api/trip-categories'),
+    createTripCategory:  (d)      => req('POST',   '/api/trip-categories', d),
+    deleteTripCategory:  (id)     => req('DELETE', `/api/trip-categories/${id}`),
+
+    getMileageExportUrl: (from, to) => `/api/reports/mileage/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
   };
 })();

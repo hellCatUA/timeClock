@@ -13,6 +13,7 @@ const state = {
   settings: {},
   elapsedInterval: null,
   breakElapsedInterval: null,
+  tripTimerInterval: null,
   reminderTimeout: null,
   breakReturnTimeout: null,
   showReminderBanner: false,
@@ -20,6 +21,9 @@ const state = {
   journalDate: new Date(),
   overviewPeriod: 'month',
   overviewOffset: 0,
+  currentTrip: null,
+  tripCategories: [],
+  journalSubTab: 'work',
 };
 
 /* ── Time helpers ───────────────────────────────────────────────── */
@@ -337,10 +341,12 @@ function startLiveClock() {
 function clearTimers() {
   clearInterval(state.elapsedInterval);
   clearInterval(state.breakElapsedInterval);
+  clearInterval(state.tripTimerInterval);
   clearTimeout(state.reminderTimeout);
   clearTimeout(state.breakReturnTimeout);
   state.elapsedInterval = null;
   state.breakElapsedInterval = null;
+  state.tripTimerInterval = null;
 }
 
 /* ── Clipboard helpers ───────────────────────────────────────────── */
@@ -487,6 +493,7 @@ function renderTimeSelector(containerId, label, onConfirm) {
    ================================================================ */
 async function renderClockPage() {
   try { state.currentEntry = await api.getCurrentEntry(); } catch { state.currentEntry = null; }
+  try { state.currentTrip = await api.getCurrentTrip(); } catch { state.currentTrip = null; }
   if (state.currentEntry) renderActiveClockPage();
   else if (state.lastCompletedEntry) renderSummaryPage(state.lastCompletedEntry);
   else renderIdleClockPage();
@@ -503,10 +510,39 @@ function renderIdleClockPage() {
   const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
 
+  // Build active trip card HTML if there's an active trip
+  const trip = state.currentTrip;
+  const tripCardHtml = trip ? `
+    <div class="card trip-active-card" style="margin:12px 12px 0;">
+      <div class="trip-active-header">
+        <span class="status-chip active" style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue);">TRIP ACTIVE</span>
+        <span id="trip-elapsed" class="trip-elapsed">0:00:00</span>
+      </div>
+      <div class="trip-active-meta">
+        <b>${escHtml(trip.category)}</b>
+        ${trip.assignment_id ? `· ${escHtml(trip.assignment_id)}` : ''}
+      </div>
+      ${trip.mileage_start != null ? `<div class="trip-active-meta">Start: ${trip.mileage_start} mi</div>` : ''}
+      <div class="row-2" style="margin-top:12px;">
+        <button class="btn btn-danger btn-full" id="stop-trip-btn">Stop Trip</button>
+        ${(trip.category === 'In Route to WO' && trip.assignment_id) ?
+          `<button class="btn btn-primary btn-full" id="trip-clock-in-btn">Clock In</button>` : ''}
+      </div>
+    </div>` : '';
+
   document.getElementById('page').innerHTML = `
     <div class="p-16">
+      <div class="row-2" style="margin-bottom:16px;">
+        <button class="btn btn-secondary btn-full" id="in-route-btn">
+          ${svg('car')} In Route
+        </button>
+        <button class="btn btn-primary btn-full" id="clock-in-start-btn">
+          ${svg('clock')} Clock In
+        </button>
+      </div>
+      ${tripCardHtml}
       <div class="section-label">New Work Order</div>
-      <div class="card">
+      <div class="card" id="clock-in-form-card">
         <div class="form-group">
           <label class="form-label">WO Title</label>
           <input type="text" class="form-control" id="wo-title-input" placeholder="Brief description of work...">
@@ -564,6 +600,44 @@ function renderIdleClockPage() {
         <div id="clockin-time-selector"></div>
       </div>
     </div>`;
+
+  // Wire up In Route button
+  document.getElementById('in-route-btn').addEventListener('click', () => openTripStartModal());
+
+  // Wire up Clock In start button — shows/scrolls to form
+  document.getElementById('clock-in-start-btn').addEventListener('click', () => {
+    const formCard = document.getElementById('clock-in-form-card');
+    if (formCard) {
+      formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      formCard.querySelector('input,select')?.focus();
+    }
+  });
+
+  // Wire up stop trip button if present
+  document.getElementById('stop-trip-btn')?.addEventListener('click', () => {
+    if (state.currentTrip) openTripStopModal(state.currentTrip);
+  });
+
+  // Wire up trip clock in button if present
+  document.getElementById('trip-clock-in-btn')?.addEventListener('click', () => {
+    if (state.currentTrip?.assignment_id) {
+      const formCard = document.getElementById('clock-in-form-card');
+      const woTitle = document.getElementById('wo-title-input');
+      if (woTitle) woTitle.value = `WO - ${state.currentTrip.assignment_id}`;
+      formCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
+
+  // Start trip elapsed timer if there's an active trip
+  if (state.currentTrip) {
+    const startEl = new Date(state.currentTrip.start_time);
+    const update = () => {
+      const el = document.getElementById('trip-elapsed');
+      if (el) el.textContent = fmtDuration(Math.floor((Date.now() - startEl) / 1000));
+    };
+    update();
+    state.tripTimerInterval = setInterval(update, 1000);
+  }
 
   let rateType = 'hourly';
   document.getElementById('pay-type-toggle').addEventListener('click', e => {
@@ -1415,62 +1489,413 @@ Work summary: ${entry.work_summary || ''}`;
 }
 
 /* ================================================================
+   TRIP MODALS
+   ================================================================ */
+
+async function uploadTripPhotoData(tripId, type, photoData) {
+  // photoData is a base64 data URL (data:image/jpeg;base64,...)
+  const b64 = photoData.split(',')[1];
+  if (!b64) return null;
+  try {
+    return await api.uploadTripPhoto(tripId, {
+      data: b64,
+      filename: `photo_${type}.jpg`,
+      photo_type: type,
+      mime: 'image/jpeg',
+    });
+  } catch (err) {
+    showToast('Photo upload failed: ' + err.message, 'error');
+    return null;
+  }
+}
+
+async function compressFileToBase64(file) {
+  const blob = await compressImage(file);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = () => reject(new Error('File read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function openTripStartModal() {
+  const cats = state.tripCategories;
+  // Smart auto-select
+  let defaultCat = 'In Route to WO';
+  if (state.currentEntry) {
+    defaultCat = 'OnClock Tools/Supplies';
+  } else {
+    // Check if there's a completed entry in last 4 hours
+    // We don't have entries cached here easily, so just use default
+    defaultCat = 'In Route to WO';
+  }
+
+  let selectedCat = defaultCat;
+  let photoData = null;
+
+  // Filter categories based on current entry
+  const filteredCats = cats.filter(c => {
+    if (c.name === 'OnClock Tools/Supplies') return !!state.currentEntry;
+    if (c.name === 'OffClock Tools/Supplies') return !state.currentEntry;
+    return true;
+  });
+
+  const catBtnsHtml = filteredCats.map(c =>
+    `<button class="trip-cat-btn${c.name === selectedCat ? ' active' : ''}" data-cat="${escHtml(c.name)}">${escHtml(c.name)}</button>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('car')} Start Trip</h3>
+      <button class="btn btn-ghost btn-sm" id="ts-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Category</label>
+        <div class="trip-cat-grid" id="ts-cat-grid">${catBtnsHtml}</div>
+      </div>
+      <div class="form-group" id="ts-assignment-group" style="${selectedCat === 'In Route to WO' ? '' : 'display:none;'}">
+        <label class="form-label">Assignment ID</label>
+        <div class="input-row">
+          <input type="text" class="form-control" id="ts-assignment" placeholder="e.g. ABC-12345">
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;white-space:nowrap;cursor:pointer;">
+            <input type="checkbox" id="ts-add-later"> Add Later
+          </label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Mileage Start <span class="req-star">*</span></label>
+        <input type="number" class="form-control" id="ts-mileage" placeholder="e.g. 45231.5" min="0" step="0.1">
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Add Note?</label>
+          <label class="switch"><input type="checkbox" id="ts-note-toggle"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div class="form-group hidden" id="ts-note-group">
+        <textarea class="form-control" id="ts-notes" rows="2" placeholder="Optional note..."></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Mileage Photo (Before) <span class="opt-label">optional</span></label>
+        <label class="photo-add-btn" for="ts-photo-inp" id="ts-photo-label">
+          ${svg('camera')} <span id="ts-photo-txt">Add Photo</span>
+        </label>
+        <input type="file" accept="image/*" class="visually-hidden" id="ts-photo-inp">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="ts-cancel">Cancel</button>
+      <button class="btn btn-primary" id="ts-start">Start Trip</button>
+    </div>`);
+
+  document.getElementById('ts-x').addEventListener('click', closeModal);
+  document.getElementById('ts-cancel').addEventListener('click', closeModal);
+
+  // Category selection
+  document.getElementById('ts-cat-grid').addEventListener('click', e => {
+    const btn = e.target.closest('.trip-cat-btn');
+    if (!btn) return;
+    selectedCat = btn.dataset.cat;
+    document.querySelectorAll('.trip-cat-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('ts-assignment-group').style.display = selectedCat === 'In Route to WO' ? '' : 'none';
+  });
+
+  // Add Later checkbox
+  document.getElementById('ts-add-later').addEventListener('change', e => {
+    const inp = document.getElementById('ts-assignment');
+    inp.disabled = e.target.checked;
+    if (e.target.checked) inp.value = '';
+  });
+
+  // Note toggle
+  document.getElementById('ts-note-toggle').addEventListener('change', e => {
+    document.getElementById('ts-note-group').classList.toggle('hidden', !e.target.checked);
+  });
+
+  // Photo selection
+  document.getElementById('ts-photo-inp').addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      photoData = await compressFileToBase64(file);
+      document.getElementById('ts-photo-txt').textContent = '✓ ' + file.name;
+    } catch (err) {
+      showToast('Photo error: ' + err.message, 'error');
+    }
+  });
+
+  // Start trip
+  document.getElementById('ts-start').addEventListener('click', async () => {
+    const milVal = document.getElementById('ts-mileage').value.trim();
+    if (!milVal) { showToast('Mileage start is required', 'error'); return; }
+    const addLater = document.getElementById('ts-add-later').checked;
+    const assignId = (!addLater && selectedCat === 'In Route to WO')
+      ? document.getElementById('ts-assignment').value.trim() || null
+      : null;
+    const noteOn = document.getElementById('ts-note-toggle').checked;
+    const notes = noteOn ? document.getElementById('ts-notes').value.trim() || null : null;
+    try {
+      document.getElementById('ts-start').disabled = true;
+      document.getElementById('ts-start').textContent = 'Starting...';
+      const trip = await api.startTrip({
+        category: selectedCat,
+        assignment_id: assignId,
+        start_time: new Date().toISOString(),
+        mileage_start: parseFloat(milVal),
+        notes,
+      });
+      state.currentTrip = trip;
+      if (photoData) await uploadTripPhotoData(trip.id, 'before', photoData);
+      closeModal();
+      renderIdleClockPage();
+    } catch (err) {
+      showToast(err.message || 'Failed to start trip', 'error');
+      document.getElementById('ts-start').disabled = false;
+      document.getElementById('ts-start').textContent = 'Start Trip';
+    }
+  });
+}
+
+function openTripStopModal(trip) {
+  let afterPhotoData = null;
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('car')} Stop Trip</h3>
+      <button class="btn btn-ghost btn-sm" id="tst-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Mileage End</label>
+        <input type="number" class="form-control" id="tst-mileage-end" placeholder="e.g. 45278.5" min="0" step="0.1"
+          value="${trip.mileage_start != null ? '' : ''}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <textarea class="form-control" id="tst-notes" rows="2" placeholder="Optional note...">${escHtml(trip.notes || '')}</textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Mileage Photo (After) <span class="opt-label">optional</span></label>
+        <label class="photo-add-btn" for="tst-photo-inp">
+          ${svg('camera')} <span id="tst-photo-txt">Add Photo</span>
+        </label>
+        <input type="file" accept="image/*" class="visually-hidden" id="tst-photo-inp">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="tst-cancel">Cancel</button>
+      <button class="btn btn-primary" id="tst-finish">Finish Trip</button>
+    </div>`);
+
+  document.getElementById('tst-x').addEventListener('click', closeModal);
+  document.getElementById('tst-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('tst-photo-inp').addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      afterPhotoData = await compressFileToBase64(file);
+      document.getElementById('tst-photo-txt').textContent = '✓ ' + file.name;
+    } catch (err) {
+      showToast('Photo error: ' + err.message, 'error');
+    }
+  });
+
+  document.getElementById('tst-finish').addEventListener('click', async () => {
+    const milEndVal = document.getElementById('tst-mileage-end').value.trim();
+    const notes = document.getElementById('tst-notes').value.trim() || null;
+    try {
+      document.getElementById('tst-finish').disabled = true;
+      document.getElementById('tst-finish').textContent = 'Finishing...';
+      const stopped = await api.stopTrip(trip.id, {
+        end_time: new Date().toISOString(),
+        mileage_end: milEndVal ? parseFloat(milEndVal) : null,
+        notes,
+      });
+      if (afterPhotoData) await uploadTripPhotoData(stopped.id, 'after', afterPhotoData);
+      state.currentTrip = null;
+      clearInterval(state.tripTimerInterval);
+      state.tripTimerInterval = null;
+      closeModal();
+      openTripSummaryModal(stopped);
+    } catch (err) {
+      showToast(err.message || 'Failed to stop trip', 'error');
+      document.getElementById('tst-finish').disabled = false;
+      document.getElementById('tst-finish').textContent = 'Finish Trip';
+    }
+  });
+}
+
+function openTripSummaryModal(trip) {
+  const sym = state.settings.currency_symbol || '$';
+  let drivingSec = 0;
+  if (trip.start_time && trip.end_time) {
+    drivingSec = Math.max(0, Math.floor((new Date(trip.end_time) - new Date(trip.start_time)) / 1000));
+  }
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('car')} Trip Summary</h3>
+    </div>
+    <div class="modal-body">
+      <div class="review-row"><span>Category:</span><span>${escHtml(trip.category)}</span></div>
+      ${trip.assignment_id ? `<div class="review-row"><span>Assignment:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      ${trip.trip_id ? `<div class="review-row"><span>Trip ID:</span><span>${escHtml(trip.trip_id)}</span></div>` : ''}
+      <div class="review-row"><span>Distance:</span><span>${trip.distance != null ? trip.distance.toFixed(2) + ' mi' : '—'}</span></div>
+      <div class="review-row"><span>Driving Time:</span><span>${fmtDecimalHours(drivingSec)}</span></div>
+      <div class="review-row total-row"><span>Tax Deduction:</span><span>${trip.tax_deduction != null ? sym + trip.tax_deduction.toFixed(2) : '—'}</span></div>
+    </div>
+    <div class="modal-footer">
+      ${(trip.category === 'In Route to WO' && trip.assignment_id) ?
+        `<button class="btn btn-primary" id="ts-clockin-now">Clock In Now</button>` : ''}
+      <button class="btn btn-ghost" id="ts-done">Done</button>
+    </div>`);
+
+  document.getElementById('ts-done').addEventListener('click', () => {
+    closeModal();
+    renderIdleClockPage();
+  });
+
+  document.getElementById('ts-clockin-now')?.addEventListener('click', () => {
+    closeModal();
+    navigateTo('clock');
+    // Pre-fill assignment ID after render
+    setTimeout(() => {
+      const assignEl = document.getElementById('wo-title-input');
+      if (assignEl) assignEl.value = `WO - ${trip.assignment_id}`;
+    }, 200);
+  });
+}
+
+function openTripDetail(trip) {
+  const sym = state.settings.currency_symbol || '$';
+  let drivingSec = 0;
+  if (trip.start_time && trip.end_time) {
+    drivingSec = Math.max(0, Math.floor((new Date(trip.end_time) - new Date(trip.start_time)) / 1000));
+  }
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('car')} Trip Detail</h3>
+      <button class="btn btn-ghost btn-sm" id="td-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="review-row"><span>Category:</span><span>${escHtml(trip.category)}</span></div>
+      ${trip.assignment_id ? `<div class="review-row"><span>Assignment ID:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      ${trip.trip_id ? `<div class="review-row"><span>Trip ID:</span><span>${escHtml(trip.trip_id)}</span></div>` : ''}
+      <div class="review-row"><span>Start:</span><span>${fmtDateFull(trip.start_time)}</span></div>
+      <div class="review-row"><span>End:</span><span>${trip.end_time ? fmtDateFull(trip.end_time) : 'Active'}</span></div>
+      <div class="review-row"><span>Mileage Start:</span><span>${trip.mileage_start != null ? trip.mileage_start + ' mi' : '—'}</span></div>
+      <div class="review-row"><span>Mileage End:</span><span>${trip.mileage_end != null ? trip.mileage_end + ' mi' : '—'}</span></div>
+      <div class="review-row"><span>Distance:</span><span>${trip.distance != null ? trip.distance.toFixed(2) + ' mi' : '—'}</span></div>
+      <div class="review-row"><span>Driving Time:</span><span>${fmtDecimalHours(drivingSec)}</span></div>
+      <div class="review-row total-row"><span>Tax Deduction:</span><span>${trip.tax_deduction != null ? sym + trip.tax_deduction.toFixed(2) : '—'}</span></div>
+      ${trip.notes ? `<div class="review-row" style="align-items:flex-start;"><span>Notes:</span><span style="white-space:pre-wrap;">${escHtml(trip.notes)}</span></div>` : ''}
+      <div id="td-photos"><div class="field-hint" style="margin-top:12px;">Loading photos...</div></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-danger btn-sm" id="td-delete">Delete</button>
+      <button class="btn btn-ghost" id="td-close2">Close</button>
+    </div>`);
+
+  document.getElementById('td-close').addEventListener('click', closeModal);
+  document.getElementById('td-close2').addEventListener('click', closeModal);
+  document.getElementById('td-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this trip?')) return;
+    try {
+      await api.deleteTrip(trip.id);
+      closeModal();
+      renderJournalPage();
+    } catch (err) { showToast(err.message, 'error'); }
+  });
+
+  // Load photos
+  (async () => {
+    const photosDiv = document.getElementById('td-photos');
+    if (!photosDiv) return;
+    try {
+      const photos = await api.getTripPhotos(trip.id);
+      if (!photos.length) { photosDiv.innerHTML = ''; return; }
+      photosDiv.innerHTML = buildPhotoGallery(photos);
+    } catch { photosDiv.innerHTML = ''; }
+  })();
+}
+
+function renderTripsJournal(trips, sym) {
+  if (!trips || !trips.length) return '<div class="empty-state">No trips this month</div>';
+
+  const ws = state.settings.week_start === '7' ? 0 : 1;
+  const weekGroups = {};
+  for (const t of trips) {
+    const dt = new Date(t.start_time);
+    const { start, end } = getWeekBounds(dt, ws);
+    const key = start.toISOString();
+    if (!weekGroups[key]) weekGroups[key] = { start, end, trips: [] };
+    weekGroups[key].trips.push(t);
+  }
+
+  const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
+
+  return sortedWeeks.map(wg => {
+    const completedTrips = wg.trips.filter(t => t.status === 'completed');
+    const weekMiles = completedTrips.reduce((s,t) => s + (t.distance || 0), 0);
+    const weekTax   = completedTrips.reduce((s,t) => s + (t.tax_deduction || 0), 0);
+    const dateRange = `${fmtDateShort(wg.start.toISOString())} – ${fmtDateShort(wg.end.toISOString())}`;
+
+    const tripCardsHtml = [...wg.trips]
+      .sort((a,b) => new Date(a.start_time) - new Date(b.start_time))
+      .map(t => `
+        <div class="entry-card trip-card" data-trip-id="${t.id}" style="cursor:pointer;">
+          <div class="entry-card-top">
+            <div class="entry-title">${escHtml(t.category)}</div>
+            <span class="status-chip ${t.status === 'completed' ? 'completed' : 'pending'}">${t.distance != null ? t.distance.toFixed(1)+' mi' : '—'}</span>
+          </div>
+          <div class="entry-meta">
+            ${t.assignment_id ? escHtml(t.assignment_id)+' · ' : ''}
+            ${fmtDateFull(t.start_time)} · ${t.tax_deduction != null ? sym+t.tax_deduction.toFixed(2)+' deduction' : ''}
+          </div>
+        </div>`).join('');
+
+    return `
+      <div class="week-group">
+        <div class="week-header">
+          <div class="week-header-left">
+            <div class="week-label">${getISOWeekLabel(wg.start)} <span class="week-dates">${dateRange}</span></div>
+            <div class="week-totals">${weekMiles.toFixed(1)} mi · ${sym}${weekTax.toFixed(2)} deduction</div>
+          </div>
+        </div>
+        ${tripCardsHtml}
+      </div>`;
+  }).join('');
+}
+
+
+/* ================================================================
    JOURNAL PAGE
    ================================================================ */
 async function renderJournalPage() {
   const page = document.getElementById('page');
   try {
-    const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
-    const payMap = {};
-    payPeriods.forEach(p => { payMap[p.week_start] = p; });
-    const weekStartDay = parseInt(state.settings.week_start || '1', 10) - 1; // 0=Sun, 1=Mon (settings stores 1 or 7)
-    // Adjust: settings week_start: 1=Mon, 7=Sun
-    const ws = state.settings.week_start === '7' ? 0 : 1; // 0=Sun, 1=Mon
-
     const d = state.journalDate;
     const monthStart = new Date(d.getFullYear(), d.getMonth(), 1);
     const monthEnd   = new Date(d.getFullYear(), d.getMonth()+1, 0, 23, 59, 59);
-
-    const monthEntries = entries.filter(e => {
-      const ci = new Date(e.clock_in);
-      return ci >= monthStart && ci <= monthEnd;
-    });
-
-    // Group by week within month
-    const weekGroups = {};
-    for (const e of monthEntries) {
-      const ci = new Date(e.clock_in);
-      const { start, end } = getWeekBounds(ci, ws);
-      const key = start.toISOString();
-      if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
-      weekGroups[key].entries.push(e);
-    }
-
-    const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
-    const weekGroupsByDate = {};
-    for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
-
-    // Month totals
-    const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
-    const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
-
     const sym = state.settings.currency_symbol || '$';
+    const ws = state.settings.week_start === '7' ? 0 : 1;
 
+    // Render header and sub-tabs
     page.innerHTML = `
       <div class="journal-header">
         <button class="btn btn-ghost btn-icon" id="j-prev">${svg('chevL')}</button>
         <div class="journal-month-title">${fmtMonthYear(d)}</div>
         <button class="btn btn-ghost btn-icon" id="j-next">${svg('chevR')}</button>
       </div>
-      <div class="journal-month-totals">
-        <span>${mTotalHrs.toFixed(2)} hrs</span>
-        <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
-        <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
+      <div class="journal-tabs">
+        <button class="journal-tab ${state.journalSubTab==='work'?'active':''}" data-tab="work">Work</button>
+        <button class="journal-tab ${state.journalSubTab==='trips'?'active':''}" data-tab="trips">Trips</button>
       </div>
-      <div id="journal-body">
-        ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
-          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap)).join('')}
-      </div>`;
+      <div id="journal-body"><div class="loading-page"><div class="spinner"></div></div></div>`;
 
     document.getElementById('j-prev').addEventListener('click', () => {
       state.journalDate = new Date(d.getFullYear(), d.getMonth()-1, 1);
@@ -1481,47 +1906,119 @@ async function renderJournalPage() {
       renderJournalPage();
     });
 
-    // Entry card click handlers
-    document.querySelectorAll('.entry-card').forEach(card => {
-      card.addEventListener('click', e => {
-        if (e.target.closest('button')) return;
-        const eid = parseInt(card.dataset.id);
-        const entry = entries.find(en => en.id === eid);
-        if (entry) openEntryDetail(entry);
+    document.querySelectorAll('.journal-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.journalSubTab = btn.dataset.tab;
+        renderJournalPage();
       });
     });
 
-    document.querySelectorAll('.entry-edit-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        const eid = parseInt(btn.dataset.id);
-        const entry = entries.find(en => en.id === eid);
-        if (entry) openEntryEdit(entry);
-      });
-    });
+    const journalBody = document.getElementById('journal-body');
 
-    document.querySelectorAll('.entry-delete-btn').forEach(btn => {
-      btn.addEventListener('click', async e => {
-        e.stopPropagation();
-        if (!confirm('Delete this work order?')) return;
-        try {
-          await api.deleteEntry(parseInt(btn.dataset.id));
-          renderJournalPage();
-        } catch (err) { showToast(err.message, 'error'); }
+    if (state.journalSubTab === 'trips') {
+      // Load trips for this month
+      const allTrips = await api.getTrips();
+      const monthTrips = allTrips.filter(t => {
+        const dt = new Date(t.start_time);
+        return dt >= monthStart && dt <= monthEnd;
       });
-    });
+      const totalMiles = monthTrips.filter(t=>t.status==='completed').reduce((s,t) => s+(t.distance||0), 0);
+      const totalTax   = monthTrips.filter(t=>t.status==='completed').reduce((s,t) => s+(t.tax_deduction||0), 0);
+      journalBody.innerHTML = `
+        <div class="journal-month-totals" style="border-top:1px solid var(--border);">
+          <span>${totalMiles.toFixed(1)} mi</span>
+          <span>${sym}${totalTax.toFixed(2)} deductions</span>
+          <a class="btn btn-ghost btn-sm" href="${api.getMileageExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Mileage CSV</a>
+        </div>
+        ${renderTripsJournal(monthTrips, sym)}`;
 
-    document.querySelectorAll('.pay-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        const weekStart = btn.dataset.weekStart;
-        const weekEnd   = btn.dataset.weekEnd;
-        const wg = weekGroupsByDate[weekStart];
-        if (!wg) return;
-        const wExp = wg.entries.filter(e => e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
-        openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage);
+      // Wire up trip card clicks
+      journalBody.querySelectorAll('.trip-card').forEach(card => {
+        card.addEventListener('click', e => {
+          if (e.target.closest('button')) return;
+          const tid = parseInt(card.dataset.tripId);
+          const trip = monthTrips.find(t => t.id === tid);
+          if (trip) openTripDetail(trip);
+        });
       });
-    });
+    } else {
+      // Work tab — existing behavior
+      const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
+      const payMap = {};
+      payPeriods.forEach(p => { payMap[p.week_start] = p; });
+
+      const monthEntries = entries.filter(e => {
+        const ci = new Date(e.clock_in);
+        return ci >= monthStart && ci <= monthEnd;
+      });
+
+      const weekGroups = {};
+      for (const e of monthEntries) {
+        const ci = new Date(e.clock_in);
+        const { start, end } = getWeekBounds(ci, ws);
+        const key = start.toISOString();
+        if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
+        weekGroups[key].entries.push(e);
+      }
+
+      const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
+      const weekGroupsByDate = {};
+      for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
+
+      const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
+      const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
+
+      journalBody.innerHTML = `
+        <div class="journal-month-totals" style="border-top:1px solid var(--border);">
+          <span>${mTotalHrs.toFixed(2)} hrs</span>
+          <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
+          <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
+        </div>
+        ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
+          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap)).join('')}`;
+
+      // Entry card click handlers
+      journalBody.querySelectorAll('.entry-card').forEach(card => {
+        card.addEventListener('click', e => {
+          if (e.target.closest('button')) return;
+          const eid = parseInt(card.dataset.id);
+          const entry = entries.find(en => en.id === eid);
+          if (entry) openEntryDetail(entry);
+        });
+      });
+
+      journalBody.querySelectorAll('.entry-edit-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          const eid = parseInt(btn.dataset.id);
+          const entry = entries.find(en => en.id === eid);
+          if (entry) openEntryEdit(entry);
+        });
+      });
+
+      journalBody.querySelectorAll('.entry-delete-btn').forEach(btn => {
+        btn.addEventListener('click', async e => {
+          e.stopPropagation();
+          if (!confirm('Delete this work order?')) return;
+          try {
+            await api.deleteEntry(parseInt(btn.dataset.id));
+            renderJournalPage();
+          } catch (err) { showToast(err.message, 'error'); }
+        });
+      });
+
+      journalBody.querySelectorAll('.pay-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          const weekStart = btn.dataset.weekStart;
+          const weekEnd   = btn.dataset.weekEnd;
+          const wg = weekGroupsByDate[weekStart];
+          if (!wg) return;
+          const wExp = wg.entries.filter(e => e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
+          openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage);
+        });
+      });
+    }
 
   } catch (err) {
     page.innerHTML = `<div class="empty-state">Error loading journal</div>`;
@@ -2033,7 +2530,7 @@ function openEntryEdit(entry) {
 async function renderOverviewPage() {
   const page = document.getElementById('page');
   try {
-    const [all, allPayPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
+    const [all, allPayPeriods, allTrips] = await Promise.all([api.getEntries(), api.getPayPeriods(), api.getTrips().catch(() => [])]);
     const sym = state.settings.currency_symbol || '$';
     const now = new Date();
     const ws  = state.settings.week_start === '7' ? 0 : 1;
@@ -2137,6 +2634,21 @@ async function renderOverviewPage() {
     const outstanding = payStat.pending.expected + payStat.delayed.expected + Math.max(0, payStat.problem.expected - payStat.problem.received);
     const hasPayData  = allPayPeriods.length > 0;
 
+    // Mileage stats
+    const filteredTrips = allTrips.filter(t => {
+      if (t.status !== 'completed') return false;
+      const d = new Date(t.start_time);
+      if (fromDate && d < fromDate) return false;
+      if (toDate   && d > toDate)   return false;
+      return true;
+    });
+    const totalMiles = filteredTrips.reduce((s,t) => s + (t.distance || 0), 0);
+    const totalTaxDed = filteredTrips.reduce((s,t) => s + (t.tax_deduction || 0), 0);
+    const totalDrivingSec = filteredTrips.reduce((s,t) => {
+      if (!t.start_time || !t.end_time) return s;
+      return s + Math.max(0, Math.floor((new Date(t.end_time) - new Date(t.start_time))/1000));
+    }, 0);
+
     // Sub-select options
     const weekOpts  = ['This Week','Last Week','2 Wks Ago','3 Wks Ago','4 Wks Ago'];
     const monthOpts = ['This Month','Last Month','2 Mo Ago','3 Mo Ago','4 Mo Ago'];
@@ -2205,6 +2717,17 @@ async function renderOverviewPage() {
                 <div class="status-bar-bg"><div class="status-bar-fill ${k}" style="width:${Math.round(v/Math.max(allFiltered.length,1)*100)}%"></div></div>
               </div>`).join('')}
           </div>
+        </div>
+
+        <div class="section-label">Mileage</div>
+        <div class="card">
+          <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Total Miles</div><div class="stat-value">${totalMiles.toFixed(1)}</div></div>
+            <div class="stat-card"><div class="stat-label">Drive Time</div><div class="stat-value">${fmtDecimalHours(totalDrivingSec)}</div></div>
+            <div class="stat-card"><div class="stat-label">Tax Deductions</div><div class="stat-value">${sym}${totalTaxDed.toFixed(2)}</div></div>
+            ${filteredTrips.length > 0 ? `<div class="stat-card"><div class="stat-label">Trips</div><div class="stat-value">${filteredTrips.length}</div></div>` : ''}
+          </div>
+          ${filteredTrips.length === 0 ? '<div class="empty-state-sm">No trips in this period</div>' : ''}
         </div>
 
         <div class="section-label">Pay Status</div>
@@ -2333,6 +2856,31 @@ async function renderSettingsPage() {
         <button class="btn btn-ghost btn-sm" id="add-client-btn" style="margin-top:8px;">${svg('plus')} Add Customer</button>
       </div>
 
+      <!-- Trip Settings -->
+      <div class="section-label">Trip Settings</div>
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label">IRS Mileage Rate ($/mi)</label>
+          <div class="money-wrap">
+            <span class="money-sym">$</span>
+            <input type="number" class="form-control" id="s-mileage-rate" value="${escHtml(s.mileage_rate||'0.67')}" min="0" step="0.01" style="max-width:120px;">
+          </div>
+        </div>
+        <button class="btn btn-primary btn-sm" id="s-save-mileage-btn">${svg('check')} Save Rate</button>
+      </div>
+
+      <!-- Trip Categories -->
+      <div class="section-label">Trip Categories</div>
+      <div class="card" id="trip-cat-card">
+        ${renderTripCategoriesList()}
+        <div class="form-group" style="margin-top:12px;">
+          <div class="input-row">
+            <input type="text" class="form-control" id="new-trip-cat-input" placeholder="New category name">
+            <button class="btn btn-primary btn-sm" id="add-trip-cat-btn">${svg('plus')}</button>
+          </div>
+        </div>
+      </div>
+
       <div style="height:16px;"></div>
     </div>`;
 
@@ -2428,6 +2976,77 @@ async function renderSettingsPage() {
       try { await api.deleteClient(parseInt(btn.dataset.id)); await reloadData(); renderSettingsPage(); } catch(e){ showToast(e.message,'error'); }
     });
   });
+
+  // Trip Settings — Mileage rate save
+  document.getElementById('s-save-mileage-btn').addEventListener('click', async () => {
+    const rate = document.getElementById('s-mileage-rate').value.trim();
+    if (!rate) { showToast('Rate required', 'error'); return; }
+    try {
+      state.settings = await api.saveSettings({ mileage_rate: rate });
+      showToast('Mileage rate saved', 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+  });
+
+  // Trip Categories CRUD
+  document.getElementById('add-trip-cat-btn').addEventListener('click', async () => {
+    const inp = document.getElementById('new-trip-cat-input');
+    const name = inp.value.trim();
+    if (!name) { showToast('Category name required', 'error'); return; }
+    try {
+      const cat = await api.createTripCategory({ name });
+      state.tripCategories.push(cat);
+      inp.value = '';
+      refreshTripCatList();
+    } catch (e) { showToast(e.message || 'Failed to add category', 'error'); }
+  });
+
+  rewireTripCatDeleteBtns();
+}
+
+function refreshTripCatList() {
+  const card = document.getElementById('trip-cat-card');
+  if (!card) return;
+  // Re-render list items before the form group
+  const formGroup = card.querySelector('.form-group');
+  // Remove existing list items
+  card.querySelectorAll('.list-item').forEach(el => el.remove());
+  card.querySelectorAll('.empty-state-sm').forEach(el => el.remove());
+  // Insert new list
+  const tmp = document.createElement('div');
+  tmp.innerHTML = renderTripCategoriesList();
+  while (tmp.firstChild) {
+    card.insertBefore(tmp.firstChild, formGroup || null);
+  }
+  rewireTripCatDeleteBtns();
+}
+
+function rewireTripCatDeleteBtns() {
+  document.querySelectorAll('.trip-cat-del-btn').forEach(btn => {
+    // Remove existing listeners by cloning
+    const newBtn = btn.cloneNode(true);
+    btn.parentNode.replaceChild(newBtn, btn);
+    newBtn.addEventListener('click', async () => {
+      const id = parseInt(newBtn.dataset.id);
+      const cat = state.tripCategories.find(c => c.id === id);
+      if (!confirm(`Delete category "${cat?.name || id}"?`)) return;
+      try {
+        await api.deleteTripCategory(id);
+        state.tripCategories = state.tripCategories.filter(c => c.id !== id);
+        refreshTripCatList();
+      } catch (e) { showToast(e.message, 'error'); }
+    });
+  });
+}
+
+function renderTripCategoriesList() {
+  if (!state.tripCategories.length) return '<div class="empty-state-sm">No trip categories yet</div>';
+  return state.tripCategories.map(c => `
+    <div class="list-item">
+      <div class="list-item-info"><div class="list-item-name">${escHtml(c.name)}</div></div>
+      <div class="list-item-actions">
+        <button class="btn btn-ghost btn-sm trip-cat-del-btn" data-id="${c.id}" style="color:var(--red);">${svg('trash')}</button>
+      </div>
+    </div>`).join('');
 }
 
 function renderRatesList() {
@@ -2571,6 +3190,8 @@ async function init() {
   startLiveClock();
   try {
     await reloadData();
+    state.tripCategories = await api.getTripCategories().catch(() => []);
+    try { state.currentTrip = await api.getCurrentTrip(); } catch { state.currentTrip = null; }
   } catch (e) {
     console.error('Init failed:', e);
   }
