@@ -1568,7 +1568,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
-        req = {"body": body, "query": query, "path": path}
+        req = {"body": body, "query": query, "path": path, "method": method}
 
         try:
             status, result = handler(req, groups or ())

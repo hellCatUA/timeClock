@@ -2869,18 +2869,6 @@ async function renderSettingsPage() {
         <button class="btn btn-primary btn-sm" id="s-save-mileage-btn">${svg('check')} Save Rate</button>
       </div>
 
-      <!-- Trip Categories -->
-      <div class="section-label">Trip Categories</div>
-      <div class="card" id="trip-cat-card">
-        ${renderTripCategoriesList()}
-        <div class="form-group" style="margin-top:12px;">
-          <div class="input-row">
-            <input type="text" class="form-control" id="new-trip-cat-input" placeholder="New category name">
-            <button class="btn btn-primary btn-sm" id="add-trip-cat-btn">${svg('plus')}</button>
-          </div>
-        </div>
-      </div>
-
       <div style="height:16px;"></div>
     </div>`;
 
@@ -2987,20 +2975,6 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-  // Trip Categories CRUD
-  document.getElementById('add-trip-cat-btn').addEventListener('click', async () => {
-    const inp = document.getElementById('new-trip-cat-input');
-    const name = inp.value.trim();
-    if (!name) { showToast('Category name required', 'error'); return; }
-    try {
-      const cat = await api.createTripCategory({ name });
-      state.tripCategories.push(cat);
-      inp.value = '';
-      refreshTripCatList();
-    } catch (e) { showToast(e.message || 'Failed to add category', 'error'); }
-  });
-
-  rewireTripCatDeleteBtns();
 }
 
 function refreshTripCatList() {
