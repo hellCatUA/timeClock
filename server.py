@@ -503,10 +503,12 @@ def h_post_entry(req, _groups):
 def h_put_entry(req, groups):
     data = req.get("body", {})
     eid = groups[0]
+    old_folder = new_folder = None
     with get_db() as db:
         ex = row_to_dict(db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone())
         if not ex:
             return 404, {"error": "Not found"}
+        old_folder = _photo_folder(ex, eid)
         materials = data.get("materials")
         if materials is not None:
             materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else materials
@@ -559,8 +561,26 @@ def h_put_entry(req, groups):
             materials_str,
             eid
         ))
+        new_folder = _photo_folder({
+            "clock_in":      data.get("clock_in", ex["clock_in"]),
+            "assignment_id": data.get("assignment_id", ex.get("assignment_id")),
+        }, eid)
+        if old_folder != new_folder:
+            db.execute(
+                "UPDATE entry_photos SET folder=? WHERE entry_id=? AND folder=?",
+                (new_folder, eid, old_folder)
+            )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
+    if old_folder and new_folder and old_folder != new_folder:
+        old_dir = UPLOADS_DIR / old_folder
+        new_dir = UPLOADS_DIR / new_folder
+        if old_dir.exists():
+            try:
+                new_dir.parent.mkdir(parents=True, exist_ok=True)
+                old_dir.rename(new_dir)
+            except Exception:
+                pass
     return 200, entry
 
 
@@ -653,10 +673,19 @@ def h_end_break(req, groups):
 
 
 def h_delete_entry(req, groups):
+    eid = groups[0]
+    photos = []
     with get_db() as db:
-        cur = db.execute("DELETE FROM time_entries WHERE id=?", (groups[0],))
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=?", (eid,)
+        ).fetchall())
+        cur = db.execute("DELETE FROM time_entries WHERE id=?", (eid,))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
+    for photo in photos:
+        fp = UPLOADS_DIR / (photo.get('folder') or str(eid)) / photo['filename']
+        try: fp.unlink(missing_ok=True)
+        except Exception: pass
     return 200, {"success": True}
 
 
