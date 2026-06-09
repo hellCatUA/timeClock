@@ -26,6 +26,7 @@ const state = {
   journalSubTab: 'work',
   pendingTripAssignment: null,
   pendingTripClockIn: null,
+  pendingTripId: null,
 };
 
 /* ── Time helpers ───────────────────────────────────────────────── */
@@ -520,9 +521,10 @@ function renderIdleClockPage() {
   const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
 
-  const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn) ? `
+  const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn || state.pendingTripId) ? `
     <div class="card" style="background:var(--green-bg);border:1px solid var(--green);padding:10px 14px;margin-bottom:4px;border-radius:8px;">
       ${state.pendingTripAssignment ? `<div style="font-size:13px;">Trip WO: <b>${escHtml(state.pendingTripAssignment)}</b> will be pre-filled</div>` : ''}
+      ${!state.pendingTripAssignment && state.pendingTripId ? `<div style="font-size:13px;">Trip will link to WO when you save Assignment ID</div>` : ''}
       ${state.pendingTripClockIn ? `<div style="font-size:13px;margin-top:2px;">Trip arrival time: <b>${fmtTime(state.pendingTripClockIn)}</b> available as clock-in</div>` : ''}
     </div>` : '';
 
@@ -670,6 +672,7 @@ function renderIdleClockPage() {
       });
       state.pendingTripAssignment = null;
       state.pendingTripClockIn = null;
+      state.pendingTripId = null;
       state.showReminderBanner = false;
       state.showBreakReturnBanner = false;
       scheduleBreakReminder();
@@ -708,9 +711,12 @@ function renderActiveTripPage() {
       </div>
     </div>
     <div class="clock-actions" style="flex-direction:column;gap:10px;padding:20px 16px;">
-      <button class="btn btn-primary btn-lg" id="atp-clock-in">${svg('clock')} Clock In</button>
+      <button class="btn btn-primary btn-lg" id="atp-main-action">
+        ${trip.category === 'In Route to WO' ? `${svg('clock')} Clock In` : `${svg('stop')} Finish Trip`}
+      </button>
       <button class="btn btn-secondary btn-lg" id="atp-reassign">${svg('car')} Reassign Trip</button>
       <button class="btn btn-danger btn-lg" id="atp-cancel">${svg('trash')} Cancel Trip</button>
+      ${state.currentEntry ? `<button class="btn btn-ghost btn-lg" id="atp-back-to-work">${svg('return')} Back to Work</button>` : ''}
     </div>`;
 
   const update = () => {
@@ -727,7 +733,8 @@ function renderActiveTripPage() {
       state.currentTrip = null;
       clearInterval(state.tripTimerInterval);
       state.tripTimerInterval = null;
-      renderIdleClockPage();
+      if (state.currentEntry) renderActiveClockPage();
+      else renderIdleClockPage();
     } catch (err) {
       showToast(err.message || 'Failed to cancel trip', 'error');
     }
@@ -737,20 +744,16 @@ function renderActiveTripPage() {
     openReassignTripModal(trip);
   });
 
-  document.getElementById('atp-clock-in').addEventListener('click', async () => {
-    const useEndTime = confirm('Use trip arrival time as your clock-in time?');
-    try {
-      const nowIso = new Date().toISOString();
-      await api.stopTrip(trip.id, { end_time: nowIso });
-      state.pendingTripAssignment = trip.assignment_id || null;
-      state.pendingTripClockIn = useEndTime ? nowIso : null;
-      state.currentTrip = null;
-      clearInterval(state.tripTimerInterval);
-      state.tripTimerInterval = null;
-      renderIdleClockPage();
-    } catch (err) {
-      showToast(err.message || 'Failed', 'error');
+  document.getElementById('atp-main-action').addEventListener('click', () => {
+    if (trip.category === 'In Route to WO') {
+      openTripClockInModal(trip);
+    } else {
+      openTripStopModal(trip);
     }
+  });
+
+  document.getElementById('atp-back-to-work')?.addEventListener('click', () => {
+    renderActiveClockPage();
   });
 }
 
@@ -813,6 +816,57 @@ function openReassignTripModal(trip) {
   });
 }
 
+function openTripClockInModal(trip) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('clock')} Clock In from Trip</h3>
+      <button class="btn btn-ghost btn-sm" id="tci-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="review-row" style="margin-bottom:12px;">
+        <span>Category:</span><span>${escHtml(trip.category)}</span>
+      </div>
+      ${trip.assignment_id ? `<div class="review-row" style="margin-bottom:12px;"><span>Assignment:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      <div class="form-group">
+        <label class="form-label">Mileage End <span class="opt-label">optional</span></label>
+        <input type="number" class="form-control" id="tci-mileage-end" placeholder="e.g. 45278.5" min="0" step="0.1">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="tci-cancel">Cancel</button>
+      <button class="btn btn-primary" id="tci-confirm">${svg('clock')} Stop Trip &amp; Clock In</button>
+    </div>`);
+
+  document.getElementById('tci-x').addEventListener('click', closeModal);
+  document.getElementById('tci-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('tci-confirm').addEventListener('click', async () => {
+    const milEndVal = document.getElementById('tci-mileage-end').value.trim();
+    const confirmBtn = document.getElementById('tci-confirm');
+    try {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Stopping trip...';
+      const nowIso = new Date().toISOString();
+      await api.stopTrip(trip.id, {
+        end_time: nowIso,
+        mileage_end: milEndVal ? parseFloat(milEndVal) : null,
+      });
+      state.pendingTripAssignment = trip.assignment_id || null;
+      state.pendingTripClockIn = nowIso;
+      state.pendingTripId = trip.assignment_id ? null : trip.id;
+      state.currentTrip = null;
+      clearInterval(state.tripTimerInterval);
+      state.tripTimerInterval = null;
+      closeModal();
+      renderIdleClockPage();
+    } catch (err) {
+      showToast(err.message || 'Failed to stop trip', 'error');
+      confirmBtn.disabled = false;
+      confirmBtn.innerHTML = `${svg('clock')} Stop Trip &amp; Clock In`;
+    }
+  });
+}
+
 /* ── Active clock page ───────────────────────────────────────────── */
 function renderActiveClockPage() {
   const entry = state.currentEntry;
@@ -866,6 +920,9 @@ function renderActiveClockPage() {
           ? `<button class="btn btn-orange btn-lg" id="start-break-btn">${svg('coffee')} Break</button>`
           : ''}
       <button class="btn btn-danger btn-lg" id="clockout-btn">${svg('stop')} Clock Out</button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;padding:0 16px 4px;">
+      <button class="btn btn-secondary btn-sm" id="onclock-trip-btn">${svg('car')} Trip</button>
     </div>
 
     <!-- Assignment Details -->
@@ -1059,6 +1116,14 @@ function renderActiveClockPage() {
     initiateClockOut(entry);
   });
 
+  document.getElementById('onclock-trip-btn').addEventListener('click', async () => {
+    if (state.currentTrip) {
+      renderActiveTripPage();
+    } else {
+      openTripStartModal();
+    }
+  });
+
   // Collapsible sections
   document.querySelectorAll('.section-header.collapsible').forEach(hdr => {
     hdr.addEventListener('click', () => {
@@ -1074,15 +1139,25 @@ function renderActiveClockPage() {
   });
 
   // Assignment Details save
-  document.getElementById('save-assignment-btn').addEventListener('click', () => saveSection(entry, {
-    wo_title:        document.getElementById('jd-wo-title').value.trim() || null,
-    organization_id: document.getElementById('jd-company').value ? Number(document.getElementById('jd-company').value) : null,
-    client_id:       document.getElementById('jd-customer').value ? Number(document.getElementById('jd-customer').value) : null,
-    site_id:         document.getElementById('jd-site-id').value.trim() || null,
-    assignment_id:   document.getElementById('jd-assignment').value.trim() || null,
-    ticket_num:      document.getElementById('jd-ticket').value.trim() || null,
-    inc_num:         document.getElementById('jd-inc').value.trim() || null,
-  }));
+  document.getElementById('save-assignment-btn').addEventListener('click', async () => {
+    const newAssignId = document.getElementById('jd-assignment').value.trim() || null;
+    await saveSection(entry, {
+      wo_title:        document.getElementById('jd-wo-title').value.trim() || null,
+      organization_id: document.getElementById('jd-company').value ? Number(document.getElementById('jd-company').value) : null,
+      client_id:       document.getElementById('jd-customer').value ? Number(document.getElementById('jd-customer').value) : null,
+      site_id:         document.getElementById('jd-site-id').value.trim() || null,
+      assignment_id:   newAssignId,
+      ticket_num:      document.getElementById('jd-ticket').value.trim() || null,
+      inc_num:         document.getElementById('jd-inc').value.trim() || null,
+    });
+    if (newAssignId && state.pendingTripId) {
+      try {
+        await api.reassignTrip(state.pendingTripId, { category: 'In Route to WO', assignment_id: newAssignId });
+        state.pendingTripId = null;
+        showToast('Trip linked to WO', 'success');
+      } catch { /* non-critical */ }
+    }
+  });
 
   // POCs save
   document.getElementById('save-pocs-btn').addEventListener('click', () => saveSection(entry, {
@@ -1628,25 +1703,21 @@ async function compressFileToBase64(file) {
 
 function openTripStartModal() {
   const cats = state.tripCategories;
-  // Smart auto-select
-  let defaultCat = 'In Route to WO';
-  if (state.currentEntry) {
-    defaultCat = 'OnClock Tools/Supplies';
-  } else {
-    // Check if there's a completed entry in last 4 hours
-    // We don't have entries cached here easily, so just use default
-    defaultCat = 'In Route to WO';
-  }
+  const clocked = !!state.currentEntry;
 
-  let selectedCat = defaultCat;
+  // When clocked in, only OnClock/Other. When off-clock, everything except OnClock.
+  const filteredCats = cats.filter(c => {
+    if (clocked) return c.name === 'OnClock Tools/Supplies' || c.name === 'Other';
+    return c.name !== 'OnClock Tools/Supplies';
+  });
+
+  let selectedCat = clocked ? 'OnClock Tools/Supplies' : 'In Route to WO';
+  // Make sure defaultCat is actually in filteredCats
+  if (!filteredCats.find(c => c.name === selectedCat)) selectedCat = filteredCats[0]?.name || 'Other';
   let photoData = null;
 
-  // Filter categories based on current entry
-  const filteredCats = cats.filter(c => {
-    if (c.name === 'OnClock Tools/Supplies') return !!state.currentEntry;
-    if (c.name === 'OffClock Tools/Supplies') return !state.currentEntry;
-    return true;
-  });
+  const isOther = () => selectedCat === 'Other';
+  const isInRoute = () => selectedCat === 'In Route to WO';
 
   const catBtnsHtml = filteredCats.map(c =>
     `<button class="trip-cat-btn${c.name === selectedCat ? ' active' : ''}" data-cat="${escHtml(c.name)}">${escHtml(c.name)}</button>`
@@ -1662,31 +1733,29 @@ function openTripStartModal() {
         <label class="form-label">Category</label>
         <div class="trip-cat-grid" id="ts-cat-grid">${catBtnsHtml}</div>
       </div>
-      <div class="form-group" id="ts-assignment-group" style="${selectedCat === 'In Route to WO' ? '' : 'display:none;'}">
-        <label class="form-label">Assignment ID</label>
+      <div class="form-group" id="ts-assignment-group" style="${isInRoute() ? '' : 'display:none;'}">
+        <label class="form-label">Assignment ID <span class="req-star">*</span></label>
         <div class="input-row">
           <input type="text" class="form-control" id="ts-assignment" placeholder="e.g. ABC-12345">
           <label style="display:flex;align-items:center;gap:4px;font-size:13px;white-space:nowrap;cursor:pointer;">
             <input type="checkbox" id="ts-add-later"> Add Later
           </label>
         </div>
+        <div id="ts-assignment-hint" class="field-hint hidden" style="color:var(--orange);">
+          Enter Assignment ID or check "Add Later"
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Mileage Start <span class="req-star">*</span></label>
         <input type="number" class="form-control" id="ts-mileage" placeholder="e.g. 45231.5" min="0" step="0.1">
       </div>
-      <div class="form-group">
-        <div class="toggle-row">
-          <label class="form-label" style="margin:0;">Add Note?</label>
-          <label class="switch"><input type="checkbox" id="ts-note-toggle"><span class="slider"></span></label>
-        </div>
-      </div>
-      <div class="form-group hidden" id="ts-note-group">
-        <textarea class="form-control" id="ts-notes" rows="2" placeholder="Optional note..."></textarea>
+      <div class="form-group" id="ts-note-field">
+        <label class="form-label">Note${isOther() ? ' <span class="req-star">*</span>' : ' <span class="opt-label">optional</span>'}</label>
+        <textarea class="form-control" id="ts-notes" rows="2" placeholder="${isOther() ? 'Required for Other trips...' : 'Optional note...'}"></textarea>
       </div>
       <div class="form-group">
         <label class="form-label">Mileage Photo (Before) <span class="opt-label">optional</span></label>
-        <label class="photo-add-btn" for="ts-photo-inp" id="ts-photo-label">
+        <label class="photo-add-btn" for="ts-photo-inp">
           ${svg('camera')} <span id="ts-photo-txt">Add Photo</span>
         </label>
         <input type="file" accept="image/*" class="visually-hidden" id="ts-photo-inp">
@@ -1700,28 +1769,31 @@ function openTripStartModal() {
   document.getElementById('ts-x').addEventListener('click', closeModal);
   document.getElementById('ts-cancel').addEventListener('click', closeModal);
 
-  // Category selection
+  const updateNoteLabel = () => {
+    const noteField = document.getElementById('ts-note-field');
+    if (!noteField) return;
+    noteField.querySelector('label').innerHTML = isOther()
+      ? 'Note <span class="req-star">*</span>'
+      : 'Note <span class="opt-label">optional</span>';
+    document.getElementById('ts-notes').placeholder = isOther() ? 'Required for Other trips...' : 'Optional note...';
+  };
+
   document.getElementById('ts-cat-grid').addEventListener('click', e => {
     const btn = e.target.closest('.trip-cat-btn');
     if (!btn) return;
     selectedCat = btn.dataset.cat;
-    document.querySelectorAll('.trip-cat-btn').forEach(b => b.classList.toggle('active', b === btn));
-    document.getElementById('ts-assignment-group').style.display = selectedCat === 'In Route to WO' ? '' : 'none';
+    document.querySelectorAll('#ts-cat-grid .trip-cat-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('ts-assignment-group').style.display = isInRoute() ? '' : 'none';
+    document.getElementById('ts-assignment-hint').classList.add('hidden');
+    updateNoteLabel();
   });
 
-  // Add Later checkbox
   document.getElementById('ts-add-later').addEventListener('change', e => {
     const inp = document.getElementById('ts-assignment');
     inp.disabled = e.target.checked;
-    if (e.target.checked) inp.value = '';
+    if (e.target.checked) { inp.value = ''; document.getElementById('ts-assignment-hint').classList.add('hidden'); }
   });
 
-  // Note toggle
-  document.getElementById('ts-note-toggle').addEventListener('change', e => {
-    document.getElementById('ts-note-group').classList.toggle('hidden', !e.target.checked);
-  });
-
-  // Photo selection
   document.getElementById('ts-photo-inp').addEventListener('change', async e => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1733,16 +1805,23 @@ function openTripStartModal() {
     }
   });
 
-  // Start trip
   document.getElementById('ts-start').addEventListener('click', async () => {
     const milVal = document.getElementById('ts-mileage').value.trim();
     if (!milVal) { showToast('Mileage start is required', 'error'); return; }
-    const addLater = document.getElementById('ts-add-later').checked;
-    const assignId = (!addLater && selectedCat === 'In Route to WO')
-      ? document.getElementById('ts-assignment').value.trim() || null
-      : null;
-    const noteOn = document.getElementById('ts-note-toggle').checked;
-    const notes = noteOn ? document.getElementById('ts-notes').value.trim() || null : null;
+
+    const addLater = document.getElementById('ts-add-later')?.checked ?? false;
+    const rawAssign = document.getElementById('ts-assignment')?.value.trim() || '';
+    if (isInRoute() && !addLater && !rawAssign) {
+      document.getElementById('ts-assignment-hint').classList.remove('hidden');
+      document.getElementById('ts-assignment').focus();
+      return;
+    }
+
+    const notes = document.getElementById('ts-notes').value.trim() || null;
+    if (isOther() && !notes) { showToast('Notes are required for Other trips', 'error'); return; }
+
+    const assignId = (isInRoute() && !addLater) ? rawAssign || null : null;
+
     try {
       document.getElementById('ts-start').disabled = true;
       document.getElementById('ts-start').textContent = 'Starting...';
@@ -1862,7 +1941,8 @@ function openTripSummaryModal(trip) {
 
   document.getElementById('ts-done').addEventListener('click', () => {
     closeModal();
-    renderIdleClockPage();
+    if (state.currentEntry) renderActiveClockPage();
+    else renderIdleClockPage();
   });
 
   document.getElementById('ts-clockin-now')?.addEventListener('click', () => {
