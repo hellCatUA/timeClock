@@ -24,6 +24,8 @@ const state = {
   currentTrip: null,
   tripCategories: [],
   journalSubTab: 'work',
+  pendingTripAssignment: null,
+  pendingTripClockIn: null,
 };
 
 /* ── Time helpers ───────────────────────────────────────────────── */
@@ -159,7 +161,7 @@ const ICONS = {
   camera:   '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   wrench:   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   alert:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
-  car:      '<rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>',
+  car:      '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="9" y1="11" x2="2.5" y2="7.5"/><line x1="15" y1="11" x2="21.5" y2="7.5"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -439,19 +441,26 @@ function scheduleBreakReturnReminder(breakStart) {
 }
 
 /* ── Time Selector Widget ────────────────────────────────────────── */
-function renderTimeSelector(containerId, label, onConfirm) {
+function renderTimeSelector(containerId, label, onConfirm, extraTimeOptions = []) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
   function phase1() {
+    const extraBtnsHtml = extraTimeOptions.map((opt, i) =>
+      `<button class="btn btn-primary btn-full" id="ts-extra-${i}" style="margin-bottom:6px;">${escHtml(opt.label)}</button>`
+    ).join('');
     container.innerHTML = `
       <div class="time-selector">
         <div class="time-sel-label">${label}</div>
+        ${extraBtnsHtml}
         <div class="time-sel-row">
           <button class="btn btn-primary flex-1" id="ts-now">Now</button>
           <button class="btn btn-ghost flex-1" id="ts-later">Other time →</button>
         </div>
       </div>`;
+    extraTimeOptions.forEach((opt, i) => {
+      document.getElementById(`ts-extra-${i}`)?.addEventListener('click', () => onConfirm(opt.isoTime));
+    });
     document.getElementById('ts-now').addEventListener('click', () => onConfirm(new Date().toISOString()));
     document.getElementById('ts-later').addEventListener('click', phase2);
   }
@@ -495,6 +504,7 @@ async function renderClockPage() {
   try { state.currentEntry = await api.getCurrentEntry(); } catch { state.currentEntry = null; }
   try { state.currentTrip = await api.getCurrentTrip(); } catch { state.currentTrip = null; }
   if (state.currentEntry) renderActiveClockPage();
+  else if (state.currentTrip) renderActiveTripPage();
   else if (state.lastCompletedEntry) renderSummaryPage(state.lastCompletedEntry);
   else renderIdleClockPage();
 }
@@ -510,24 +520,10 @@ function renderIdleClockPage() {
   const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
 
-  // Build active trip card HTML if there's an active trip
-  const trip = state.currentTrip;
-  const tripCardHtml = trip ? `
-    <div class="card trip-active-card" style="margin:12px 12px 0;">
-      <div class="trip-active-header">
-        <span class="status-chip active" style="background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue);">TRIP ACTIVE</span>
-        <span id="trip-elapsed" class="trip-elapsed">0:00:00</span>
-      </div>
-      <div class="trip-active-meta">
-        <b>${escHtml(trip.category)}</b>
-        ${trip.assignment_id ? `· ${escHtml(trip.assignment_id)}` : ''}
-      </div>
-      ${trip.mileage_start != null ? `<div class="trip-active-meta">Start: ${trip.mileage_start} mi</div>` : ''}
-      <div class="row-2" style="margin-top:12px;">
-        <button class="btn btn-danger btn-full" id="stop-trip-btn">Stop Trip</button>
-        ${(trip.category === 'In Route to WO' && trip.assignment_id) ?
-          `<button class="btn btn-primary btn-full" id="trip-clock-in-btn">Clock In</button>` : ''}
-      </div>
+  const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn) ? `
+    <div class="card" style="background:var(--green-bg);border:1px solid var(--green);padding:10px 14px;margin-bottom:4px;border-radius:8px;">
+      ${state.pendingTripAssignment ? `<div style="font-size:13px;">Trip WO: <b>${escHtml(state.pendingTripAssignment)}</b> will be pre-filled</div>` : ''}
+      ${state.pendingTripClockIn ? `<div style="font-size:13px;margin-top:2px;">Trip arrival time: <b>${fmtTime(state.pendingTripClockIn)}</b> available as clock-in</div>` : ''}
     </div>` : '';
 
   document.getElementById('page').innerHTML = `
@@ -540,7 +536,7 @@ function renderIdleClockPage() {
           ${svg('clock')} Clock In
         </button>
       </div>
-      ${tripCardHtml}
+      ${pendingBanner}
       <div class="section-label">New Work Order</div>
       <div class="card" id="clock-in-form-card">
         <div class="form-group">
@@ -601,10 +597,8 @@ function renderIdleClockPage() {
       </div>
     </div>`;
 
-  // Wire up In Route button
   document.getElementById('in-route-btn').addEventListener('click', () => openTripStartModal());
 
-  // Wire up Clock In start button — shows/scrolls to form
   document.getElementById('clock-in-start-btn').addEventListener('click', () => {
     const formCard = document.getElementById('clock-in-form-card');
     if (formCard) {
@@ -612,32 +606,6 @@ function renderIdleClockPage() {
       formCard.querySelector('input,select')?.focus();
     }
   });
-
-  // Wire up stop trip button if present
-  document.getElementById('stop-trip-btn')?.addEventListener('click', () => {
-    if (state.currentTrip) openTripStopModal(state.currentTrip);
-  });
-
-  // Wire up trip clock in button if present
-  document.getElementById('trip-clock-in-btn')?.addEventListener('click', () => {
-    if (state.currentTrip?.assignment_id) {
-      const formCard = document.getElementById('clock-in-form-card');
-      const woTitle = document.getElementById('wo-title-input');
-      if (woTitle) woTitle.value = `WO - ${state.currentTrip.assignment_id}`;
-      formCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  });
-
-  // Start trip elapsed timer if there's an active trip
-  if (state.currentTrip) {
-    const startEl = new Date(state.currentTrip.start_time);
-    const update = () => {
-      const el = document.getElementById('trip-elapsed');
-      if (el) el.textContent = fmtDuration(Math.floor((Date.now() - startEl) / 1000));
-    };
-    update();
-    state.tripTimerInterval = setInterval(update, 1000);
-  }
 
   let rateType = 'hourly';
   document.getElementById('pay-type-toggle').addEventListener('click', e => {
@@ -669,7 +637,11 @@ function renderIdleClockPage() {
     } catch { statusEl.textContent = 'Geolocation unavailable or denied'; }
   });
 
-  renderTimeSelector('clockin-time-selector', 'Clock-in time', async (clockInISO) => {
+  const tripTimeOpts = state.pendingTripClockIn
+    ? [{ label: `Trip arrival time — ${fmtTime(state.pendingTripClockIn)}`, isoTime: state.pendingTripClockIn }]
+    : [];
+
+  async function doClockIn(clockInISO) {
     const container = document.getElementById('clockin-time-selector');
     container.innerHTML = '<div class="saving-indicator">Saving...</div>';
     try {
@@ -693,15 +665,150 @@ function renderIdleClockPage() {
         longitude:       geoCoords?.lng || null,
         wo_title:        woTitle || null,
         travel_reimb:    travel,
+        assignment_id:   state.pendingTripAssignment || null,
         status:          'pending',
       });
+      state.pendingTripAssignment = null;
+      state.pendingTripClockIn = null;
       state.showReminderBanner = false;
       state.showBreakReturnBanner = false;
       scheduleBreakReminder();
       renderActiveClockPage();
     } catch (err) {
       showToast(err.message || 'Error', 'error');
-      renderTimeSelector('clockin-time-selector', 'Clock-in time', arguments.callee);
+      renderTimeSelector('clockin-time-selector', 'Clock-in time', doClockIn, tripTimeOpts);
+    }
+  }
+
+  renderTimeSelector('clockin-time-selector', 'Clock-in time', doClockIn, tripTimeOpts);
+}
+
+/* ── Active trip page ────────────────────────────────────────────── */
+function renderActiveTripPage() {
+  const trip = state.currentTrip;
+  if (!trip) { renderIdleClockPage(); return; }
+
+  clearTimers();
+
+  const startEl = new Date(trip.start_time);
+
+  document.getElementById('page').innerHTML = `
+    <div class="clock-hero" style="border-bottom:2px solid var(--blue);">
+      <div class="status-badge working" style="background:var(--blue-bg);color:var(--blue);border-color:var(--blue);">
+        <span class="dot" style="background:var(--blue);"></span>TRIP ACTIVE
+      </div>
+      <div class="elapsed-time" id="trip-elapsed-display">00:00:00</div>
+      <div class="clock-meta">
+        ${svg('car')} ${escHtml(trip.category)}
+        ${trip.assignment_id ? ` &nbsp;·&nbsp; ${escHtml(trip.assignment_id)}` : ''}
+      </div>
+      <div class="clock-meta" style="margin-top:4px;">
+        Started ${fmtTime(trip.start_time)}
+        ${trip.mileage_start != null ? ` &nbsp;·&nbsp; Start: ${trip.mileage_start} mi` : ''}
+      </div>
+    </div>
+    <div class="clock-actions" style="flex-direction:column;gap:10px;padding:20px 16px;">
+      <button class="btn btn-primary btn-lg" id="atp-clock-in">${svg('clock')} Clock In</button>
+      <button class="btn btn-secondary btn-lg" id="atp-reassign">${svg('car')} Reassign Trip</button>
+      <button class="btn btn-danger btn-lg" id="atp-cancel">${svg('trash')} Cancel Trip</button>
+    </div>`;
+
+  const update = () => {
+    const el = document.getElementById('trip-elapsed-display');
+    if (el) el.textContent = fmtDuration(Math.floor((Date.now() - startEl) / 1000));
+  };
+  update();
+  state.tripTimerInterval = setInterval(update, 1000);
+
+  document.getElementById('atp-cancel').addEventListener('click', async () => {
+    if (!confirm('Cancel this trip? All trip data and photos will be deleted.')) return;
+    try {
+      await api.deleteTrip(trip.id);
+      state.currentTrip = null;
+      clearInterval(state.tripTimerInterval);
+      state.tripTimerInterval = null;
+      renderIdleClockPage();
+    } catch (err) {
+      showToast(err.message || 'Failed to cancel trip', 'error');
+    }
+  });
+
+  document.getElementById('atp-reassign').addEventListener('click', () => {
+    openReassignTripModal(trip);
+  });
+
+  document.getElementById('atp-clock-in').addEventListener('click', async () => {
+    const useEndTime = confirm('Use trip arrival time as your clock-in time?');
+    try {
+      const nowIso = new Date().toISOString();
+      await api.stopTrip(trip.id, { end_time: nowIso });
+      state.pendingTripAssignment = trip.assignment_id || null;
+      state.pendingTripClockIn = useEndTime ? nowIso : null;
+      state.currentTrip = null;
+      clearInterval(state.tripTimerInterval);
+      state.tripTimerInterval = null;
+      renderIdleClockPage();
+    } catch (err) {
+      showToast(err.message || 'Failed', 'error');
+    }
+  });
+}
+
+function openReassignTripModal(trip) {
+  const cats = state.tripCategories;
+  let selectedCat = trip.category;
+
+  const catBtnsHtml = cats.map(c =>
+    `<button class="trip-cat-btn${c.name === selectedCat ? ' active' : ''}" data-cat="${escHtml(c.name)}">${escHtml(c.name)}</button>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('car')} Reassign Trip</h3>
+      <button class="btn btn-ghost btn-sm" id="ra-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Category</label>
+        <div class="trip-cat-grid" id="ra-cat-grid">${catBtnsHtml}</div>
+      </div>
+      <div class="form-group" id="ra-assignment-group" style="${selectedCat === 'In Route to WO' ? '' : 'display:none;'}">
+        <label class="form-label">Assignment ID</label>
+        <input type="text" class="form-control" id="ra-assignment" value="${escHtml(trip.assignment_id || '')}" placeholder="e.g. ABC-12345">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="ra-cancel">Cancel</button>
+      <button class="btn btn-primary" id="ra-save">Save</button>
+    </div>`);
+
+  document.getElementById('ra-x').addEventListener('click', closeModal);
+  document.getElementById('ra-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('ra-cat-grid').addEventListener('click', e => {
+    const btn = e.target.closest('.trip-cat-btn');
+    if (!btn) return;
+    selectedCat = btn.dataset.cat;
+    document.querySelectorAll('#ra-cat-grid .trip-cat-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById('ra-assignment-group').style.display = selectedCat === 'In Route to WO' ? '' : 'none';
+  });
+
+  document.getElementById('ra-save').addEventListener('click', async () => {
+    const assignId = selectedCat === 'In Route to WO'
+      ? document.getElementById('ra-assignment').value.trim() || null
+      : null;
+    const saveBtn = document.getElementById('ra-save');
+    try {
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
+      const updated = await api.reassignTrip(trip.id, { category: selectedCat, assignment_id: assignId });
+      state.currentTrip = updated;
+      closeModal();
+      renderActiveTripPage();
+    } catch (err) {
+      showToast(err.message || 'Failed to reassign', 'error');
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
     }
   });
 }
@@ -1649,7 +1756,7 @@ function openTripStartModal() {
       state.currentTrip = trip;
       if (photoData) await uploadTripPhotoData(trip.id, 'before', photoData);
       closeModal();
-      renderIdleClockPage();
+      renderActiveTripPage();
     } catch (err) {
       showToast(err.message || 'Failed to start trip', 'error');
       document.getElementById('ts-start').disabled = false;
@@ -1759,13 +1866,10 @@ function openTripSummaryModal(trip) {
   });
 
   document.getElementById('ts-clockin-now')?.addEventListener('click', () => {
+    state.pendingTripAssignment = trip.assignment_id || null;
+    state.pendingTripClockIn = trip.end_time || null;
     closeModal();
     navigateTo('clock');
-    // Pre-fill assignment ID after render
-    setTimeout(() => {
-      const assignEl = document.getElementById('wo-title-input');
-      if (assignEl) assignEl.value = `WO - ${trip.assignment_id}`;
-    }, 200);
   });
 }
 

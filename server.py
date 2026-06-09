@@ -1278,12 +1278,53 @@ def h_update_trip(req, groups):
 
 def h_delete_trip(req, groups):
     tid = groups[0]
+    photos = []
+    trip_folder = None
     with get_db() as db:
         trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
         if not trip:
             return 404, {"error": "Not found"}
+        trip_folder = trip.get("folder")
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=?", (tid,)
+        ).fetchall())
         db.execute("DELETE FROM trips WHERE id=?", (tid,))
+    for photo in photos:
+        folder = photo.get('folder') or trip_folder or str(tid)
+        fp = UPLOADS_DIR / folder / photo['filename']
+        try: fp.unlink(missing_ok=True)
+        except Exception: pass
     return 200, {"success": True}
+
+
+def h_reassign_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    new_category = (data.get("category") or "").strip()
+    new_assignment_id = (data.get("assignment_id") or "").strip() or None
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        old_folder = trip.get("folder") or f"Trips/{tid}"
+        category = new_category or trip["category"]
+        new_folder = _trip_folder(category, new_assignment_id, trip["start_time"])
+        new_trip_id = _generate_trip_id(db, category, new_assignment_id, trip["start_time"])
+        db.execute(
+            "UPDATE trips SET category=?, assignment_id=?, folder=?, trip_id=?, updated_at=datetime('now') WHERE id=?",
+            (category, new_assignment_id, new_folder, new_trip_id, tid)
+        )
+        if old_folder != new_folder:
+            db.execute("UPDATE entry_photos SET folder=? WHERE entry_id=?", (new_folder, tid))
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    if old_folder != new_folder:
+        old_path = UPLOADS_DIR / old_folder
+        new_path = UPLOADS_DIR / new_folder
+        if old_path.exists():
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            try: old_path.rename(new_path)
+            except Exception: pass
+    return 200, row
 
 def h_get_trip_photos(req, groups):
     tid = groups[0]
@@ -1446,6 +1487,7 @@ ROUTES = [
     (r"/api/pay-periods",              ["POST"], h_upsert_pay_period),
     (r"/api/trips/current",                ["GET"],    h_get_current_trip),
     (r"/api/trips/(\d+)/stop",             ["POST"],   h_stop_trip),
+    (r"/api/trips/(\d+)/reassign",         ["POST"],   h_reassign_trip),
     (r"/api/trips/(\d+)/photos",           ["GET","POST"], lambda req,g: h_get_trip_photos(req,g) if req["method"]=="GET" else h_post_trip_photo(req,g)),
     (r"/api/trips/(\d+)",                  ["GET","PUT","DELETE"], lambda req,g: h_get_trip(req,g) if req["method"]=="GET" else h_update_trip(req,g) if req["method"]=="PUT" else h_delete_trip(req,g)),
     (r"/api/trips",                        ["GET","POST"], lambda req,g: h_get_trips(req,g) if req["method"]=="GET" else h_start_trip(req,g)),

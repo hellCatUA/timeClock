@@ -69,6 +69,8 @@ const api = (() => {
     getTripPhotos:       (id)     => req('GET',    `/api/trips/${id}/photos`),
     uploadTripPhoto:     (id, d)  => req('POST',   `/api/trips/${id}/photos`, d),
 
+    reassignTrip:        (id, d)  => req('POST',   `/api/trips/${id}/reassign`, d),
+
     // Trip categories
     getTripCategories:   ()       => req('GET',    '/api/trip-categories'),
     createTripCategory:  (d)      => req('POST',   '/api/trip-categories', d),
