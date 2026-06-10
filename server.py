@@ -761,10 +761,15 @@ def _trip_folder(category, assignment_id, start_time_iso):
         yyyy, mm, dd = dt.strftime('%Y'), dt.strftime('%m'), dt.strftime('%d')
     except Exception:
         yyyy, mm, dd = 'XXXX', 'XX', 'XX'
-    if category == "In Route to WO" and assignment_id:
-        safe = re.sub(r'[^\w-]', '', assignment_id.strip())
-        return f"Trips/{yyyy}/{mm}/{dd}-{safe}"
-    return f"Trips/{yyyy}/{mm}/{dd}/Other Mileage"
+    base = f"Trips/{yyyy}/{mm}/{dd}"
+    if category == "In Route to WO":
+        if assignment_id and assignment_id.strip():
+            safe = re.sub(r'[^\w-]', '', assignment_id.strip())
+            return f"{base}/In Route to WO-{safe}"
+        return f"{base}/In Route to WO-TMP-NOASSID"
+    safe_cat = re.sub(r'[/\\]', '-', (category or 'Other'))
+    safe_cat = re.sub(r'[^\w\s-]', '', safe_cat).strip() or 'Other'
+    return f"{base}/{safe_cat}"
 
 def _generate_trip_id(db, category, assignment_id, start_time_iso):
     try:
@@ -773,10 +778,16 @@ def _generate_trip_id(db, category, assignment_id, start_time_iso):
         day_prefix = dt.strftime('%Y-%m-%d')
     except Exception:
         yy_mm_dd = 'XX-XX-XX'; day_prefix = 'XXXX-XX-XX'
-    if category == "In Route to WO" and assignment_id:
-        safe = re.sub(r'[^\w-]', '', assignment_id.strip())
-        n = db.execute("SELECT COUNT(*) FROM trips WHERE assignment_id=?", (assignment_id,)).fetchone()[0]
-        return f"{safe}-{n+1}"
+    if category == "In Route to WO":
+        if assignment_id and assignment_id.strip():
+            safe = re.sub(r'[^\w-]', '', assignment_id.strip())
+            n = db.execute("SELECT COUNT(*) FROM trips WHERE assignment_id=?", (assignment_id,)).fetchone()[0]
+            return f"{safe}-{n+1}"
+        n = db.execute(
+            "SELECT COUNT(*) FROM trips WHERE category='In Route to WO' AND assignment_id IS NULL AND start_time LIKE ?",
+            (f"{day_prefix}%",)
+        ).fetchone()[0]
+        return f"TMP-NOASSID-{n+1}"
     n = db.execute(
         "SELECT COUNT(*) FROM trips WHERE (category IS NULL OR category != 'In Route to WO') AND start_time LIKE ?",
         (f"{day_prefix}%",)
@@ -1328,17 +1339,37 @@ def h_reassign_trip(req, groups):
         trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
         if not trip:
             return 404, {"error": "Not found"}
-        old_folder = trip.get("folder") or f"Trips/{tid}"
-        category = new_category or trip["category"]
-        new_folder = _trip_folder(category, new_assignment_id, trip["start_time"])
-        new_trip_id = _generate_trip_id(db, category, new_assignment_id, trip["start_time"])
+        old_folder   = trip.get("folder") or f"Trips/{tid}"
+        old_trip_id  = trip.get("trip_id") or str(tid)
+        category     = new_category or trip["category"]
+        new_folder   = _trip_folder(category, new_assignment_id, trip["start_time"])
+        new_trip_id  = _generate_trip_id(db, category, new_assignment_id, trip["start_time"])
+
+        photos = rows_to_list(db.execute("SELECT * FROM trip_photos WHERE trip_id=?", (tid,)).fetchall())
+
         db.execute(
             "UPDATE trips SET category=?, assignment_id=?, folder=?, trip_id=?, updated_at=datetime('now') WHERE id=?",
             (category, new_assignment_id, new_folder, new_trip_id, tid)
         )
         if old_folder != new_folder:
             db.execute("UPDATE trip_photos SET folder=? WHERE trip_id=?", (new_folder, tid))
+
+        # Rename filenames in DB when trip_id changes (filenames embed the trip_id)
+        file_renames = []
+        if old_trip_id != new_trip_id:
+            old_safe = re.sub(r'[^\w-]', '', old_trip_id)
+            new_safe = re.sub(r'[^\w-]', '', new_trip_id)
+            for photo in photos:
+                old_fname = photo['filename']
+                new_fname = old_fname.replace(old_safe, new_safe, 1)
+                if new_fname != old_fname:
+                    db.execute("UPDATE trip_photos SET filename=? WHERE id=?", (new_fname, photo['id']))
+                    file_renames.append((UPLOADS_DIR / new_folder / old_fname,
+                                         UPLOADS_DIR / new_folder / new_fname))
+
         row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+
+    # Filesystem: move folder
     if old_folder != new_folder:
         old_path = UPLOADS_DIR / old_folder
         new_path = UPLOADS_DIR / new_folder
@@ -1346,6 +1377,17 @@ def h_reassign_trip(req, groups):
             new_path.parent.mkdir(parents=True, exist_ok=True)
             try: old_path.rename(new_path)
             except Exception: pass
+        elif (UPLOADS_DIR / old_folder).parent != (UPLOADS_DIR / new_folder).parent:
+            (UPLOADS_DIR / new_folder).mkdir(parents=True, exist_ok=True)
+
+    # Filesystem: rename individual files (after folder move, files are at new_folder)
+    for old_file, new_file in file_renames:
+        try:
+            if old_file.exists():
+                old_file.rename(new_file)
+        except Exception:
+            pass
+
     return 200, row
 
 def h_get_trip_photos(req, groups):
@@ -1357,9 +1399,9 @@ def h_get_trip_photos(req, groups):
         rows = rows_to_list(db.execute(
             "SELECT * FROM trip_photos WHERE trip_id=? ORDER BY created_at", (tid,)
         ).fetchall())
-    folder = trip.get("folder") or str(tid)
+    trip_folder = trip.get("folder") or str(tid)
     for r in rows:
-        r['url'] = f"/uploads/{folder}/{r['filename']}"
+        r['url'] = f"/uploads/{r.get('folder') or trip_folder}/{r['filename']}"
     return 200, rows
 
 def h_post_trip_photo(req, groups):
