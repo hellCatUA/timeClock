@@ -165,6 +165,17 @@ def init_db():
             sort_order INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS trip_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            folder TEXT,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -227,6 +238,17 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_path', '/timeclock/photos')",
         "ALTER TABLE entry_photos ADD COLUMN folder TEXT",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('mileage_rate', '0.67')",
+        """CREATE TABLE IF NOT EXISTS trip_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            folder TEXT,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        )""",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -1286,9 +1308,9 @@ def h_delete_trip(req, groups):
             return 404, {"error": "Not found"}
         trip_folder = trip.get("folder")
         photos = rows_to_list(db.execute(
-            "SELECT * FROM entry_photos WHERE entry_id=?", (tid,)
+            "SELECT * FROM trip_photos WHERE trip_id=?", (tid,)
         ).fetchall())
-        db.execute("DELETE FROM trips WHERE id=?", (tid,))
+        db.execute("DELETE FROM trips WHERE id=?", (tid,))  # CASCADE deletes trip_photos
     for photo in photos:
         folder = photo.get('folder') or trip_folder or str(tid)
         fp = UPLOADS_DIR / folder / photo['filename']
@@ -1315,7 +1337,7 @@ def h_reassign_trip(req, groups):
             (category, new_assignment_id, new_folder, new_trip_id, tid)
         )
         if old_folder != new_folder:
-            db.execute("UPDATE entry_photos SET folder=? WHERE entry_id=?", (new_folder, tid))
+            db.execute("UPDATE trip_photos SET folder=? WHERE trip_id=?", (new_folder, tid))
         row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
     if old_folder != new_folder:
         old_path = UPLOADS_DIR / old_folder
@@ -1329,12 +1351,12 @@ def h_reassign_trip(req, groups):
 def h_get_trip_photos(req, groups):
     tid = groups[0]
     with get_db() as db:
-        rows = rows_to_list(db.execute(
-            "SELECT * FROM entry_photos WHERE entry_id=? AND photo_type LIKE 'trip_%' ORDER BY created_at", (tid,)
-        ).fetchall())
         trip = row_to_dict(db.execute("SELECT folder FROM trips WHERE id=?", (tid,)).fetchone())
-    if not trip:
-        return 404, {"error": "Not found"}
+        if not trip:
+            return 404, {"error": "Not found"}
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM trip_photos WHERE trip_id=? ORDER BY created_at", (tid,)
+        ).fetchall())
     folder = trip.get("folder") or str(tid)
     for r in rows:
         r['url'] = f"/uploads/{folder}/{r['filename']}"
@@ -1373,10 +1395,10 @@ def h_post_trip_photo(req, groups):
     ftp_synced = 1 if ftp_sync_photo(str(file_path), ftp_remote, settings) else 0
     with get_db() as db:
         cur = db.execute(
-            "INSERT INTO entry_photos (entry_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO trip_photos (trip_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?,?,?,?,?,?)",
             (tid, f"trip_{photo_type}", safe_name, folder, original_name, ftp_synced)
         )
-        row = row_to_dict(db.execute("SELECT * FROM entry_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+        row = row_to_dict(db.execute("SELECT * FROM trip_photos WHERE id=?", (cur.lastrowid,)).fetchone())
     row['url'] = f"/uploads/{folder}/{safe_name}"
     return 201, row
 

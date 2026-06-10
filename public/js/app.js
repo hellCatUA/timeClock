@@ -758,8 +758,17 @@ function renderActiveTripPage() {
 }
 
 function openReassignTripModal(trip) {
-  const cats = state.tripCategories;
+  const clocked = !!state.currentEntry;
+  const allCats = state.tripCategories;
+  const cats = allCats.filter(c => {
+    if (clocked) return c.name === 'OnClock Tools/Supplies' || c.name === 'Other';
+    return c.name !== 'OnClock Tools/Supplies';
+  });
+
   let selectedCat = trip.category;
+  if (!cats.find(c => c.name === selectedCat)) selectedCat = cats[0]?.name || trip.category;
+  const isInRoute = () => selectedCat === 'In Route to WO';
+  const hasAssignId = !!(trip.assignment_id);
 
   const catBtnsHtml = cats.map(c =>
     `<button class="trip-cat-btn${c.name === selectedCat ? ' active' : ''}" data-cat="${escHtml(c.name)}">${escHtml(c.name)}</button>`
@@ -775,9 +784,16 @@ function openReassignTripModal(trip) {
         <label class="form-label">Category</label>
         <div class="trip-cat-grid" id="ra-cat-grid">${catBtnsHtml}</div>
       </div>
-      <div class="form-group" id="ra-assignment-group" style="${selectedCat === 'In Route to WO' ? '' : 'display:none;'}">
-        <label class="form-label">Assignment ID</label>
-        <input type="text" class="form-control" id="ra-assignment" value="${escHtml(trip.assignment_id || '')}" placeholder="e.g. ABC-12345">
+      <div class="form-group" id="ra-assignment-group" style="${isInRoute() ? '' : 'display:none;'}">
+        <label class="form-label">Assignment ID <span class="req-star">*</span></label>
+        <div class="input-row">
+          <input type="text" class="form-control" id="ra-assignment" value="${escHtml(trip.assignment_id || '')}"
+            placeholder="e.g. ABC-12345" ${!hasAssignId ? 'disabled' : ''}>
+          <label style="display:flex;align-items:center;gap:4px;font-size:13px;white-space:nowrap;cursor:pointer;">
+            <input type="checkbox" id="ra-add-later" ${!hasAssignId ? 'checked' : ''}> Add Later
+          </label>
+        </div>
+        <div id="ra-assignment-hint" class="field-hint hidden" style="color:var(--orange);">Enter Assignment ID or check "Add Later"</div>
       </div>
     </div>
     <div class="modal-footer">
@@ -793,13 +809,26 @@ function openReassignTripModal(trip) {
     if (!btn) return;
     selectedCat = btn.dataset.cat;
     document.querySelectorAll('#ra-cat-grid .trip-cat-btn').forEach(b => b.classList.toggle('active', b === btn));
-    document.getElementById('ra-assignment-group').style.display = selectedCat === 'In Route to WO' ? '' : 'none';
+    document.getElementById('ra-assignment-group').style.display = isInRoute() ? '' : 'none';
+    document.getElementById('ra-assignment-hint').classList.add('hidden');
+  });
+
+  document.getElementById('ra-add-later')?.addEventListener('change', e => {
+    const inp = document.getElementById('ra-assignment');
+    if (!inp) return;
+    inp.disabled = e.target.checked;
+    if (e.target.checked) { inp.value = ''; document.getElementById('ra-assignment-hint').classList.add('hidden'); }
   });
 
   document.getElementById('ra-save').addEventListener('click', async () => {
-    const assignId = selectedCat === 'In Route to WO'
-      ? document.getElementById('ra-assignment').value.trim() || null
-      : null;
+    const addLater = document.getElementById('ra-add-later')?.checked ?? false;
+    const rawAssign = document.getElementById('ra-assignment')?.value.trim() || '';
+    if (isInRoute() && !addLater && !rawAssign) {
+      document.getElementById('ra-assignment-hint').classList.remove('hidden');
+      document.getElementById('ra-assignment').focus();
+      return;
+    }
+    const assignId = isInRoute() && !addLater ? rawAssign || null : null;
     const saveBtn = document.getElementById('ra-save');
     try {
       saveBtn.disabled = true;
@@ -817,19 +846,38 @@ function openReassignTripModal(trip) {
 }
 
 function openTripClockInModal(trip) {
+  const rate = parseFloat(state.settings.mileage_rate || '0.67');
+  const sym = state.settings.currency_symbol || '$';
+  let afterPhotoData = null;
+
+  const calcHtml = (val) => {
+    if (trip.mileage_start == null || !val) return '';
+    const dist = parseFloat(val) - trip.mileage_start;
+    if (dist < 0) return `<div style="color:var(--red);font-size:13px;margin-top:4px;">⚠ End must be ≥ start (${trip.mileage_start})</div>`;
+    return `<div class="review-row" style="margin-top:6px;font-size:13px;"><span>Miles driven:</span><b>${dist.toFixed(2)} mi</b></div>
+            <div class="review-row" style="font-size:13px;"><span>Tax deduction:</span><b>${sym}${(dist * rate).toFixed(2)}</b></div>`;
+  };
+
   openModal(`
     <div class="modal-header">
       <h3>${svg('clock')} Clock In from Trip</h3>
       <button class="btn btn-ghost btn-sm" id="tci-x">✕</button>
     </div>
     <div class="modal-body">
-      <div class="review-row" style="margin-bottom:12px;">
-        <span>Category:</span><span>${escHtml(trip.category)}</span>
-      </div>
-      ${trip.assignment_id ? `<div class="review-row" style="margin-bottom:12px;"><span>Assignment:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      <div class="review-row" style="margin-bottom:6px;"><span>Category:</span><span>${escHtml(trip.category)}</span></div>
+      ${trip.assignment_id ? `<div class="review-row" style="margin-bottom:6px;"><span>Assignment:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      <div class="review-row" style="margin-bottom:10px;"><span>Mileage start:</span><span>${trip.mileage_start != null ? trip.mileage_start + ' mi' : '—'}</span></div>
       <div class="form-group">
-        <label class="form-label">Mileage End <span class="opt-label">optional</span></label>
+        <label class="form-label">Mileage End <span class="req-star">*</span></label>
         <input type="number" class="form-control" id="tci-mileage-end" placeholder="e.g. 45278.5" min="0" step="0.1">
+        <div id="tci-calc"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Mileage Photo (After) <span class="opt-label">optional</span></label>
+        <label class="photo-add-btn" for="tci-photo-inp">
+          ${svg('camera')} <span id="tci-photo-txt">Add Photo</span>
+        </label>
+        <input type="file" accept="image/*" class="visually-hidden" id="tci-photo-inp">
       </div>
     </div>
     <div class="modal-footer">
@@ -840,17 +888,32 @@ function openTripClockInModal(trip) {
   document.getElementById('tci-x').addEventListener('click', closeModal);
   document.getElementById('tci-cancel').addEventListener('click', closeModal);
 
+  document.getElementById('tci-mileage-end').addEventListener('input', e => {
+    document.getElementById('tci-calc').innerHTML = calcHtml(e.target.value);
+  });
+
+  document.getElementById('tci-photo-inp').addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      afterPhotoData = await compressFileToBase64(file);
+      document.getElementById('tci-photo-txt').textContent = '✓ ' + file.name;
+    } catch (err) { showToast('Photo error: ' + err.message, 'error'); }
+  });
+
   document.getElementById('tci-confirm').addEventListener('click', async () => {
     const milEndVal = document.getElementById('tci-mileage-end').value.trim();
+    if (!milEndVal) { showToast('Mileage end is required', 'error'); return; }
     const confirmBtn = document.getElementById('tci-confirm');
     try {
       confirmBtn.disabled = true;
       confirmBtn.textContent = 'Stopping trip...';
       const nowIso = new Date().toISOString();
-      await api.stopTrip(trip.id, {
+      const stopped = await api.stopTrip(trip.id, {
         end_time: nowIso,
-        mileage_end: milEndVal ? parseFloat(milEndVal) : null,
+        mileage_end: parseFloat(milEndVal),
       });
+      if (afterPhotoData) await uploadTripPhotoData(stopped.id, 'after', afterPhotoData);
       state.pendingTripAssignment = trip.assignment_id || null;
       state.pendingTripClockIn = nowIso;
       state.pendingTripId = trip.assignment_id ? null : trip.id;
@@ -1845,22 +1908,35 @@ function openTripStartModal() {
 }
 
 function openTripStopModal(trip) {
+  const rate = parseFloat(state.settings.mileage_rate || '0.67');
+  const sym = state.settings.currency_symbol || '$';
   let afterPhotoData = null;
+
+  const calcHtml = (val) => {
+    if (trip.mileage_start == null || !val) return '';
+    const dist = parseFloat(val) - trip.mileage_start;
+    if (dist < 0) return `<div style="color:var(--red);font-size:13px;margin-top:4px;">⚠ End must be ≥ start (${trip.mileage_start})</div>`;
+    return `<div class="review-row" style="margin-top:6px;font-size:13px;"><span>Miles driven:</span><b>${dist.toFixed(2)} mi</b></div>
+            <div class="review-row" style="font-size:13px;"><span>Tax deduction:</span><b>${sym}${(dist * rate).toFixed(2)}</b></div>`;
+  };
 
   openModal(`
     <div class="modal-header">
-      <h3>${svg('car')} Stop Trip</h3>
+      <h3>${svg('car')} Finish Trip</h3>
       <button class="btn btn-ghost btn-sm" id="tst-x">✕</button>
     </div>
     <div class="modal-body">
+      <div class="review-row" style="margin-bottom:6px;"><span>Category:</span><span>${escHtml(trip.category)}</span></div>
+      ${trip.assignment_id ? `<div class="review-row" style="margin-bottom:6px;"><span>Assignment:</span><span>${escHtml(trip.assignment_id)}</span></div>` : ''}
+      ${trip.mileage_start != null ? `<div class="review-row" style="margin-bottom:10px;"><span>Mileage start:</span><span>${trip.mileage_start} mi</span></div>` : ''}
       <div class="form-group">
-        <label class="form-label">Mileage End</label>
-        <input type="number" class="form-control" id="tst-mileage-end" placeholder="e.g. 45278.5" min="0" step="0.1"
-          value="${trip.mileage_start != null ? '' : ''}">
+        <label class="form-label">Mileage End <span class="req-star">*</span></label>
+        <input type="number" class="form-control" id="tst-mileage-end" placeholder="e.g. 45278.5" min="0" step="0.1">
+        <div id="tst-calc"></div>
       </div>
       <div class="form-group">
-        <label class="form-label">Notes</label>
-        <textarea class="form-control" id="tst-notes" rows="2" placeholder="Optional note...">${escHtml(trip.notes || '')}</textarea>
+        <label class="form-label">Notes ${trip.category === 'Other' ? '<span class="req-star">*</span>' : '<span class="opt-label">optional</span>'}</label>
+        <textarea class="form-control" id="tst-notes" rows="2" placeholder="${trip.category === 'Other' ? 'Required for Other trips...' : 'Optional note...'}">${escHtml(trip.notes || '')}</textarea>
       </div>
       <div class="form-group">
         <label class="form-label">Mileage Photo (After) <span class="opt-label">optional</span></label>
@@ -1878,6 +1954,10 @@ function openTripStopModal(trip) {
   document.getElementById('tst-x').addEventListener('click', closeModal);
   document.getElementById('tst-cancel').addEventListener('click', closeModal);
 
+  document.getElementById('tst-mileage-end').addEventListener('input', e => {
+    document.getElementById('tst-calc').innerHTML = calcHtml(e.target.value);
+  });
+
   document.getElementById('tst-photo-inp').addEventListener('change', async e => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1892,12 +1972,18 @@ function openTripStopModal(trip) {
   document.getElementById('tst-finish').addEventListener('click', async () => {
     const milEndVal = document.getElementById('tst-mileage-end').value.trim();
     const notes = document.getElementById('tst-notes').value.trim() || null;
+    if (!milEndVal) { showToast('Mileage end is required', 'error'); return; }
+    if (trip.mileage_start != null && parseFloat(milEndVal) < trip.mileage_start) {
+      showToast('Mileage end must be ≥ mileage start', 'error'); return;
+    }
+    if (trip.category === 'Other' && !notes) { showToast('Notes are required for Other trips', 'error'); return; }
+    const finishBtn = document.getElementById('tst-finish');
     try {
-      document.getElementById('tst-finish').disabled = true;
-      document.getElementById('tst-finish').textContent = 'Finishing...';
+      finishBtn.disabled = true;
+      finishBtn.textContent = 'Finishing...';
       const stopped = await api.stopTrip(trip.id, {
         end_time: new Date().toISOString(),
-        mileage_end: milEndVal ? parseFloat(milEndVal) : null,
+        mileage_end: parseFloat(milEndVal),
         notes,
       });
       if (afterPhotoData) await uploadTripPhotoData(stopped.id, 'after', afterPhotoData);
@@ -1908,8 +1994,8 @@ function openTripStopModal(trip) {
       openTripSummaryModal(stopped);
     } catch (err) {
       showToast(err.message || 'Failed to stop trip', 'error');
-      document.getElementById('tst-finish').disabled = false;
-      document.getElementById('tst-finish').textContent = 'Finish Trip';
+      finishBtn.disabled = false;
+      finishBtn.textContent = 'Finish Trip';
     }
   });
 }
