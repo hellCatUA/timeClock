@@ -672,7 +672,9 @@ function renderIdleClockPage() {
       });
       state.pendingTripAssignment = null;
       state.pendingTripClockIn = null;
-      state.pendingTripId = null;
+      // pendingTripId is intentionally NOT cleared here — it must survive
+      // until the user saves Assignment ID on the active clock page, which
+      // then calls reassignTrip() to update the trip's files and clears it.
       state.showReminderBanner = false;
       state.showBreakReturnBanner = false;
       scheduleBreakReminder();
