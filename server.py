@@ -156,6 +156,7 @@ def init_db():
             tax_deduction REAL,
             notes TEXT,
             status TEXT DEFAULT 'active',
+            total_pause_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
@@ -174,6 +175,13 @@ def init_db():
             original_name TEXT,
             ftp_synced INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS trip_pauses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            pause_start TEXT NOT NULL,
+            pause_end TEXT,
             FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
         );
         INSERT OR IGNORE INTO settings (key, value) VALUES
@@ -249,6 +257,14 @@ def migrate_db():
             created_at TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
         )""",
+        "ALTER TABLE trips ADD COLUMN total_pause_seconds INTEGER NOT NULL DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS trip_pauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER NOT NULL,
+    pause_start TEXT NOT NULL,
+    pause_end TEXT,
+    FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+)""",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -723,6 +739,55 @@ def h_end_break(req, groups):
     return 200, b
 
 
+def h_start_trip_pause(req, groups):
+    data = req.get("body", {})
+    tid = groups[0]
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=? AND status='active'", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Trip not found or not active"}
+        existing = db.execute("SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)).fetchone()
+        if existing:
+            return 409, {"error": "Trip already paused"}
+        pause_start = data.get("pause_start") or now_iso()
+        cur = db.execute("INSERT INTO trip_pauses (trip_id, pause_start) VALUES (?, ?)", (tid, pause_start))
+        # Append pause note
+        now_str = datetime.now().strftime('%H:%M')
+        old_notes = (trip.get("notes") or "").strip()
+        pause_note = f"{now_str} - Trip paused"
+        new_notes = (old_notes + "\n" + pause_note).strip() if old_notes else pause_note
+        db.execute("UPDATE trips SET notes=?, updated_at=datetime('now') WHERE id=?", (new_notes, tid))
+        b = row_to_dict(db.execute("SELECT * FROM trip_pauses WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, b
+
+
+def h_end_trip_pause(req, groups):
+    data = req.get("body", {})
+    tid = groups[0]
+    with get_db() as db:
+        active = db.execute("SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)).fetchone()
+        if not active:
+            return 404, {"error": "No active pause"}
+        pause_end = data.get("pause_end") or now_iso()
+        db.execute("UPDATE trip_pauses SET pause_end=? WHERE id=?", (pause_end, active["id"]))
+        pauses = rows_to_list(db.execute(
+            "SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NOT NULL", (tid,)
+        ).fetchall())
+        total_pause = sum(dt_diff_seconds(p["pause_start"], p["pause_end"]) for p in pauses)
+        # Append resume note
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        now_str = datetime.now().strftime('%H:%M')
+        old_notes = (trip.get("notes") or "").strip()
+        resume_note = f"{now_str} - Trip resumed"
+        new_notes = (old_notes + "\n" + resume_note).strip() if old_notes else resume_note
+        db.execute(
+            "UPDATE trips SET total_pause_seconds=?, notes=?, updated_at=datetime('now') WHERE id=?",
+            (total_pause, new_notes, tid)
+        )
+        b = row_to_dict(db.execute("SELECT * FROM trip_pauses WHERE id=?", (active["id"],)).fetchone())
+    return 200, b
+
+
 def h_delete_entry(req, groups):
     eid = groups[0]
     photos = []
@@ -1043,9 +1108,12 @@ def h_month_report(req, _groups):
 def h_export_csv(req, _groups):
     from datetime import timedelta
 
+    from datetime import timezone as _tz
     params = req.get("query", {})
     frm = params.get("from", [None])[0]
     to  = params.get("to",  [None])[0]
+    tz_offset = int(params.get("tz", [0])[0] or 0)  # minutes west of UTC (JS getTimezoneOffset())
+    local_tz = _tz(timedelta(minutes=-tz_offset))
 
     sql = ENTRY_SELECT + " WHERE 1=1"
     args = []
@@ -1075,17 +1143,21 @@ def h_export_csv(req, _groups):
 
     def fmt_time(iso):
         if not iso: return ""
-        try: return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%H:%M")
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz)
+            return dt.strftime("%-I:%M %p")
         except Exception: return iso[:16]
 
     def fmt_date(iso):
         if not iso: return ""
-        try: return datetime.fromisoformat(iso.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz)
+            return dt.strftime("%Y-%m-%d")
         except Exception: return iso[:10]
 
     def fmth(s):
         if s is None: return ""
-        s = int(s); return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+        return f"{int(s) / 3600:.2f}"
 
     def get_week_start(dt_obj):
         return (dt_obj.date() - timedelta(days=(dt_obj.weekday() - week_start_wd) % 7))
@@ -1234,13 +1306,25 @@ def h_get_trips(req, _groups):
         rows = rows_to_list(db.execute(sql, args).fetchall())
     return 200, rows
 
+def _augment_trip(db, trip_dict):
+    if not trip_dict:
+        return trip_dict
+    tid = trip_dict["id"]
+    active_pause = row_to_dict(db.execute(
+        "SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)
+    ).fetchone())
+    trip_dict["active_pause"] = active_pause
+    return trip_dict
+
+
 def h_get_current_trip(req, _groups):
     with get_db() as db:
         row = row_to_dict(db.execute(
             "SELECT * FROM trips WHERE status='active' ORDER BY start_time DESC LIMIT 1"
         ).fetchone())
-    if not row:
-        return 404, {"error": "No active trip"}
+        if not row:
+            return 404, {"error": "No active trip"}
+        _augment_trip(db, row)
     return 200, row
 
 def h_start_trip(req, _groups):
@@ -1261,6 +1345,7 @@ def h_start_trip(req, _groups):
         folder  = _trip_folder(start_time)
         db.execute("UPDATE trips SET trip_id=?, folder=? WHERE id=?", (trip_id, folder, db_id))
         row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (db_id,)).fetchone())
+        _augment_trip(db, row)
     return 201, row
 
 def h_stop_trip(req, groups):
@@ -1292,8 +1377,9 @@ def h_get_trip(req, groups):
     tid = groups[0]
     with get_db() as db:
         row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
-    if not row:
-        return 404, {"error": "Not found"}
+        if not row:
+            return 404, {"error": "Not found"}
+        _augment_trip(db, row)
     return 200, row
 
 def h_update_trip(req, groups):
@@ -1380,6 +1466,7 @@ def h_reassign_trip(req, groups):
                                          UPLOADS_DIR / folder / new_fname))
 
         row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        _augment_trip(db, row)
 
     # Filesystem: rename photo files in-place (folder never changes)
     for old_file, new_file in file_renames:
@@ -1551,6 +1638,8 @@ ROUTES = [
     (r"/api/trips/current",                ["GET"],    h_get_current_trip),
     (r"/api/trips/(\d+)/stop",             ["POST"],   h_stop_trip),
     (r"/api/trips/(\d+)/reassign",         ["POST"],   h_reassign_trip),
+    (r"/api/trips/(\d+)/pause/start",      ["POST"],   h_start_trip_pause),
+    (r"/api/trips/(\d+)/pause/end",        ["POST"],   h_end_trip_pause),
     (r"/api/trips/(\d+)/photos",           ["GET","POST"], lambda req,g: h_get_trip_photos(req,g) if req["method"]=="GET" else h_post_trip_photo(req,g)),
     (r"/api/trips/(\d+)",                  ["GET","PUT","DELETE"], lambda req,g: h_get_trip(req,g) if req["method"]=="GET" else h_update_trip(req,g) if req["method"]=="PUT" else h_delete_trip(req,g)),
     (r"/api/trips",                        ["GET","POST"], lambda req,g: h_get_trips(req,g) if req["method"]=="GET" else h_start_trip(req,g)),

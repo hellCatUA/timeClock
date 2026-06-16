@@ -53,7 +53,7 @@ const api = (() => {
 
     // Reports
     getWeekReport:      (date)   => req('GET',    '/api/reports/week' + (date ? `?date=${date}` : '')),
-    getExportUrl:       (from, to) => `/api/reports/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    getExportUrl:       (from, to) => `/api/reports/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${new Date().getTimezoneOffset()}`,
 
     // Pay Periods
     getPayPeriods:    ()  => req('GET',  '/api/pay-periods'),
@@ -69,6 +69,9 @@ const api = (() => {
     getTripPhotos:       (id)     => req('GET',    `/api/trips/${id}/photos`),
     uploadTripPhoto:     (id, d)  => req('POST',   `/api/trips/${id}/photos`, d),
 
+    startTripPause:      (id, d)  => req('POST',   `/api/trips/${id}/pause/start`, d),
+    endTripPause:        (id, d)  => req('POST',   `/api/trips/${id}/pause/end`, d),
+
     reassignTrip:        (id, d)  => req('POST',   `/api/trips/${id}/reassign`, d),
 
     // Trip categories
@@ -76,6 +79,6 @@ const api = (() => {
     createTripCategory:  (d)      => req('POST',   '/api/trip-categories', d),
     deleteTripCategory:  (id)     => req('DELETE', `/api/trip-categories/${id}`),
 
-    getMileageExportUrl: (from, to) => `/api/reports/mileage/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    getMileageExportUrl: (from, to) => `/api/reports/mileage/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${new Date().getTimezoneOffset()}`,
   };
 })();

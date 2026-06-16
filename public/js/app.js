@@ -163,6 +163,7 @@ const ICONS = {
   wrench:   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   alert:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
   car:      '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="9" y1="11" x2="2.5" y2="7.5"/><line x1="15" y1="11" x2="21.5" y2="7.5"/>',
+  pause:    '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -695,12 +696,17 @@ function renderActiveTripPage() {
 
   clearTimers();
 
+  const paused = !!trip.active_pause;
   const startEl = new Date(trip.start_time);
+  const pausedSince = paused ? new Date(trip.active_pause.pause_start) : null;
 
   document.getElementById('page').innerHTML = `
-    <div class="clock-hero" style="border-bottom:2px solid var(--blue);">
-      <div class="status-badge working" style="background:var(--blue-bg);color:var(--blue);border-color:var(--blue);">
-        <span class="dot" style="background:var(--blue);"></span>TRIP ACTIVE
+    <div class="clock-hero" style="border-bottom:2px solid ${paused ? 'var(--orange)' : 'var(--blue)'};">
+      <div class="status-badge ${paused ? 'on-break' : 'working'}" style="${paused
+        ? 'background:var(--orange-bg);color:var(--orange);border-color:var(--orange);'
+        : 'background:var(--blue-bg);color:var(--blue);border-color:var(--blue);'}">
+        <span class="dot" style="background:${paused ? 'var(--orange)' : 'var(--blue)'};"></span>
+        ${paused ? 'TRIP PAUSED' : 'TRIP ACTIVE'}
       </div>
       <div class="elapsed-time" id="trip-elapsed-display">00:00:00</div>
       <div class="clock-meta">
@@ -713,8 +719,11 @@ function renderActiveTripPage() {
       </div>
     </div>
     <div class="clock-actions" style="flex-direction:column;gap:10px;padding:20px 16px;">
-      <button class="btn btn-primary btn-lg" id="atp-main-action">
+      ${!paused ? `<button class="btn btn-primary btn-lg" id="atp-main-action">
         ${trip.category === 'In Route to WO' ? `${svg('clock')} Clock In` : `${svg('stop')} Finish Trip`}
+      </button>` : ''}
+      <button class="btn ${paused ? 'btn-primary' : 'btn-orange'} btn-lg" id="atp-pause">
+        ${paused ? `${svg('return')} Resume Trip` : `${svg('pause')} Pause Trip`}
       </button>
       <button class="btn btn-secondary btn-lg" id="atp-reassign">${svg('car')} Reassign Trip</button>
       <button class="btn btn-danger btn-lg" id="atp-cancel">${svg('trash')} Cancel Trip</button>
@@ -723,10 +732,33 @@ function renderActiveTripPage() {
 
   const update = () => {
     const el = document.getElementById('trip-elapsed-display');
-    if (el) el.textContent = fmtDuration(Math.floor((Date.now() - startEl) / 1000));
+    if (!el) return;
+    let elapsed = Math.floor((Date.now() - startEl) / 1000);
+    elapsed -= (trip.total_pause_seconds || 0);
+    if (paused && pausedSince) elapsed -= Math.floor((Date.now() - pausedSince) / 1000);
+    el.textContent = fmtDuration(Math.max(0, elapsed));
   };
   update();
   state.tripTimerInterval = setInterval(update, 1000);
+
+  document.getElementById('atp-pause').addEventListener('click', async () => {
+    const btn = document.getElementById('atp-pause');
+    btn.disabled = true;
+    try {
+      if (paused) {
+        await api.endTripPause(trip.id, { pause_end: new Date().toISOString() });
+      } else {
+        await api.startTripPause(trip.id, { pause_start: new Date().toISOString() });
+      }
+      state.currentTrip = await api.getCurrentTrip().catch(() => null);
+      clearInterval(state.tripTimerInterval);
+      state.tripTimerInterval = null;
+      renderActiveTripPage();
+    } catch (err) {
+      showToast(err.message || 'Failed to update pause', 'error');
+      btn.disabled = false;
+    }
+  });
 
   document.getElementById('atp-cancel').addEventListener('click', async () => {
     if (!confirm('Cancel this trip? All trip data and photos will be deleted.')) return;
@@ -746,7 +778,7 @@ function renderActiveTripPage() {
     openReassignTripModal(trip);
   });
 
-  document.getElementById('atp-main-action').addEventListener('click', () => {
+  document.getElementById('atp-main-action')?.addEventListener('click', () => {
     if (trip.category === 'In Route to WO') {
       openTripClockInModal(trip);
     } else {
