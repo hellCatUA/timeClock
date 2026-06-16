@@ -239,7 +239,7 @@ function buildPhotoSection(photoType, label, photos) {
 
 function buildPhotoGallery(photos) {
   if (!photos || !photos.length) return '';
-  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues / Add. Info', after: 'After', new_serial: 'New Serials' };
+  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues / Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', new_serial: 'New Serials' };
   const grouped = {};
   photos.forEach(p => { if (!grouped[p.photo_type]) grouped[p.photo_type] = []; grouped[p.photo_type].push(p); });
   return `<div class="det-photo-section">
@@ -1109,6 +1109,16 @@ function renderActiveClockPage() {
       <div id="photos-after" class="photo-sections-group">
         <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
+      <div class="divider"></div>
+      <div class="subsection-label">Work Order</div>
+      <div id="photos-work-order" class="photo-sections-group">
+        <div class="photo-section-loading">${svg('camera')} Loading…</div>
+      </div>
+      <div class="divider"></div>
+      <div class="subsection-label">Sign Off</div>
+      <div id="photos-sign-off" class="photo-sections-group">
+        <div class="photo-section-loading">${svg('camera')} Loading…</div>
+      </div>
       <div class="form-group" style="margin-top:8px;">
         <div class="toggle-row">
           <label class="form-label" style="margin:0;">Removal / Replacement?</label>
@@ -1287,7 +1297,7 @@ function renderActiveClockPage() {
   (async () => {
     try {
       const photos = await api.getPhotos(entry.id);
-      const grouped = { before: [], serial_before: [], issues: [], after: [], new_serial: [] };
+      const grouped = { before: [], serial_before: [], issues: [], after: [], work_order: [], sign_off: [], new_serial: [] };
       photos.forEach(p => { if (grouped[p.photo_type] !== undefined) grouped[p.photo_type].push(p); });
       document.getElementById('photos-before').innerHTML =
         buildPhotoSection('before', 'Before Photo', grouped.before) +
@@ -1296,6 +1306,10 @@ function renderActiveClockPage() {
         buildPhotoSection('issues', 'Issues / Add. Info', grouped.issues);
       document.getElementById('photos-after').innerHTML =
         buildPhotoSection('after', 'After Photo', grouped.after);
+      document.getElementById('photos-work-order').innerHTML =
+        buildPhotoSection('work_order', 'Work Order', grouped.work_order);
+      document.getElementById('photos-sign-off').innerHTML =
+        buildPhotoSection('sign_off', 'Sign Off', grouped.sign_off);
       document.getElementById('photos-new-serial').innerHTML =
         buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
     } catch(e) {
