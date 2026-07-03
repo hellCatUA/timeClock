@@ -164,6 +164,7 @@ const ICONS = {
   alert:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
   car:      '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="9" y1="11" x2="2.5" y2="7.5"/><line x1="15" y1="11" x2="21.5" y2="7.5"/>',
   pause:    '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
+  file:     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -200,14 +201,16 @@ function compressImage(file, maxPx = 1920, quality = 0.82) {
 }
 
 async function uploadPhoto(entryId, file, photoType) {
-  const blob = await compressImage(file);
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  const blob = isPdf ? file : await compressImage(file);
+  const mime = isPdf ? 'application/pdf' : 'image/jpeg';
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
         const b64 = e.target.result.split(',')[1];
         const result = await api.uploadPhoto(entryId, {
-          data: b64, filename: file.name, photo_type: photoType, mime: 'image/jpeg'
+          data: b64, filename: file.name, photo_type: photoType, mime
         });
         resolve(result);
       } catch (err) { reject(err); }
@@ -217,29 +220,37 @@ async function uploadPhoto(entryId, file, photoType) {
   });
 }
 
+function isPdfFile(photo) {
+  return /\.pdf$/i.test(photo.filename || photo.url || '');
+}
+
 function buildPhotoThumb(photo, label) {
+  const inner = isPdfFile(photo)
+    ? `<a class="photo-thumb-img photo-thumb-pdf" href="${escHtml(photo.url)}" target="_blank" title="${escHtml(photo.original_name || 'PDF')}">${svg('file')}<span>PDF</span></a>`
+    : `<img class="photo-thumb-img" src="${escHtml(photo.url)}" alt="${escHtml(label)}" loading="lazy">`;
   return `<div class="photo-thumb-item" data-photo-id="${photo.id}">
-    <img class="photo-thumb-img" src="${escHtml(photo.url)}" alt="${escHtml(label)}" loading="lazy">
+    ${inner}
     <button class="photo-delete-btn" data-photo-id="${photo.id}" type="button" aria-label="Remove">&#x2715;</button>
   </div>`;
 }
 
-function buildPhotoSection(photoType, label, photos) {
+function buildPhotoSection(photoType, label, photos, opts = {}) {
+  const allowPdf = !!opts.pdf;
   const thumbs = (photos || []).map(p => buildPhotoThumb(p, label)).join('');
   return `<div class="photo-section" data-type="${photoType}">
     <div class="photo-section-label">${escHtml(label)}</div>
     <div class="photo-thumbs-row" data-thumbs="${photoType}">${thumbs}</div>
     <label class="photo-add-btn" for="photo-inp-${photoType}">
-      ${svg('camera')}<span>Add Photo</span>
+      ${svg('camera')}<span>${allowPdf ? 'Add Photo / PDF' : 'Add Photo'}</span>
     </label>
-    <input type="file" accept="image/*" multiple class="photo-input visually-hidden"
+    <input type="file" accept="${allowPdf ? 'image/*,application/pdf' : 'image/*'}" multiple class="photo-input visually-hidden"
            id="photo-inp-${photoType}" data-type="${photoType}">
   </div>`;
 }
 
 function buildPhotoGallery(photos) {
   if (!photos || !photos.length) return '';
-  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues / Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', new_serial: 'New Serials' };
+  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues', add_info: 'Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', equipment_left: 'Equipment Left', new_serial: 'New Serials' };
   const grouped = {};
   photos.forEach(p => { if (!grouped[p.photo_type]) grouped[p.photo_type] = []; grouped[p.photo_type].push(p); });
   return `<div class="det-photo-section">
@@ -248,7 +259,9 @@ function buildPhotoGallery(photos) {
       <div style="margin-bottom:10px;">
         <div class="photo-section-label">${LABELS[type] || type}</div>
         <div class="photo-gallery-row">
-          ${list.map(p => `<a href="${escHtml(p.url)}" target="_blank" class="photo-gallery-item">
+          ${list.map(p => isPdfFile(p)
+            ? `<a href="${escHtml(p.url)}" target="_blank" class="photo-gallery-item photo-gallery-pdf" title="${escHtml(p.original_name || 'PDF')}">${svg('file')}<span>PDF</span></a>`
+            : `<a href="${escHtml(p.url)}" target="_blank" class="photo-gallery-item">
             <img src="${escHtml(p.url)}" alt="${type}" loading="lazy">
           </a>`).join('')}
         </div>
@@ -1100,9 +1113,27 @@ function renderActiveClockPage() {
         <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
       <div class="divider"></div>
-      <div class="subsection-label">Issues / Add. Info</div>
-      <div id="photos-issues" class="photo-sections-group">
-        <div class="photo-section-loading">${svg('camera')} Loading…</div>
+      <div class="form-group" style="margin-bottom:8px;">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Add Issues?</label>
+          <label class="switch"><input type="checkbox" id="jd-issues-toggle"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="photos-issues-wrap" class="hidden">
+        <div id="photos-issues" class="photo-sections-group">
+          <div class="photo-section-loading">${svg('camera')} Loading…</div>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:8px;">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Add Add. Info?</label>
+          <label class="switch"><input type="checkbox" id="jd-addinfo-toggle"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="photos-addinfo-wrap" class="hidden">
+        <div id="photos-add-info" class="photo-sections-group">
+          <div class="photo-section-loading">${svg('camera')} Loading…</div>
+        </div>
       </div>
       <div class="divider"></div>
       <div class="subsection-label">After</div>
@@ -1118,6 +1149,18 @@ function renderActiveClockPage() {
       <div class="subsection-label">Sign Off</div>
       <div id="photos-sign-off" class="photo-sections-group">
         <div class="photo-section-loading">${svg('camera')} Loading…</div>
+      </div>
+      <div class="divider"></div>
+      <div class="form-group" style="margin-bottom:8px;">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Equipment left on site?</label>
+          <label class="switch"><input type="checkbox" id="jd-equipment-toggle"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="photos-equipment-wrap" class="hidden">
+        <div id="photos-equipment" class="photo-sections-group">
+          <div class="photo-section-loading">${svg('camera')} Loading…</div>
+        </div>
       </div>
       <div class="form-group" style="margin-top:8px;">
         <div class="toggle-row">
@@ -1278,6 +1321,16 @@ function renderActiveClockPage() {
     pm_pc_name:document.getElementById('jd-pmpc').value.trim() || null,
   }));
 
+  // Optional picture-section toggles
+  const wireSectionToggle = (toggleId, wrapId) => {
+    document.getElementById(toggleId)?.addEventListener('change', e => {
+      document.getElementById(wrapId)?.classList.toggle('hidden', !e.target.checked);
+    });
+  };
+  wireSectionToggle('jd-issues-toggle', 'photos-issues-wrap');
+  wireSectionToggle('jd-addinfo-toggle', 'photos-addinfo-wrap');
+  wireSectionToggle('jd-equipment-toggle', 'photos-equipment-wrap');
+
   // Replacement toggle
   let noReturn = !!entry.no_return_track;
   document.getElementById('jd-replacement').addEventListener('change', e => {
@@ -1297,21 +1350,35 @@ function renderActiveClockPage() {
   (async () => {
     try {
       const photos = await api.getPhotos(entry.id);
-      const grouped = { before: [], serial_before: [], issues: [], after: [], work_order: [], sign_off: [], new_serial: [] };
+      const grouped = { before: [], serial_before: [], issues: [], add_info: [], after: [], work_order: [], sign_off: [], equipment_left: [], new_serial: [] };
       photos.forEach(p => { if (grouped[p.photo_type] !== undefined) grouped[p.photo_type].push(p); });
       document.getElementById('photos-before').innerHTML =
         buildPhotoSection('before', 'Before Photo', grouped.before) +
         buildPhotoSection('serial_before', 'Serial Numbers', grouped.serial_before);
       document.getElementById('photos-issues').innerHTML =
-        buildPhotoSection('issues', 'Issues / Add. Info', grouped.issues);
+        buildPhotoSection('issues', 'Issues', grouped.issues);
+      document.getElementById('photos-add-info').innerHTML =
+        buildPhotoSection('add_info', 'Add. Info', grouped.add_info);
       document.getElementById('photos-after').innerHTML =
         buildPhotoSection('after', 'After Photo', grouped.after);
       document.getElementById('photos-work-order').innerHTML =
-        buildPhotoSection('work_order', 'Work Order', grouped.work_order);
+        buildPhotoSection('work_order', 'Work Order', grouped.work_order, { pdf: true });
       document.getElementById('photos-sign-off').innerHTML =
-        buildPhotoSection('sign_off', 'Sign Off', grouped.sign_off);
+        buildPhotoSection('sign_off', 'Sign Off', grouped.sign_off, { pdf: true });
+      document.getElementById('photos-equipment').innerHTML =
+        buildPhotoSection('equipment_left', 'Equipment Left', grouped.equipment_left);
       document.getElementById('photos-new-serial').innerHTML =
         buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
+      // Auto-expand collapsed sections that already have content
+      const autoExpand = (list, toggleId, wrapId) => {
+        if (!list.length) return;
+        const t = document.getElementById(toggleId);
+        if (t) t.checked = true;
+        document.getElementById(wrapId)?.classList.remove('hidden');
+      };
+      autoExpand(grouped.issues, 'jd-issues-toggle', 'photos-issues-wrap');
+      autoExpand(grouped.add_info, 'jd-addinfo-toggle', 'photos-addinfo-wrap');
+      autoExpand(grouped.equipment_left, 'jd-equipment-toggle', 'photos-equipment-wrap');
     } catch(e) {
       picSection.querySelectorAll('.photo-section-loading').forEach(el => { el.textContent = '—'; });
     }

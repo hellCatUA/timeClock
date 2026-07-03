@@ -892,6 +892,7 @@ def h_post_photo(req, groups):
     if "png" in mime: ext = ".png"
     elif "webp" in mime: ext = ".webp"
     elif "gif" in mime: ext = ".gif"
+    elif "pdf" in mime: ext = ".pdf"
 
     with get_db() as db:
         entry_row = row_to_dict(db.execute(
@@ -1716,7 +1717,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "Not found"})
                 return
             img_mime = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
-                        '.gif': 'image/gif', '.webp': 'image/webp'}.get(file_path.suffix.lower(), 'application/octet-stream')
+                        '.gif': 'image/gif', '.webp': 'image/webp',
+                        '.pdf': 'application/pdf'}.get(file_path.suffix.lower(), 'application/octet-stream')
             data = file_path.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", img_mime)
