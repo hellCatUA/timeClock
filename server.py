@@ -101,6 +101,8 @@ def init_db():
             release_code TEXT,
             no_release_code INTEGER DEFAULT 0,
             materials TEXT,
+            pay_adjustment REAL,
+            pay_adjustment_note TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -258,6 +260,8 @@ def migrate_db():
             FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
         )""",
         "ALTER TABLE trips ADD COLUMN total_pause_seconds INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN pay_adjustment REAL",
+        "ALTER TABLE time_entries ADD COLUMN pay_adjustment_note TEXT",
         """CREATE TABLE IF NOT EXISTS trip_pauses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trip_id INTEGER NOT NULL,
@@ -589,7 +593,8 @@ def h_put_entry(req, groups):
                 parking_tolls=?, is_replacement=?, old_serial=?, new_serial=?,
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
-                status=?, release_code=?, no_release_code=?, materials=?
+                status=?, release_code=?, no_release_code=?, materials=?,
+                pay_adjustment=?, pay_adjustment_note=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -626,6 +631,8 @@ def h_put_entry(req, groups):
             data.get("release_code", ex.get("release_code")),
             1 if data.get("no_release_code", ex.get("no_release_code", 0)) else 0,
             materials_str,
+            data.get("pay_adjustment", ex.get("pay_adjustment")),
+            data.get("pay_adjustment_note", ex.get("pay_adjustment_note")),
             eid
         ))
         new_folder = _photo_folder({
@@ -1182,7 +1189,8 @@ def h_export_csv(req, _groups):
         travel  = float(e.get("travel_reimb")  or 0)
         parking = float(e.get("parking_tolls") or 0)
         mats    = mat_total(e.get("materials"))
-        return net, labor, travel, mats, parking, labor + travel + parking + mats
+        adj     = float(e.get("pay_adjustment") or 0)
+        return net, labor, travel, mats, parking, labor + travel + parking + mats + adj
 
     def pay_type_str(e):
         return "Flat" if e.get("rate_type") == "flat" else "Hourly"
@@ -1219,7 +1227,8 @@ def h_export_csv(req, _groups):
             cell(f"{mats:.2f}"   if mats   else ""),
             cell(f"{parking:.2f}" if parking else ""),
             cell(f"{total:.2f}"),
-            cell(""), cell(""), cell(""),
+            cell(""), cell(""),
+            cell(e.get("pay_adjustment_note") or ""),
         ])
 
     def summary_row(label, exp, pay_status="", received="", notes=""):

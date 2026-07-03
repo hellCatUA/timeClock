@@ -99,7 +99,8 @@ function calcTotalExpected(entry) {
   const labor = calcLabor(entry);
   const travel = parseFloat(entry.travel_reimb) || 0;
   const parking = parseFloat(entry.parking_tolls) || 0;
-  return labor + travel + parking;
+  const adj = parseFloat(entry.pay_adjustment) || 0;
+  return labor + travel + parking + adj;
 }
 function getWeekBounds(date, weekStartDay) {
   // weekStartDay: 0=Sun, 1=Mon
@@ -2406,8 +2407,9 @@ async function renderJournalPage() {
           const weekEnd   = btn.dataset.weekEnd;
           const wg = weekGroupsByDate[weekStart];
           if (!wg) return;
-          const wExp = wg.entries.filter(e => e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
-          openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage);
+          const completed = wg.entries.filter(e => e.clock_out);
+          const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
+          openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage, completed);
         });
       });
     }
@@ -2456,7 +2458,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
     </div>`;
 }
 
-function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave) {
+function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave, entries = []) {
   const wsDate    = new Date(weekStart + 'T12:00:00');
   const weDate    = new Date(weekEnd   + 'T12:00:00');
   const dateRange = `${fmtDateShort(wsDate.toISOString())} – ${fmtDateShort(weDate.toISOString())}`;
@@ -2464,12 +2466,54 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave)
   const curAmount = payPeriod?.received_amount ?? expectedTotal;
   const curNotes  = payPeriod?.notes || '';
 
+  // Per-entry adjustment state (amount can be negative)
+  const adjMap = {};
+  entries.forEach(e => {
+    adjMap[e.id] = { amount: parseFloat(e.pay_adjustment) || 0, note: e.pay_adjustment_note || '' };
+  });
+  const baseFor = e => calcTotalExpected(e) - (parseFloat(e.pay_adjustment) || 0);
+  const totalExpected = () => entries.length
+    ? entries.reduce((s, e) => s + baseFor(e) + (adjMap[e.id].amount || 0), 0)
+    : expectedTotal;
+
   const statuses = [
     { key: 'received', label: 'PAY RECEIVED' },
     { key: 'delayed',  label: 'PAY DELAYED'  },
     { key: 'problem',  label: 'PAY PROBLEM'  },
     { key: 'pending',  label: 'PAY PENDING'  },
   ];
+
+  const entryRows = entries.map(e => {
+    const a = adjMap[e.id];
+    const hasAdj = !!(a.amount || a.note);
+    return `
+    <div class="pay-entry-row" data-id="${e.id}">
+      <div class="pay-entry-head">
+        <div class="pay-entry-info">
+          <div class="pay-entry-title">${escHtml(fmtDateShort(e.clock_in))} · ${escHtml(e.wo_title || e.assignment_id || 'Work Order')}</div>
+          <div class="pay-entry-base">Base: ${sym}${baseFor(e).toFixed(2)}</div>
+        </div>
+        <div class="pay-entry-total" data-total="${e.id}">${sym}${(baseFor(e) + a.amount).toFixed(2)}</div>
+      </div>
+      <div class="pay-entry-actions">
+        <button class="btn btn-ghost btn-sm" data-act="inc" data-id="${e.id}" style="color:var(--green);">＋ Increase</button>
+        <button class="btn btn-ghost btn-sm" data-act="dec" data-id="${e.id}" style="color:var(--red);">− Decrease</button>
+        <button class="btn btn-ghost btn-sm" data-act="note" data-id="${e.id}">${svg('edit')} Note</button>
+      </div>
+      <div class="pay-entry-editor ${hasAdj ? '' : 'hidden'}" data-editor="${e.id}">
+        <div class="input-row" style="margin-bottom:6px;">
+          <div class="money-wrap" style="flex:1;">
+            <span class="money-sym">${sym}</span>
+            <input type="number" class="form-control" step="0.01" data-adj="${e.id}"
+              placeholder="0.00" value="${a.amount ? a.amount.toFixed(2) : ''}">
+          </div>
+          <button class="btn btn-ghost btn-sm" data-act="clear" data-id="${e.id}">Clear</button>
+        </div>
+        <input type="text" class="form-control" data-adjnote="${e.id}"
+          placeholder="Reason / note for this day..." value="${escHtml(a.note)}">
+      </div>
+    </div>`;
+  }).join('');
 
   openModal(`
     <div class="modal-header">
@@ -2480,8 +2524,13 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave)
       <div class="field-hint" style="margin-bottom:16px;">${dateRange}</div>
       <div class="form-group">
         <label class="form-label">Expected Total</label>
-        <div style="font-size:20px;font-weight:700;color:var(--text);">${sym}${expectedTotal.toFixed(2)}</div>
+        <div style="font-size:20px;font-weight:700;color:var(--text);" id="pm-expected">${sym}${totalExpected().toFixed(2)}</div>
       </div>
+      ${entries.length ? `
+      <div class="form-group">
+        <label class="form-label">Jobs this week</label>
+        <div class="pay-entries-list">${entryRows}</div>
+      </div>` : ''}
       <div class="form-group">
         <label class="form-label">Amount Received</label>
         <div class="money-wrap">
@@ -2518,18 +2567,96 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave)
       selectedStatus = btn.dataset.status;
     });
   });
+
+  // Per-entry adjustment wiring
+  const modalBody = document.getElementById('modal-body');
+  const refreshTotals = () => {
+    entries.forEach(e => {
+      const el = modalBody.querySelector(`[data-total="${e.id}"]`);
+      if (el) {
+        const t = baseFor(e) + (adjMap[e.id].amount || 0);
+        el.textContent = `${sym}${t.toFixed(2)}`;
+        el.style.color = adjMap[e.id].amount > 0 ? 'var(--green)' : adjMap[e.id].amount < 0 ? 'var(--red)' : '';
+      }
+    });
+    const exp = document.getElementById('pm-expected');
+    if (exp) exp.textContent = `${sym}${totalExpected().toFixed(2)}`;
+  };
+
+  modalBody.querySelectorAll('.pay-entry-actions button, [data-act="clear"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      const editor = modalBody.querySelector(`[data-editor="${id}"]`);
+      const adjInp = modalBody.querySelector(`[data-adj="${id}"]`);
+      const act = btn.dataset.act;
+      if (act === 'clear') {
+        adjMap[id].amount = 0; adjMap[id].note = '';
+        if (adjInp) adjInp.value = '';
+        const noteInp = modalBody.querySelector(`[data-adjnote="${id}"]`);
+        if (noteInp) noteInp.value = '';
+        editor?.classList.add('hidden');
+        refreshTotals();
+        return;
+      }
+      editor?.classList.remove('hidden');
+      if (act === 'inc' && adjInp) {
+        const v = Math.abs(parseFloat(adjInp.value)) || '';
+        adjInp.value = v === '' ? '' : v.toFixed(2);
+        adjInp.focus();
+      } else if (act === 'dec' && adjInp) {
+        const v = Math.abs(parseFloat(adjInp.value)) || '';
+        adjInp.value = v === '' ? '' : (-v).toFixed(2);
+        if (v === '') adjInp.value = '-';
+        adjInp.focus();
+      } else if (act === 'note') {
+        modalBody.querySelector(`[data-adjnote="${id}"]`)?.focus();
+      }
+      if (adjInp) { adjMap[id].amount = parseFloat(adjInp.value) || 0; }
+      refreshTotals();
+    });
+  });
+
+  modalBody.querySelectorAll('[data-adj]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      adjMap[inp.dataset.adj].amount = parseFloat(inp.value) || 0;
+      refreshTotals();
+    });
+  });
+  modalBody.querySelectorAll('[data-adjnote]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      adjMap[inp.dataset.adjnote].note = inp.value.trim();
+    });
+  });
+
   document.getElementById('pm-save').addEventListener('click', async () => {
     const amount = parseFloat(document.getElementById('pm-amount').value) || null;
     const notes  = document.getElementById('pm-notes').value.trim() || null;
     const paid_at = selectedStatus === 'received'
       ? (payPeriod?.paid_at || new Date().toISOString())
       : (payPeriod?.paid_at || null);
+    const saveBtn = document.getElementById('pm-save');
     try {
-      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status: selectedStatus, received_amount: amount, expected_total: expectedTotal, notes, paid_at });
+      saveBtn.disabled = true;
+      // Persist changed per-entry adjustments
+      for (const e of entries) {
+        const a = adjMap[e.id];
+        const origAmount = parseFloat(e.pay_adjustment) || 0;
+        const origNote = e.pay_adjustment_note || '';
+        if (a.amount !== origAmount || a.note !== origNote) {
+          await api.updateEntry(e.id, {
+            pay_adjustment: a.amount || null,
+            pay_adjustment_note: a.note || null,
+          });
+        }
+      }
+      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status: selectedStatus, received_amount: amount, expected_total: totalExpected(), notes, paid_at });
       showToast('Pay status saved', 'success');
       closeModal();
       onSave();
-    } catch (e) { showToast(e.message || 'Save failed', 'error'); }
+    } catch (e) {
+      showToast(e.message || 'Save failed', 'error');
+      saveBtn.disabled = false;
+    }
   });
 }
 
@@ -2590,6 +2717,7 @@ function openEntryDetail(entry) {
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
       ${entry.travel_reimb ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(entry.travel_reimb)}</span></div>` : ''}
       ${entry.parking_tolls ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(entry.parking_tolls)}</span></div>` : ''}
+      ${entry.pay_adjustment ? `<div class="review-row"><span>Pay Adjustment:</span><span style="color:${entry.pay_adjustment > 0 ? 'var(--green)' : 'var(--red)'};">${entry.pay_adjustment > 0 ? '+' : ''}${fmtMoney(entry.pay_adjustment)}${entry.pay_adjustment_note ? ` · ${escHtml(entry.pay_adjustment_note)}` : ''}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row">
         <span>Received Pay:</span>
