@@ -22,6 +22,8 @@ const api = (() => {
     updateEntry:        (id, d)  => req('PUT',    `/api/entries/${id}`, d),
     deleteEntry:        (id)     => req('DELETE', `/api/entries/${id}`),
 
+    getEntryZipUrl:     (id)     => `/api/entries/${id}/export/zip?tz=${new Date().getTimezoneOffset()}`,
+
     // Photos
     getPhotos:          (id)      => req('GET',    `/api/entries/${id}/photos`),
     uploadPhoto:        (id, d)   => req('POST',   `/api/entries/${id}/photos`, d),

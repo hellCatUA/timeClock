@@ -99,8 +99,7 @@ function calcTotalExpected(entry) {
   const labor = calcLabor(entry);
   const travel = parseFloat(entry.travel_reimb) || 0;
   const parking = parseFloat(entry.parking_tolls) || 0;
-  const adj = parseFloat(entry.pay_adjustment) || 0;
-  return labor + travel + parking + adj;
+  return labor + travel + parking;
 }
 function getWeekBounds(date, weekStartDay) {
   // weekStartDay: 0=Sun, 1=Mon
@@ -2463,18 +2462,25 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   const weDate    = new Date(weekEnd   + 'T12:00:00');
   const dateRange = `${fmtDateShort(wsDate.toISOString())} – ${fmtDateShort(weDate.toISOString())}`;
   const curStatus = payPeriod?.status || 'pending';
-  const curAmount = payPeriod?.received_amount ?? expectedTotal;
   const curNotes  = payPeriod?.notes || '';
 
-  // Per-entry adjustment state (amount can be negative)
-  const adjMap = {};
+  // Per-entry pay override state (received amount replaces base for that job)
+  const ovMap = {};
   entries.forEach(e => {
-    adjMap[e.id] = { amount: parseFloat(e.pay_adjustment) || 0, note: e.pay_adjustment_note || '' };
+    ovMap[e.id] = {
+      amount: e.received_pay != null ? parseFloat(e.received_pay) : null,
+      note: e.pay_adjustment_note || '',
+    };
   });
-  const baseFor = e => calcTotalExpected(e) - (parseFloat(e.pay_adjustment) || 0);
+  const baseFor = e => calcTotalExpected(e);
   const totalExpected = () => entries.length
-    ? entries.reduce((s, e) => s + baseFor(e) + (adjMap[e.id].amount || 0), 0)
+    ? entries.reduce((s, e) => s + baseFor(e), 0)
     : expectedTotal;
+  const receivedSum = () => entries.reduce((s, e) => {
+    const ov = ovMap[e.id].amount;
+    return s + (ov != null ? ov : baseFor(e));
+  }, 0);
+  const curAmount = payPeriod?.received_amount ?? (entries.length ? receivedSum() : expectedTotal);
 
   const statuses = [
     { key: 'received', label: 'PAY RECEIVED' },
@@ -2484,33 +2490,33 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   ];
 
   const entryRows = entries.map(e => {
-    const a = adjMap[e.id];
-    const hasAdj = !!(a.amount || a.note);
+    const o = ovMap[e.id];
+    const hasOv = o.amount != null || !!o.note;
+    const shown = o.amount != null ? o.amount : baseFor(e);
     return `
     <div class="pay-entry-row" data-id="${e.id}">
       <div class="pay-entry-head">
         <div class="pay-entry-info">
           <div class="pay-entry-title">${escHtml(fmtDateShort(e.clock_in))} · ${escHtml(e.wo_title || e.assignment_id || 'Work Order')}</div>
-          <div class="pay-entry-base">Base: ${sym}${baseFor(e).toFixed(2)}</div>
+          <div class="pay-entry-base">Expected: ${sym}${baseFor(e).toFixed(2)}</div>
         </div>
-        <div class="pay-entry-total" data-total="${e.id}">${sym}${(baseFor(e) + a.amount).toFixed(2)}</div>
+        <div class="pay-entry-total" data-total="${e.id}">${sym}${shown.toFixed(2)}</div>
       </div>
       <div class="pay-entry-actions">
-        <button class="btn btn-ghost btn-sm" data-act="inc" data-id="${e.id}" style="color:var(--green);">＋ Increase</button>
-        <button class="btn btn-ghost btn-sm" data-act="dec" data-id="${e.id}" style="color:var(--red);">− Decrease</button>
+        <button class="btn btn-ghost btn-sm" data-act="override" data-id="${e.id}" style="color:var(--blue);">${sym} Pay Override</button>
         <button class="btn btn-ghost btn-sm" data-act="note" data-id="${e.id}">${svg('edit')} Note</button>
       </div>
-      <div class="pay-entry-editor ${hasAdj ? '' : 'hidden'}" data-editor="${e.id}">
+      <div class="pay-entry-editor ${hasOv ? '' : 'hidden'}" data-editor="${e.id}">
         <div class="input-row" style="margin-bottom:6px;">
           <div class="money-wrap" style="flex:1;">
             <span class="money-sym">${sym}</span>
-            <input type="number" class="form-control" step="0.01" data-adj="${e.id}"
-              placeholder="0.00" value="${a.amount ? a.amount.toFixed(2) : ''}">
+            <input type="number" class="form-control" min="0" step="0.01" data-ov="${e.id}"
+              placeholder="${baseFor(e).toFixed(2)}" value="${o.amount != null ? o.amount.toFixed(2) : ''}">
           </div>
           <button class="btn btn-ghost btn-sm" data-act="clear" data-id="${e.id}">Clear</button>
         </div>
-        <input type="text" class="form-control" data-adjnote="${e.id}"
-          placeholder="Reason / note for this day..." value="${escHtml(a.note)}">
+        <input type="text" class="form-control" data-ovnote="${e.id}"
+          placeholder="Reason / note for this day..." value="${escHtml(o.note)}">
       </div>
     </div>`;
   }).join('');
@@ -2568,63 +2574,58 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     });
   });
 
-  // Per-entry adjustment wiring
+  // Per-entry override wiring
   const modalBody = document.getElementById('modal-body');
   const refreshTotals = () => {
     entries.forEach(e => {
       const el = modalBody.querySelector(`[data-total="${e.id}"]`);
-      if (el) {
-        const t = baseFor(e) + (adjMap[e.id].amount || 0);
-        el.textContent = `${sym}${t.toFixed(2)}`;
-        el.style.color = adjMap[e.id].amount > 0 ? 'var(--green)' : adjMap[e.id].amount < 0 ? 'var(--red)' : '';
-      }
+      if (!el) return;
+      const ov = ovMap[e.id].amount;
+      const base = baseFor(e);
+      const shown = ov != null ? ov : base;
+      el.textContent = `${sym}${shown.toFixed(2)}`;
+      el.style.color = ov == null ? '' : ov < base ? 'var(--red)' : ov > base ? 'var(--green)' : '';
     });
-    const exp = document.getElementById('pm-expected');
-    if (exp) exp.textContent = `${sym}${totalExpected().toFixed(2)}`;
+    // Live-sync weekly Amount Received with per-entry values
+    const amountInp = document.getElementById('pm-amount');
+    if (amountInp && entries.length) amountInp.value = receivedSum().toFixed(2);
   };
 
   modalBody.querySelectorAll('.pay-entry-actions button, [data-act="clear"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
       const editor = modalBody.querySelector(`[data-editor="${id}"]`);
-      const adjInp = modalBody.querySelector(`[data-adj="${id}"]`);
+      const ovInp = modalBody.querySelector(`[data-ov="${id}"]`);
       const act = btn.dataset.act;
       if (act === 'clear') {
-        adjMap[id].amount = 0; adjMap[id].note = '';
-        if (adjInp) adjInp.value = '';
-        const noteInp = modalBody.querySelector(`[data-adjnote="${id}"]`);
+        ovMap[id].amount = null; ovMap[id].note = '';
+        if (ovInp) ovInp.value = '';
+        const noteInp = modalBody.querySelector(`[data-ovnote="${id}"]`);
         if (noteInp) noteInp.value = '';
         editor?.classList.add('hidden');
         refreshTotals();
         return;
       }
       editor?.classList.remove('hidden');
-      if (act === 'inc' && adjInp) {
-        const v = Math.abs(parseFloat(adjInp.value)) || '';
-        adjInp.value = v === '' ? '' : v.toFixed(2);
-        adjInp.focus();
-      } else if (act === 'dec' && adjInp) {
-        const v = Math.abs(parseFloat(adjInp.value)) || '';
-        adjInp.value = v === '' ? '' : (-v).toFixed(2);
-        if (v === '') adjInp.value = '-';
-        adjInp.focus();
+      if (act === 'override') {
+        ovInp?.focus();
+        ovInp?.select();
       } else if (act === 'note') {
-        modalBody.querySelector(`[data-adjnote="${id}"]`)?.focus();
+        modalBody.querySelector(`[data-ovnote="${id}"]`)?.focus();
       }
-      if (adjInp) { adjMap[id].amount = parseFloat(adjInp.value) || 0; }
-      refreshTotals();
     });
   });
 
-  modalBody.querySelectorAll('[data-adj]').forEach(inp => {
+  modalBody.querySelectorAll('[data-ov]').forEach(inp => {
     inp.addEventListener('input', () => {
-      adjMap[inp.dataset.adj].amount = parseFloat(inp.value) || 0;
+      const v = inp.value.trim();
+      ovMap[inp.dataset.ov].amount = v === '' ? null : (parseFloat(v) || 0);
       refreshTotals();
     });
   });
-  modalBody.querySelectorAll('[data-adjnote]').forEach(inp => {
+  modalBody.querySelectorAll('[data-ovnote]').forEach(inp => {
     inp.addEventListener('input', () => {
-      adjMap[inp.dataset.adjnote].note = inp.value.trim();
+      ovMap[inp.dataset.ovnote].note = inp.value.trim();
     });
   });
 
@@ -2637,15 +2638,15 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     const saveBtn = document.getElementById('pm-save');
     try {
       saveBtn.disabled = true;
-      // Persist changed per-entry adjustments
+      // Persist changed per-entry overrides
       for (const e of entries) {
-        const a = adjMap[e.id];
-        const origAmount = parseFloat(e.pay_adjustment) || 0;
+        const o = ovMap[e.id];
+        const origAmount = e.received_pay != null ? parseFloat(e.received_pay) : null;
         const origNote = e.pay_adjustment_note || '';
-        if (a.amount !== origAmount || a.note !== origNote) {
+        if (o.amount !== origAmount || o.note !== origNote) {
           await api.updateEntry(e.id, {
-            pay_adjustment: a.amount || null,
-            pay_adjustment_note: a.note || null,
+            received_pay: o.amount,
+            pay_adjustment_note: o.note || null,
           });
         }
       }
@@ -2717,7 +2718,7 @@ function openEntryDetail(entry) {
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
       ${entry.travel_reimb ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(entry.travel_reimb)}</span></div>` : ''}
       ${entry.parking_tolls ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(entry.parking_tolls)}</span></div>` : ''}
-      ${entry.pay_adjustment ? `<div class="review-row"><span>Pay Adjustment:</span><span style="color:${entry.pay_adjustment > 0 ? 'var(--green)' : 'var(--red)'};">${entry.pay_adjustment > 0 ? '+' : ''}${fmtMoney(entry.pay_adjustment)}${entry.pay_adjustment_note ? ` · ${escHtml(entry.pay_adjustment_note)}` : ''}</span></div>` : ''}
+      ${entry.pay_adjustment_note ? `<div class="review-row"><span>Pay Note:</span><span>${escHtml(entry.pay_adjustment_note)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row">
         <span>Received Pay:</span>
@@ -2738,6 +2739,7 @@ function openEntryDetail(entry) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
+      <a class="btn btn-ghost btn-sm" href="${api.getEntryZipUrl(entry.id)}" download>${svg('download')} Export ZIP</a>
       <button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>
     </div>`);
 

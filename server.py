@@ -1189,8 +1189,7 @@ def h_export_csv(req, _groups):
         travel  = float(e.get("travel_reimb")  or 0)
         parking = float(e.get("parking_tolls") or 0)
         mats    = mat_total(e.get("materials"))
-        adj     = float(e.get("pay_adjustment") or 0)
-        return net, labor, travel, mats, parking, labor + travel + parking + mats + adj
+        return net, labor, travel, mats, parking, labor + travel + parking + mats
 
     def pay_type_str(e):
         return "Flat" if e.get("rate_type") == "flat" else "Hourly"
@@ -1210,6 +1209,14 @@ def h_export_csv(req, _groups):
 
     def entry_row(e):
         net, labor, travel, mats, parking, total = calc_entry(e)
+        override = e.get("received_pay")
+        pay_status = ""
+        received_str = ""
+        if override is not None:
+            override = float(override)
+            received_str = f"{override:.2f}"
+            if override < total - 0.005:
+                pay_status = "DECREASED"
         return ",".join([
             cell(fmt_date(e["clock_in"])),
             cell(e.get("wo_title") or ""),
@@ -1227,7 +1234,8 @@ def h_export_csv(req, _groups):
             cell(f"{mats:.2f}"   if mats   else ""),
             cell(f"{parking:.2f}" if parking else ""),
             cell(f"{total:.2f}"),
-            cell(""), cell(""),
+            cell(pay_status),
+            cell(received_str),
             cell(e.get("pay_adjustment_note") or ""),
         ])
 
@@ -1299,6 +1307,96 @@ def h_export_csv(req, _groups):
         lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", ""))
 
     return "csv", "\n".join(lines)
+
+
+def h_export_entry_zip(req, groups):
+    import io
+    import zipfile
+    from datetime import timedelta, timezone as _tz
+
+    eid = groups[0]
+    params = req.get("query", {})
+    tz_offset = int(params.get("tz", [0])[0] or 0)
+    local_tz = _tz(timedelta(minutes=-tz_offset))
+
+    with get_db() as db:
+        row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
+        if not row:
+            return 404, {"error": "Not found"}
+        entry = attach_breaks(db, row_to_dict(row))
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=? ORDER BY created_at", (eid,)
+        ).fetchall())
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+
+    def fmt_local(iso):
+        if not iso: return ""
+        try:
+            return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz).strftime("%-I:%M %p")
+        except Exception:
+            return iso[:16]
+
+    sym = settings.get("currency_symbol") or "$"
+    paid_breaks = (settings.get("paid_breaks") or "0") == "1"
+    gross = dt_diff_seconds(entry["clock_in"], entry["clock_out"]) if entry.get("clock_out") else 0
+    net = gross if paid_breaks else max(0, gross - (entry.get("total_break_seconds") or 0))
+    total_hrs = f"{net / 3600:.2f} hrs"
+
+    try:
+        mats = json.loads(entry.get("materials") or "[]")
+        mats = mats if isinstance(mats, list) else []
+    except Exception:
+        mats = []
+    mats_str = ", ".join(
+        m.get("name", "") + (f" - {sym}{m['price']}" if m.get("price") else "")
+        for m in mats
+    ) or "N/a"
+
+    site_and_id = " #".join(x for x in [entry.get("client_name"), entry.get("site_id")] if x)
+    release_code = "N/a" if entry.get("no_release_code") else (entry.get("release_code") or "N/a")
+    return_track = "N/a" if entry.get("no_return_track") else (entry.get("return_track") or "N/a")
+    parking = f"{sym}{entry['parking_tolls']}" if entry.get("parking_tolls") else "N/a"
+
+    report = f"""Tech name: {settings.get('tech_name') or ''}
+Assignment ID: {entry.get('assignment_id') or ''}
+Site name & ID: {site_and_id}
+Address: {entry.get('address') or ''}
+Buyer/Representing company: {entry.get('org_name') or ''}
+Onsite (Check in): {fmt_local(entry.get('clock_in'))}
+Offsite (Check out): {fmt_local(entry.get('clock_out'))}
+Total time: {total_hrs}
+Parking/Tolls: {parking}
+PM/PC name: {entry.get('pm_pc_name') or 'N/a'}
+MOD name: {entry.get('mod_name') or 'N/a'}
+NOC name: {entry.get('noc_name') or 'N/a'}
+Ticket #: {entry.get('ticket_num') or 'N/a'}
+Release code: {release_code}
+Return track #: {return_track}
+Materials used: {mats_str}
+Work summary: {entry.get('work_summary') or ''}
+"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("report.txt", report)
+        used_names = set()
+        for p in photos:
+            folder = p.get("folder") or str(eid)
+            fp = UPLOADS_DIR / folder / p["filename"]
+            if not fp.exists():
+                continue
+            arc = f"{p['photo_type']}/{p['filename']}"
+            if arc in used_names:
+                arc = f"{p['photo_type']}/{p['id']}_{p['filename']}"
+            used_names.add(arc)
+            zf.write(fp, arcname=arc)
+
+    safe_id = re.sub(r'[^\w-]', '', (entry.get("assignment_id") or f"entry-{eid}"))
+    try:
+        date_str = datetime.fromisoformat(entry["clock_in"].replace("Z", "+00:00")).astimezone(local_tz).strftime("%Y-%m-%d")
+    except Exception:
+        date_str = "export"
+    return "zip", (f"WO-{safe_id}-{date_str}.zip", buf.getvalue())
 
 
 # ── Trips ──────────────────────────────────────────────────────────────────────
@@ -1643,6 +1741,7 @@ ROUTES = [
     (r"/api/entries/(\d+)/photos",          ["GET"],    h_get_photos),
     (r"/api/entries/(\d+)/photos",          ["POST"],   h_post_photo),
     (r"/api/entries/(\d+)/photos/(\d+)",    ["DELETE"], h_delete_photo),
+    (r"/api/entries/(\d+)/export/zip",      ["GET"],    h_export_entry_zip),
     (r"/api/pay-periods",              ["GET"],  h_get_pay_periods),
     (r"/api/pay-periods",              ["POST"], h_upsert_pay_period),
     (r"/api/trips/current",                ["GET"],    h_get_current_trip),
@@ -1708,6 +1807,15 @@ class Handler(BaseHTTPRequestHandler):
         data = ("﻿" + content).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_zip(self, result):
+        fn, data = result
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -1784,6 +1892,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if status == "csv":
             self._send_csv(result)
+        elif status == "zip":
+            self._send_zip(result)
         else:
             self._send(status, result)
 
