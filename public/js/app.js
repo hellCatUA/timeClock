@@ -2470,6 +2470,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     ovMap[e.id] = {
       amount: e.received_pay != null ? parseFloat(e.received_pay) : null,
       note: e.pay_adjustment_note || '',
+      date: (e.received_date || '').slice(0, 10),
     };
   });
   const baseFor = e => calcTotalExpected(e);
@@ -2491,7 +2492,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
 
   const entryRows = entries.map(e => {
     const o = ovMap[e.id];
-    const hasOv = o.amount != null || !!o.note;
+    const hasOv = o.amount != null || !!o.note || !!o.date;
     const shown = o.amount != null ? o.amount : baseFor(e);
     return `
     <div class="pay-entry-row" data-id="${e.id}">
@@ -2517,6 +2518,10 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         </div>
         <input type="text" class="form-control" data-ovnote="${e.id}"
           placeholder="Reason / note for this day..." value="${escHtml(o.note)}">
+        <div class="input-row" style="margin-top:6px;align-items:center;">
+          <label style="font-size:12px;color:var(--text3);white-space:nowrap;">Received date</label>
+          <input type="date" class="form-control" data-ovdate="${e.id}" value="${escHtml(o.date)}">
+        </div>
       </div>
     </div>`;
   }).join('');
@@ -2598,10 +2603,12 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
       const ovInp = modalBody.querySelector(`[data-ov="${id}"]`);
       const act = btn.dataset.act;
       if (act === 'clear') {
-        ovMap[id].amount = null; ovMap[id].note = '';
+        ovMap[id].amount = null; ovMap[id].note = ''; ovMap[id].date = '';
         if (ovInp) ovInp.value = '';
         const noteInp = modalBody.querySelector(`[data-ovnote="${id}"]`);
         if (noteInp) noteInp.value = '';
+        const dateInp = modalBody.querySelector(`[data-ovdate="${id}"]`);
+        if (dateInp) dateInp.value = '';
         editor?.classList.add('hidden');
         refreshTotals();
         return;
@@ -2628,6 +2635,11 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
       ovMap[inp.dataset.ovnote].note = inp.value.trim();
     });
   });
+  modalBody.querySelectorAll('[data-ovdate]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      ovMap[inp.dataset.ovdate].date = inp.value;
+    });
+  });
 
   document.getElementById('pm-save').addEventListener('click', async () => {
     const amount = parseFloat(document.getElementById('pm-amount').value) || null;
@@ -2638,15 +2650,21 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     const saveBtn = document.getElementById('pm-save');
     try {
       saveBtn.disabled = true;
+      // Default received date = day you confirm the pay (local)
+      const confirmDate = selectedStatus === 'received' ? new Date().toLocaleDateString('en-CA') : null;
       // Persist changed per-entry overrides
       for (const e of entries) {
         const o = ovMap[e.id];
         const origAmount = e.received_pay != null ? parseFloat(e.received_pay) : null;
         const origNote = e.pay_adjustment_note || '';
-        if (o.amount !== origAmount || o.note !== origNote) {
+        const origDate = (e.received_date || '').slice(0, 10);
+        let newDate = o.date || '';
+        if (!newDate && confirmDate) newDate = confirmDate;
+        if (o.amount !== origAmount || o.note !== origNote || newDate !== origDate) {
           await api.updateEntry(e.id, {
             received_pay: o.amount,
             pay_adjustment_note: o.note || null,
+            received_date: newDate || null,
           });
         }
       }
@@ -2727,6 +2745,7 @@ function openEntryDetail(entry) {
           <button class="btn btn-ghost btn-sm" id="det-save-recv-btn">${svg('check')}</button>
         </div>
       </div>
+      ${entry.received_date ? `<div class="review-row"><span>Received Date:</span><span>${escHtml(entry.received_date.slice(0, 10))}</span></div>` : ''}
       <div class="review-row"><span>Status:</span><span class="status-chip ${entry.status||'pending'}">${(entry.status||'pending').toUpperCase()}</span></div>
       ${entry.mod_name ? `<div class="review-row"><span>MOD:</span><span>${escHtml(entry.mod_name)}</span></div>` : ''}
       ${entry.noc_name ? `<div class="review-row"><span>NOC:</span><span>${escHtml(entry.noc_name)}</span></div>` : ''}

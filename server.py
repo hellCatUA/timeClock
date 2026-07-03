@@ -103,6 +103,7 @@ def init_db():
             materials TEXT,
             pay_adjustment REAL,
             pay_adjustment_note TEXT,
+            received_date TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -262,6 +263,7 @@ def migrate_db():
         "ALTER TABLE trips ADD COLUMN total_pause_seconds INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE time_entries ADD COLUMN pay_adjustment REAL",
         "ALTER TABLE time_entries ADD COLUMN pay_adjustment_note TEXT",
+        "ALTER TABLE time_entries ADD COLUMN received_date TEXT",
         """CREATE TABLE IF NOT EXISTS trip_pauses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trip_id INTEGER NOT NULL,
@@ -594,7 +596,7 @@ def h_put_entry(req, groups):
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?,
-                pay_adjustment=?, pay_adjustment_note=?
+                pay_adjustment=?, pay_adjustment_note=?, received_date=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -633,6 +635,7 @@ def h_put_entry(req, groups):
             materials_str,
             data.get("pay_adjustment", ex.get("pay_adjustment")),
             data.get("pay_adjustment_note", ex.get("pay_adjustment_note")),
+            data.get("received_date", ex.get("received_date")),
             eid
         ))
         new_folder = _photo_folder({
@@ -1203,7 +1206,7 @@ def h_export_csv(req, _groups):
         "Date","WO Title","WO Status","Company","Customer","Assignment ID",
         "Pay Type","Pay Rate","Clock In","Clock Out","Total Hours",
         "Total Labor","Travel Reimb","Materials Reimb","Parking/Tolls",
-        "Total Expected Pay","Pay Status","Total Received","Pay Notes",
+        "Total Expected Pay","Pay Status","Total Received","Received Date","Pay Notes",
     ]
     lines = [",".join(f'"{h}"' for h in HEADERS)]
 
@@ -1236,15 +1239,17 @@ def h_export_csv(req, _groups):
             cell(f"{total:.2f}"),
             cell(pay_status),
             cell(received_str),
+            cell((e.get("received_date") or "")[:10]),
             cell(e.get("pay_adjustment_note") or ""),
         ])
 
-    def summary_row(label, exp, pay_status="", received="", notes=""):
+    def summary_row(label, exp, pay_status="", received="", notes="", rec_date=""):
         return ",".join([
             cell(label), *[cell("")] * 14,
             cell(f"{exp:.2f}"),
             cell(pay_status),
             cell(received),
+            cell(rec_date),
             cell(notes),
         ])
 
@@ -1264,6 +1269,7 @@ def h_export_csv(req, _groups):
                         (pp.get("status") or "pending").upper(),
                         f"{float(pp.get('received_amount') or 0):.2f}",
                         pp.get("notes") or "",
+                        (pp.get("paid_at") or "")[:10],
                     ))
             except Exception:
                 pass
@@ -1299,6 +1305,7 @@ def h_export_csv(req, _groups):
                 (pp.get("status") or "").upper() if pp else "",
                 f"{rcv_amt:.2f}" if pp else "",
                 pp.get("notes") or "" if pp else "",
+                (pp.get("paid_at") or "")[:10] if pp else "",
             ))
             for e in entries:
                 lines.append(entry_row(e))
