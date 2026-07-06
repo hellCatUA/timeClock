@@ -2443,6 +2443,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
         </div>
         <div class="week-header-right">
           <span class="pay-status-chip ${payStatus}">${PAY_LABELS[payStatus] || payStatus.toUpperCase()}</span>
+          <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(wg.start.toISOString(), wg.end.toISOString())}" title="Export week CSV" download>${svg('download')}</a>
           <button class="btn btn-ghost btn-sm pay-btn" data-week-start="${weekKey}" data-week-end="${weekEnd}">${svg('dollar')} Pay</button>
         </div>
       </div>
@@ -2483,6 +2484,21 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   }, 0);
   const curAmount = payPeriod?.received_amount ?? (entries.length ? receivedSum() : expectedTotal);
 
+  // Local calendar date of stored paid_at. New-format values are stored as
+  // fixed UTC noon (YYYY-MM-DDT12:00:00Z) and round-trip via the date part;
+  // legacy instants fall back to the local date of that moment.
+  const paidAtDate = (() => {
+    const pa = payPeriod?.paid_at || '';
+    if (!pa) return '';
+    if (pa.slice(11, 19) === '12:00:00') return pa.slice(0, 10);
+    try { return new Date(pa).toLocaleDateString('en-CA'); } catch { return pa.slice(0, 10); }
+  })();
+
+  // When the stored weekly amount deliberately differs from the per-job sum
+  // (or the user edits the field), stop auto-syncing it from the job list.
+  let amountTouched = payPeriod?.received_amount != null &&
+    entries.length > 0 && Math.abs(payPeriod.received_amount - receivedSum()) > 0.005;
+
   const statuses = [
     { key: 'received', label: 'PAY RECEIVED' },
     { key: 'delayed',  label: 'PAY DELAYED'  },
@@ -2490,24 +2506,31 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     { key: 'pending',  label: 'PAY PENDING'  },
   ];
 
+  const metaFor = (o) => {
+    const parts = [];
+    if (o.note) parts.push(`✎ ${escHtml(o.note)}`);
+    if (o.date) parts.push(`Received: ${escHtml(o.date)}`);
+    return parts.join(' · ');
+  };
+
   const entryRows = entries.map(e => {
     const o = ovMap[e.id];
-    const hasOv = o.amount != null || !!o.note || !!o.date;
     const shown = o.amount != null ? o.amount : baseFor(e);
+    const meta = metaFor(o);
     return `
     <div class="pay-entry-row" data-id="${e.id}">
       <div class="pay-entry-head">
         <div class="pay-entry-info">
           <div class="pay-entry-title">${escHtml(fmtDateShort(e.clock_in))} · ${escHtml(e.wo_title || e.assignment_id || 'Work Order')}</div>
           <div class="pay-entry-base">Expected: ${sym}${baseFor(e).toFixed(2)}</div>
+          <div class="pay-entry-meta ${meta ? '' : 'hidden'}" data-meta="${e.id}">${meta}</div>
         </div>
-        <div class="pay-entry-total" data-total="${e.id}">${sym}${shown.toFixed(2)}</div>
+        <div style="display:flex;align-items:center;gap:4px;">
+          <div class="pay-entry-total" data-total="${e.id}">${sym}${shown.toFixed(2)}</div>
+          <button class="btn btn-ghost btn-sm" data-act="edit" data-id="${e.id}" title="Edit pay for this job">${svg('edit')}</button>
+        </div>
       </div>
-      <div class="pay-entry-actions">
-        <button class="btn btn-ghost btn-sm" data-act="override" data-id="${e.id}" style="color:var(--blue);">${sym} Pay Override</button>
-        <button class="btn btn-ghost btn-sm" data-act="note" data-id="${e.id}">${svg('edit')} Note</button>
-      </div>
-      <div class="pay-entry-editor ${hasOv ? '' : 'hidden'}" data-editor="${e.id}">
+      <div class="pay-entry-editor hidden" data-editor="${e.id}">
         <div class="input-row" style="margin-bottom:6px;">
           <div class="money-wrap" style="flex:1;">
             <span class="money-sym">${sym}</span>
@@ -2550,6 +2573,10 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         </div>
       </div>
       <div class="form-group">
+        <label class="form-label">Received Date <span style="color:var(--text3);font-weight:400;">(applies to all jobs unless set per job)</span></label>
+        <input type="date" class="form-control" id="pm-week-date" value="${escHtml(paidAtDate)}">
+      </div>
+      <div class="form-group">
         <label class="form-label">Status</label>
         <div class="pay-status-selector">
           ${statuses.map(s => `
@@ -2585,25 +2612,33 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     entries.forEach(e => {
       const el = modalBody.querySelector(`[data-total="${e.id}"]`);
       if (!el) return;
-      const ov = ovMap[e.id].amount;
+      const o = ovMap[e.id];
       const base = baseFor(e);
-      const shown = ov != null ? ov : base;
+      const shown = o.amount != null ? o.amount : base;
       el.textContent = `${sym}${shown.toFixed(2)}`;
-      el.style.color = ov == null ? '' : ov < base ? 'var(--red)' : ov > base ? 'var(--green)' : '';
+      el.style.color = o.amount == null ? '' : o.amount < base ? 'var(--red)' : o.amount > base ? 'var(--green)' : '';
+      const metaEl = modalBody.querySelector(`[data-meta="${e.id}"]`);
+      if (metaEl) {
+        const meta = metaFor(o);
+        metaEl.innerHTML = meta;
+        metaEl.classList.toggle('hidden', !meta);
+      }
     });
-    // Live-sync weekly Amount Received with per-entry values
+    // Live-sync weekly Amount Received with per-entry values (unless the
+    // user set the weekly amount manually — then their value wins)
     const amountInp = document.getElementById('pm-amount');
-    if (amountInp && entries.length) amountInp.value = receivedSum().toFixed(2);
+    if (amountInp && entries.length && !amountTouched) amountInp.value = receivedSum().toFixed(2);
   };
 
-  modalBody.querySelectorAll('.pay-entry-actions button, [data-act="clear"]').forEach(btn => {
+  document.getElementById('pm-amount').addEventListener('input', () => { amountTouched = true; });
+
+  modalBody.querySelectorAll('[data-act="edit"], [data-act="clear"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
       const editor = modalBody.querySelector(`[data-editor="${id}"]`);
-      const ovInp = modalBody.querySelector(`[data-ov="${id}"]`);
-      const act = btn.dataset.act;
-      if (act === 'clear') {
+      if (btn.dataset.act === 'clear') {
         ovMap[id].amount = null; ovMap[id].note = ''; ovMap[id].date = '';
+        const ovInp = modalBody.querySelector(`[data-ov="${id}"]`);
         if (ovInp) ovInp.value = '';
         const noteInp = modalBody.querySelector(`[data-ovnote="${id}"]`);
         if (noteInp) noteInp.value = '';
@@ -2613,12 +2648,12 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         refreshTotals();
         return;
       }
-      editor?.classList.remove('hidden');
-      if (act === 'override') {
+      const opening = editor?.classList.contains('hidden');
+      editor?.classList.toggle('hidden');
+      if (opening) {
+        const ovInp = modalBody.querySelector(`[data-ov="${id}"]`);
         ovInp?.focus();
         ovInp?.select();
-      } else if (act === 'note') {
-        modalBody.querySelector(`[data-ovnote="${id}"]`)?.focus();
       }
     });
   });
@@ -2633,25 +2668,33 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   modalBody.querySelectorAll('[data-ovnote]').forEach(inp => {
     inp.addEventListener('input', () => {
       ovMap[inp.dataset.ovnote].note = inp.value.trim();
+      refreshTotals();
     });
   });
   modalBody.querySelectorAll('[data-ovdate]').forEach(inp => {
     inp.addEventListener('input', () => {
       ovMap[inp.dataset.ovdate].date = inp.value;
+      refreshTotals();
     });
   });
 
   document.getElementById('pm-save').addEventListener('click', async () => {
     const amount = parseFloat(document.getElementById('pm-amount').value) || null;
     const notes  = document.getElementById('pm-notes').value.trim() || null;
-    const paid_at = selectedStatus === 'received'
-      ? (payPeriod?.paid_at || new Date().toISOString())
-      : (payPeriod?.paid_at || null);
+    const weekDate = document.getElementById('pm-week-date').value || '';
+    const confirmDate = selectedStatus === 'received' ? new Date().toLocaleDateString('en-CA') : null;
+    // paid_at is stored as fixed UTC noon of the picked date so the date part
+    // round-trips exactly (modal prefill and CSV both read the first 10 chars)
+    let paid_at;
+    if (weekDate)         paid_at = weekDate + 'T12:00:00Z';
+    else if (paidAtDate)  paid_at = null;                      // user cleared a previously set date
+    else if (confirmDate) paid_at = confirmDate + 'T12:00:00Z';
+    else                  paid_at = payPeriod?.paid_at || null;
     const saveBtn = document.getElementById('pm-save');
     try {
       saveBtn.disabled = true;
-      // Default received date = day you confirm the pay (local)
-      const confirmDate = selectedStatus === 'received' ? new Date().toLocaleDateString('en-CA') : null;
+      // Per-job default: week date if set, else day you confirm the pay
+      const defaultDate = weekDate || confirmDate;
       // Persist changed per-entry overrides
       for (const e of entries) {
         const o = ovMap[e.id];
@@ -2659,7 +2702,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         const origNote = e.pay_adjustment_note || '';
         const origDate = (e.received_date || '').slice(0, 10);
         let newDate = o.date || '';
-        if (!newDate && confirmDate) newDate = confirmDate;
+        if (!newDate && defaultDate) newDate = defaultDate;
         if (o.amount !== origAmount || o.note !== origNote || newDate !== origDate) {
           await api.updateEntry(e.id, {
             received_pay: o.amount,

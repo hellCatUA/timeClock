@@ -467,6 +467,7 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .pay-entry-info { min-width: 0; }
 .pay-entry-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pay-entry-base { font-size: 12px; color: var(--text3); margin-top: 2px; }
+.pay-entry-meta { font-size: 12px; color: var(--text2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
 .pay-entry-total { font-size: 15px; font-weight: 700; white-space: nowrap; }
 .pay-entry-actions { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
 .pay-entry-actions .btn { font-size: 12px; padding: 4px 8px; }

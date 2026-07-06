@@ -1258,7 +1258,7 @@ def h_export_csv(req, _groups):
             lines.append(entry_row(e))
         if rows:
             try:
-                dt0    = datetime.fromisoformat(rows[0]["clock_in"].replace("Z", "+00:00"))
+                dt0    = datetime.fromisoformat(rows[0]["clock_in"].replace("Z", "+00:00")).astimezone(local_tz)
                 ws_str = str(get_week_start(dt0))
                 pp     = pay_map.get(ws_str)
                 if pp:
@@ -1277,7 +1277,7 @@ def h_export_csv(req, _groups):
         weeks_map = {}
         for e in rows:
             try:
-                dt     = datetime.fromisoformat(e["clock_in"].replace("Z", "+00:00"))
+                dt     = datetime.fromisoformat(e["clock_in"].replace("Z", "+00:00")).astimezone(local_tz)
                 ws_str = str(get_week_start(dt))
             except Exception:
                 ws_str = "0000-00-00"
