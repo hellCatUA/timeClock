@@ -1070,15 +1070,13 @@ function renderActiveClockPage() {
           <input type="text" class="form-control" id="jd-assignment" value="${escHtml(entry.assignment_id||'')}" placeholder="Required">
         </div>
       </div>
-      <div class="row-2">
-        <div class="form-group">
-          <label class="form-label">Ticket # <span class="opt-label">optional</span></label>
-          <input type="text" class="form-control" id="jd-ticket" value="${escHtml(entry.ticket_num||'')}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">INC # <span class="opt-label">optional</span></label>
-          <input type="text" class="form-control" id="jd-inc" value="${escHtml(entry.inc_num||'')}">
-        </div>
+      <div class="form-group">
+        <label class="form-label">Ticket # <span class="opt-label">optional</span></label>
+        ${buildMultiInputs('jd-tickets', entry.ticket_num || '')}
+      </div>
+      <div class="form-group">
+        <label class="form-label">INC # <span class="opt-label">optional</span></label>
+        <input type="text" class="form-control" id="jd-inc" value="${escHtml(entry.inc_num||'')}">
       </div>
       <button class="btn btn-ghost btn-sm btn-full" id="save-assignment-btn" style="margin-top:4px;">${svg('check')} Save</button>
     </div>
@@ -1090,7 +1088,7 @@ function renderActiveClockPage() {
     <div id="sec-pocs" class="card sec-body">
       <div class="form-group">
         <label class="form-label">MOD Name <span class="req-star">*</span></label>
-        <input type="text" class="form-control" id="jd-mod" value="${escHtml(entry.mod_name||'')}" placeholder="Required">
+        ${buildMultiInputs('jd-mods', entry.mod_name || '', 'Required')}
       </div>
       <div class="form-group">
         <label class="form-label">NOC Name <span class="opt-label">optional</span></label>
@@ -1302,7 +1300,7 @@ function renderActiveClockPage() {
       client_id:       document.getElementById('jd-customer').value ? Number(document.getElementById('jd-customer').value) : null,
       site_id:         document.getElementById('jd-site-id').value.trim() || null,
       assignment_id:   newAssignId,
-      ticket_num:      document.getElementById('jd-ticket').value.trim() || null,
+      ticket_num:      readMultiInputs('jd-tickets'),
       inc_num:         document.getElementById('jd-inc').value.trim() || null,
     });
     if (newAssignId && state.pendingTripId) {
@@ -1316,10 +1314,13 @@ function renderActiveClockPage() {
 
   // POCs save
   document.getElementById('save-pocs-btn').addEventListener('click', () => saveSection(entry, {
-    mod_name:  document.getElementById('jd-mod').value.trim() || null,
+    mod_name:  readMultiInputs('jd-mods'),
     noc_name:  document.getElementById('jd-noc').value.trim() || null,
     pm_pc_name:document.getElementById('jd-pmpc').value.trim() || null,
   }));
+
+  wireMultiInputs('jd-tickets');
+  wireMultiInputs('jd-mods');
 
   // Optional picture-section toggles
   const wireSectionToggle = (toggleId, wrapId) => {
@@ -1482,6 +1483,49 @@ function setupMaterialsUI(existing) {
   });
 }
 
+/* ── Multi-value inputs (tickets, MODs) — stored comma-joined ────── */
+function splitMulti(str) {
+  return (str || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+function buildMultiInputs(containerId, storedValue, placeholder = '') {
+  const vals = splitMulti(storedValue);
+  if (!vals.length) vals.push('');
+  return `<div class="multi-input-list" id="${containerId}">
+    ${vals.map((v, i) => `
+      <div class="input-row multi-input-row" style="margin-bottom:4px;">
+        <input type="text" class="form-control" value="${escHtml(v)}" placeholder="${escHtml(placeholder)}">
+        ${i === 0
+          ? `<button type="button" class="btn btn-ghost btn-sm multi-add" title="Add another">${svg('plus')}</button>`
+          : `<button type="button" class="btn btn-ghost btn-sm multi-remove" title="Remove">✕</button>`}
+      </div>`).join('')}
+  </div>`;
+}
+function wireMultiInputs(containerId) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  box.addEventListener('click', e => {
+    const add = e.target.closest('.multi-add');
+    const rem = e.target.closest('.multi-remove');
+    if (add) {
+      const row = document.createElement('div');
+      row.className = 'input-row multi-input-row';
+      row.style.marginBottom = '4px';
+      row.innerHTML = `<input type="text" class="form-control">
+        <button type="button" class="btn btn-ghost btn-sm multi-remove" title="Remove">✕</button>`;
+      box.appendChild(row);
+      row.querySelector('input').focus();
+    } else if (rem) {
+      rem.closest('.multi-input-row')?.remove();
+    }
+  });
+}
+function readMultiInputs(containerId) {
+  const box = document.getElementById(containerId);
+  if (!box) return null;
+  const vals = [...box.querySelectorAll('input')].map(i => i.value.trim()).filter(Boolean);
+  return vals.length ? vals.join(', ') : null;
+}
+
 function readMaterialsFromDOM() {
   return [...document.querySelectorAll('.material-row')].map(row => ({
     name:  row.querySelector('.mat-name')?.value.trim()  || '',
@@ -1499,9 +1543,9 @@ async function autoSaveActiveForm() {
   if (g('jd-customer'))    data.client_id        = g('jd-customer').value           ? Number(g('jd-customer').value)  : null;
   if (g('jd-site-id'))     data.site_id          = g('jd-site-id').value.trim()     || null;
   if (g('jd-assignment'))  data.assignment_id    = g('jd-assignment').value.trim()  || null;
-  if (g('jd-ticket'))      data.ticket_num       = g('jd-ticket').value.trim()      || null;
+  if (g('jd-tickets'))     data.ticket_num       = readMultiInputs('jd-tickets');
   if (g('jd-inc'))         data.inc_num          = g('jd-inc').value.trim()         || null;
-  if (g('jd-mod'))         data.mod_name         = g('jd-mod').value.trim()         || null;
+  if (g('jd-mods'))        data.mod_name         = readMultiInputs('jd-mods');
   if (g('jd-noc'))         data.noc_name         = g('jd-noc').value.trim()         || null;
   if (g('jd-pmpc'))        data.pm_pc_name       = g('jd-pmpc').value.trim()        || null;
   if (g('jd-replacement')) data.is_replacement   = g('jd-replacement').checked ? 1 : 0;
@@ -1524,7 +1568,7 @@ async function autoSaveActiveForm() {
 async function initiateClockOut(entry) {
   const workSummary = document.getElementById('jd-work-summary')?.value.trim() || entry.work_summary || '';
   const assignId    = document.getElementById('jd-assignment')?.value.trim()   || entry.assignment_id || '';
-  const modName     = document.getElementById('jd-mod')?.value.trim()          || entry.mod_name || '';
+  const modName     = (document.getElementById('jd-mods') ? readMultiInputs('jd-mods') : null) || entry.mod_name || '';
 
   const missing = [];
   if (!assignId)    missing.push('Assignment ID');
@@ -2339,9 +2383,11 @@ async function renderJournalPage() {
       const payMap = {};
       payPeriods.forEach(p => { payMap[p.week_start] = p; });
 
+      // An entry belongs to the month in which its WEEK STARTS, so a week
+      // straddling two months stays whole in the month where it began
       const monthEntries = entries.filter(e => {
-        const ci = new Date(e.clock_in);
-        return ci >= monthStart && ci <= monthEnd;
+        const wStart = getWeekBounds(new Date(e.clock_in), ws).start;
+        return wStart.getFullYear() === monthStart.getFullYear() && wStart.getMonth() === monthStart.getMonth();
       });
 
       const weekGroups = {};
@@ -2447,7 +2493,24 @@ function renderWeekGroup(wg, ws, sym, payMap) {
           <button class="btn btn-ghost btn-sm pay-btn" data-week-start="${weekKey}" data-week-end="${weekEnd}">${svg('dollar')} Pay</button>
         </div>
       </div>
-      ${[...wg.entries].sort((a,b) => new Date(a.clock_in) - new Date(b.clock_in)).map(e => renderEntryCard(e)).join('')}
+      ${(() => {
+        // Group entries by calendar day, render a day header per group
+        const sorted = [...wg.entries].sort((a,b) => new Date(a.clock_in) - new Date(b.clock_in));
+        const days = {};
+        for (const e of sorted) {
+          const k = new Date(e.clock_in).toLocaleDateString('en-CA');
+          (days[k] = days[k] || []).push(e);
+        }
+        return Object.keys(days).sort().map(k => {
+          const d = new Date(k + 'T12:00:00');
+          const label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+          return `
+          <div class="day-group">
+            <div class="day-group-header">${label}</div>
+            ${days[k].map(e => renderEntryCard(e)).join('')}
+          </div>`;
+        }).join('');
+      })()}
       <div class="week-summary">
         <span>Expected: <b>${sym}${wExp.toFixed(2)}</b></span>
         ${payRec !== null
@@ -2498,13 +2561,6 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   // (or the user edits the field), stop auto-syncing it from the job list.
   let amountTouched = payPeriod?.received_amount != null &&
     entries.length > 0 && Math.abs(payPeriod.received_amount - receivedSum()) > 0.005;
-
-  const statuses = [
-    { key: 'received', label: 'PAY RECEIVED' },
-    { key: 'delayed',  label: 'PAY DELAYED'  },
-    { key: 'problem',  label: 'PAY PROBLEM'  },
-    { key: 'pending',  label: 'PAY PENDING'  },
-  ];
 
   const metaFor = (o) => {
     const parts = [];
@@ -2577,34 +2633,24 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         <input type="date" class="form-control" id="pm-week-date" value="${escHtml(paidAtDate)}">
       </div>
       <div class="form-group">
-        <label class="form-label">Status</label>
-        <div class="pay-status-selector">
-          ${statuses.map(s => `
-            <button class="pay-status-btn ${s.key}${curStatus === s.key ? ' active' : ''}" data-status="${s.key}">
-              ${s.label}
-            </button>`).join('')}
-        </div>
-      </div>
-      <div class="form-group">
         <label class="form-label">Notes <span style="color:var(--text3);font-weight:400;">(optional)</span></label>
         <textarea class="form-control" id="pm-notes" rows="2" placeholder="e.g. short by $50, check 1234...">${escHtml(curNotes)}</textarea>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <span class="pay-status-chip ${curStatus === 'received' ? 'received' : 'pending'}" id="pm-status-chip">
+          ${curStatus === 'received' ? 'PAY RECEIVED' : 'PAY PENDING'}
+        </span>
+        ${curStatus === 'received' ? `<button class="btn btn-ghost btn-sm" id="pm-unconfirm">Undo confirmation</button>` : ''}
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pm-cancel">Cancel</button>
-      <button class="btn btn-primary" id="pm-save">${svg('check')} Save</button>
+      <button class="btn ${curStatus === 'received' ? 'btn-primary' : 'btn-ghost'}" id="pm-save">Save</button>
+      ${curStatus !== 'received' ? `<button class="btn btn-primary" id="pm-confirm">${svg('check')} Confirm PAY</button>` : ''}
     </div>`);
 
-  let selectedStatus = curStatus;
   document.getElementById('pm-close').addEventListener('click', closeModal);
   document.getElementById('pm-cancel').addEventListener('click', closeModal);
-  document.querySelectorAll('.pay-status-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.pay-status-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      selectedStatus = btn.dataset.status;
-    });
-  });
 
   // Per-entry override wiring
   const modalBody = document.getElementById('modal-body');
@@ -2678,21 +2724,21 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
     });
   });
 
-  document.getElementById('pm-save').addEventListener('click', async () => {
+  const doSave = async (status, btn) => {
     const amount = parseFloat(document.getElementById('pm-amount').value) || null;
     const notes  = document.getElementById('pm-notes').value.trim() || null;
     const weekDate = document.getElementById('pm-week-date').value || '';
-    const confirmDate = selectedStatus === 'received' ? new Date().toLocaleDateString('en-CA') : null;
+    const confirmDate = status === 'received' ? new Date().toLocaleDateString('en-CA') : null;
     // paid_at is stored as fixed UTC noon of the picked date so the date part
     // round-trips exactly (modal prefill and CSV both read the first 10 chars)
     let paid_at;
-    if (weekDate)         paid_at = weekDate + 'T12:00:00Z';
-    else if (paidAtDate)  paid_at = null;                      // user cleared a previously set date
-    else if (confirmDate) paid_at = confirmDate + 'T12:00:00Z';
-    else                  paid_at = payPeriod?.paid_at || null;
-    const saveBtn = document.getElementById('pm-save');
+    if (status !== 'received' && payPeriod?.status === 'received') paid_at = null; // undo confirmation
+    else if (weekDate)         paid_at = weekDate + 'T12:00:00Z';
+    else if (paidAtDate)       paid_at = null;                  // user cleared a previously set date
+    else if (confirmDate)      paid_at = confirmDate + 'T12:00:00Z';
+    else                       paid_at = payPeriod?.paid_at || null;
     try {
-      saveBtn.disabled = true;
+      if (btn) btn.disabled = true;
       // Per-job default: week date if set, else day you confirm the pay
       const defaultDate = weekDate || confirmDate;
       // Persist changed per-entry overrides
@@ -2711,15 +2757,19 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
           });
         }
       }
-      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status: selectedStatus, received_amount: amount, expected_total: totalExpected(), notes, paid_at });
-      showToast('Pay status saved', 'success');
+      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status, received_amount: amount, expected_total: totalExpected(), notes, paid_at });
+      showToast(status === 'received' ? 'Pay confirmed' : 'Saved', 'success');
       closeModal();
       onSave();
     } catch (e) {
       showToast(e.message || 'Save failed', 'error');
-      saveBtn.disabled = false;
+      if (btn) btn.disabled = false;
     }
-  });
+  };
+
+  document.getElementById('pm-save').addEventListener('click', e => doSave(curStatus === 'received' ? 'received' : 'pending', e.currentTarget));
+  document.getElementById('pm-confirm')?.addEventListener('click', e => doSave('received', e.currentTarget));
+  document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
 function renderEntryCard(entry) {
@@ -2781,14 +2831,6 @@ function openEntryDetail(entry) {
       ${entry.parking_tolls ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(entry.parking_tolls)}</span></div>` : ''}
       ${entry.pay_adjustment_note ? `<div class="review-row"><span>Pay Note:</span><span>${escHtml(entry.pay_adjustment_note)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
-      <div class="review-row">
-        <span>Received Pay:</span>
-        <div style="display:flex;align-items:center;gap:6px;">
-          <input type="number" class="form-control form-control-sm" id="det-received-pay" value="${parseFloat(entry.received_pay||total).toFixed(2)}" min="0" step="0.01">
-          <button class="btn btn-ghost btn-sm" id="det-save-recv-btn">${svg('check')}</button>
-        </div>
-      </div>
-      ${entry.received_date ? `<div class="review-row"><span>Received Date:</span><span>${escHtml(entry.received_date.slice(0, 10))}</span></div>` : ''}
       <div class="review-row"><span>Status:</span><span class="status-chip ${entry.status||'pending'}">${(entry.status||'pending').toUpperCase()}</span></div>
       ${entry.mod_name ? `<div class="review-row"><span>MOD:</span><span>${escHtml(entry.mod_name)}</span></div>` : ''}
       ${entry.noc_name ? `<div class="review-row"><span>NOC:</span><span>${escHtml(entry.noc_name)}</span></div>` : ''}
@@ -2810,15 +2852,6 @@ function openEntryDetail(entry) {
     copyToClipboard(buildTextReport(entry));
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
-  document.getElementById('det-save-recv-btn').addEventListener('click', async () => {
-    const val = parseFloat(document.getElementById('det-received-pay').value) || 0;
-    try {
-      await api.updateEntry(entry.id, { received_pay: val });
-      showToast('Received pay updated', 'success');
-      closeModal();
-      renderJournalPage();
-    } catch (e) { showToast(e.message, 'error'); }
-  });
 
   (async () => {
     const photosDiv = document.getElementById('det-photos');
@@ -3147,15 +3180,15 @@ async function renderOverviewPage() {
     const totalExpected = filtered.reduce((s,e) => s + calcTotalExpected(e), 0);
     const totalHrs = filtered.reduce((s,e) => s + getNetSeconds(e)/3600, 0);
     const jobCount = filtered.length;
-    const effectiveRates = filtered.map(e => {
+    // Time-weighted: total labor / total paid hours (a 30-min flat job must
+    // not skew the average the way per-job rate averaging did)
+    let paidLabor = 0, paidHrs = 0;
+    for (const e of filtered) {
       const hrs = getNetSeconds(e) / 3600;
-      if (hrs <= 0) return null;
       const labor = calcLabor(e, getNetSeconds(e));
-      return labor > 0 ? labor / hrs : null;
-    }).filter(r => r != null);
-    const avgRate = effectiveRates.length
-      ? effectiveRates.reduce((a,b) => a+b, 0) / effectiveRates.length
-      : null;
+      if (hrs > 0 && labor > 0) { paidLabor += labor; paidHrs += hrs; }
+    }
+    const avgRate = paidHrs > 0 ? paidLabor / paidHrs : null;
 
     // By company
     const byCompany = {};

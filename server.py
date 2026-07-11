@@ -1210,16 +1210,19 @@ def h_export_csv(req, _groups):
     ]
     lines = [",".join(f'"{h}"' for h in HEADERS)]
 
-    def entry_row(e):
+    def entry_row(e, wk_received=False):
         net, labor, travel, mats, parking, total = calc_entry(e)
-        override = e.get("received_pay")
         pay_status = ""
         received_str = ""
-        if override is not None:
-            override = float(override)
-            received_str = f"{override:.2f}"
-            if override < total - 0.005:
-                pay_status = "DECREASED"
+        rec_date = ""
+        # Received data only appears once the week's pay is actually confirmed
+        if wk_received:
+            override = e.get("received_pay")
+            paid = float(override) if override is not None else total
+            received_str = f"{paid:.2f}"
+            if paid < total - 0.005:
+                pay_status = "LOWERED"
+            rec_date = (e.get("received_date") or "")[:10]
         return ",".join([
             cell(fmt_date(e["clock_in"])),
             cell(e.get("wo_title") or ""),
@@ -1239,7 +1242,7 @@ def h_export_csv(req, _groups):
             cell(f"{total:.2f}"),
             cell(pay_status),
             cell(received_str),
-            cell((e.get("received_date") or "")[:10]),
+            cell(rec_date),
             cell(e.get("pay_adjustment_note") or ""),
         ])
 
@@ -1254,25 +1257,28 @@ def h_export_csv(req, _groups):
         ])
 
     if not multi_week:
-        for e in rows:
-            lines.append(entry_row(e))
+        pp = None
+        ws_str = None
         if rows:
             try:
                 dt0    = datetime.fromisoformat(rows[0]["clock_in"].replace("Z", "+00:00")).astimezone(local_tz)
                 ws_str = str(get_week_start(dt0))
                 pp     = pay_map.get(ws_str)
-                if pp:
-                    week_exp = sum(calc_entry(e)[5] for e in rows)
-                    lines.append(summary_row(
-                        f"Week: {ws_str}",
-                        week_exp,
-                        (pp.get("status") or "pending").upper(),
-                        f"{float(pp.get('received_amount') or 0):.2f}",
-                        pp.get("notes") or "",
-                        (pp.get("paid_at") or "")[:10],
-                    ))
             except Exception:
                 pass
+        wk_received = bool(pp and (pp.get("status") == "received"))
+        for e in rows:
+            lines.append(entry_row(e, wk_received))
+        if pp:
+            week_exp = sum(calc_entry(e)[5] for e in rows)
+            lines.append(summary_row(
+                f"Week: {ws_str}",
+                week_exp,
+                (pp.get("status") or "pending").upper(),
+                f"{float(pp.get('received_amount') or 0):.2f}" if wk_received else "",
+                pp.get("notes") or "",
+                (pp.get("paid_at") or "")[:10] if wk_received else "",
+            ))
     else:
         weeks_map = {}
         for e in rows:
@@ -1288,8 +1294,9 @@ def h_export_csv(req, _groups):
         for ws_str in sorted(weeks_map.keys()):
             entries  = weeks_map[ws_str]
             pp       = pay_map.get(ws_str)
+            wk_received = bool(pp and (pp.get("status") == "received"))
             week_exp = sum(calc_entry(e)[5] for e in entries)
-            rcv_amt  = float(pp.get("received_amount") or 0) if pp else 0.0
+            rcv_amt  = float(pp.get("received_amount") or 0) if wk_received else 0.0
             month_exp += week_exp
             month_rcv += rcv_amt
 
@@ -1303,12 +1310,12 @@ def h_export_csv(req, _groups):
             lines.append(summary_row(
                 hdr_lbl, week_exp,
                 (pp.get("status") or "").upper() if pp else "",
-                f"{rcv_amt:.2f}" if pp else "",
+                f"{rcv_amt:.2f}" if wk_received else "",
                 pp.get("notes") or "" if pp else "",
-                (pp.get("paid_at") or "")[:10] if pp else "",
+                (pp.get("paid_at") or "")[:10] if wk_received else "",
             ))
             for e in entries:
-                lines.append(entry_row(e))
+                lines.append(entry_row(e, wk_received))
             lines.append("")
 
         lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", ""))
