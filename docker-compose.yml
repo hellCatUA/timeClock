@@ -10,6 +10,8 @@ services:
     environment:
       TZ: America/Los_Angeles
       PORT: "3000"
-      DB_PATH: /data/timeclock.db
+      DB_PATH: /db/timeclock.db
+      UPLOADS_DIR: /data/uploads
     volumes:
-      - /docker/apps/timeClock/data:/data
+      - /docker/apps/timeClock/data:/db
+      - /tank/data/timeClock:/data

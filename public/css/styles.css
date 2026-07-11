@@ -27,7 +27,7 @@
   --transition: .18s ease;
 }
 
-html, body { height: 100%; overflow: hidden; }
+html, body { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg);
@@ -35,10 +35,13 @@ body {
   font-size: 16px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
 }
 
 /* ===== App Shell ===== */
-#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+/* position:fixed+inset:0 keeps the shell anchored to the visual viewport on iOS —
+   keyboard open/close no longer shifts or clips the layout */
+#app { display: flex; flex-direction: column; position: fixed; inset: 0; }
 
 .app-header {
   flex-shrink: 0;
@@ -379,6 +382,117 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .photo-placeholder span { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text3); }
 .photo-placeholder svg { width: 16px; height: 16px; }
 
+/* ===== Photo Slots ===== */
+.photo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.photo-slot-wrap { position: relative; }
+.photo-slot { border-radius: 10px; overflow: hidden; position: relative; aspect-ratio: 4/3; background: var(--bg3); }
+.photo-upload-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  color: var(--text3);
+  font-size: 12px;
+  text-align: center;
+  padding: 8px;
+  transition: background .15s;
+}
+.photo-upload-zone:active, .photo-upload-zone:hover { background: var(--bg4); color: var(--text2); }
+.photo-upload-zone svg { width: 24px; height: 24px; }
+.photo-upload-zone.uploading { opacity: 0.5; pointer-events: none; }
+.photo-upload-zone.photo-loading { opacity: 0.4; pointer-events: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.photo-slot.has-photo .photo-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-slot-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 10px; padding: 3px 6px; }
+.photo-delete-btn {
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: rgba(0,0,0,.6);
+  color: #fff;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* ===== Multi-photo sections (upload) ===== */
+.photo-sections-group { display: flex; flex-direction: column; gap: 12px; margin-bottom: 4px; }
+.photo-section { display: flex; flex-direction: column; gap: 6px; }
+.photo-section-label { font-size: 12px; color: var(--text2); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.photo-thumbs-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.photo-thumb-item { position: relative; width: 80px; height: 80px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg3); flex-shrink: 0; }
+.photo-thumb-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-thumb-item .photo-delete-btn { top: 3px; right: 3px; width: 20px; height: 20px; font-size: 13px; }
+.photo-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1.5px dashed var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  align-self: flex-start;
+}
+.photo-add-btn:hover, .photo-add-btn:active { background: var(--bg4); color: var(--text); }
+.photo-add-btn svg { width: 16px; height: 16px; }
+.photo-section-loading { font-size: 13px; color: var(--text3); display: flex; align-items: center; gap: 6px; padding: 8px 0; }
+.photo-section-loading svg { width: 16px; height: 16px; }
+
+/* ===== Photo gallery (detail modal) ===== */
+.det-photo-section { padding-top: 4px; }
+.photo-gallery-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.photo-gallery-item { display: block; width: 80px; height: 80px; border-radius: var(--radius-sm); overflow: hidden; background: var(--bg3); flex-shrink: 0; }
+.photo-gallery-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* ===== Journal day groups ===== */
+.day-group { border-left: 2px solid var(--border); margin: 8px 0 8px 4px; padding-left: 8px; }
+.day-group-header { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 4px; }
+
+/* ===== Pay modal entry rows ===== */
+.pay-entries-list { display: flex; flex-direction: column; gap: 8px; }
+.pay-entry-row { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg2); }
+.pay-entry-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.pay-entry-info { min-width: 0; }
+.pay-entry-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pay-entry-base { font-size: 12px; color: var(--text3); margin-top: 2px; }
+.pay-entry-meta { font-size: 12px; color: var(--text2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.pay-entry-total { font-size: 15px; font-weight: 700; white-space: nowrap; }
+.pay-entry-actions { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+.pay-entry-actions .btn { font-size: 12px; padding: 4px 8px; }
+.pay-entry-editor { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+
+/* ===== PDF tiles ===== */
+.photo-thumb-pdf, .photo-gallery-pdf {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  text-decoration: none;
+  color: var(--red);
+  background: var(--bg3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.photo-thumb-pdf svg, .photo-gallery-pdf svg { width: 26px; height: 26px; }
+
 /* ===== Material Row ===== */
 .material-row {
   display: flex;
@@ -502,10 +616,13 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .week-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   padding: 8px 16px;
   font-size: 12px;
+  gap: 8px;
 }
+.week-header-left { flex: 1; min-width: 0; }
+.week-header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
 .week-label { font-weight: 700; color: var(--text2); font-size: 13px; }
 .week-dates { font-weight: 400; color: var(--text3); font-size: 11px; margin-left: 6px; }
 .week-totals { color: var(--text3); font-size: 12px; }
@@ -520,6 +637,61 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 .week-summary .pos { color: var(--green); }
 .week-summary .neg { color: var(--red); }
+
+/* ===== Pay Status ===== */
+.pay-status-chip {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 4px;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+.pay-status-chip.pending  { background: var(--bg4);       color: var(--text2);  }
+.pay-status-chip.received { background: var(--green-bg);  color: var(--green);  }
+.pay-status-chip.delayed  { background: var(--orange-bg); color: var(--orange); }
+.pay-status-chip.problem  { background: var(--red-bg);    color: var(--red);    }
+
+.pay-status-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.pay-status-btn {
+  padding: 10px 8px;
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .15s, background .15s;
+}
+.pay-status-btn.received.active { border-color: var(--green);  color: var(--green);  background: var(--green-bg);  }
+.pay-status-btn.delayed.active  { border-color: var(--orange); color: var(--orange); background: var(--orange-bg); }
+.pay-status-btn.problem.active  { border-color: var(--red);    color: var(--red);    background: var(--red-bg);    }
+.pay-status-btn.pending.active  { border-color: var(--text3);  color: var(--text2);  background: var(--bg4);       }
+
+.pay-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.pay-summary-row:last-of-type { border-bottom: none; }
+.pay-summary-count { font-size: 12px; color: var(--text3); margin-left: 6px; }
+.pay-week-tags { font-size: 11px; color: var(--text3); margin-top: 3px; }
+.pay-summary-outstanding {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 0 6px;
+  font-weight: 700;
+  font-size: 15px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
 
 .entry-card {
   background: var(--bg2);
@@ -551,6 +723,25 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 /* ===== Overview ===== */
 .period-toggle { display: flex; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 16px; }
 .period-toggle .toggle-btn { font-size: 13px; padding: 10px 8px; }
+.period-sub-select {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+  padding-right: 32px;
+  cursor: pointer;
+}
 
 .stats-grid {
   display: grid;
@@ -593,7 +784,18 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
   opacity: .85;
   transition: height .3s ease;
 }
-.bar-label { font-size: 9px; color: var(--text3); text-align: center; white-space: nowrap; }
+.bar-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  font-size: 9px;
+  color: var(--text3);
+  text-align: center;
+  line-height: 1.2;
+}
+.bar-mon-lbl { font-size: 8px; color: var(--blue); font-weight: 600; min-height: 9px; }
+.bar-new-month .bar-fill { opacity: 1; }
 
 .company-row {
   display: flex;
@@ -740,6 +942,25 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 .hidden { display: none !important; }
+
+/* ===== Journal sub-tabs ===== */
+.journal-tabs { display: flex; gap: 8px; padding: 12px 16px 0; }
+.journal-tab { flex: 1; padding: 8px; border: none; background: var(--bg3); color: var(--text2); border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .15s; }
+.journal-tab.active { background: var(--green); color: #000; }
+
+/* ===== Active trip card on clock page ===== */
+.trip-active-card { border-left: 3px solid var(--blue); }
+.trip-active-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.trip-elapsed { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.trip-active-meta { font-size: 13px; color: var(--text2); margin-top: 2px; }
+
+/* ===== Trip cards in journal ===== */
+.trip-card { border-left: 2px solid var(--blue); }
+
+/* ===== Trip category selector in start modal ===== */
+.trip-cat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.trip-cat-btn { padding: 10px 8px; border: 1.5px solid var(--border); background: var(--bg3); color: var(--text); border-radius: 8px; font-size: 13px; text-align: center; cursor: pointer; transition: all .15s; }
+.trip-cat-btn.active { border-color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
 
 /* ===== Responsive ===== */
 @media (min-width: 600px) {

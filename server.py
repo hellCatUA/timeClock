@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """TimeClock backend — stdlib only (sqlite3 + http.server)."""
 
+import base64
+import ftplib
 import json
 import os
 import re
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -23,7 +26,13 @@ MIME = {
     ".ico":  "image/x-icon",
     ".png":  "image/png",
     ".svg":  "image/svg+xml",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif":  "image/gif",
 }
+
+UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", str(Path(__file__).parent / "uploads")))
 
 
 # ── Database setup ─────────────────────────────────────────────────────────────
@@ -92,6 +101,9 @@ def init_db():
             release_code TEXT,
             no_release_code INTEGER DEFAULT 0,
             materials TEXT,
+            pay_adjustment REAL,
+            pay_adjustment_note TEXT,
+            received_date TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -110,6 +122,93 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS entry_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            folder TEXT,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (entry_id) REFERENCES time_entries(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS pay_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT NOT NULL UNIQUE,
+            week_end TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            expected_total REAL DEFAULT 0,
+            received_amount REAL,
+            notes TEXT,
+            paid_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS trips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            assignment_id TEXT,
+            trip_id TEXT,
+            folder TEXT,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            mileage_start REAL,
+            mileage_end REAL,
+            distance REAL,
+            tax_deduction REAL,
+            notes TEXT,
+            status TEXT DEFAULT 'active',
+            total_pause_seconds INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS trip_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS trip_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            folder TEXT,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS trip_pauses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            pause_start TEXT NOT NULL,
+            pause_end TEXT,
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            defaults TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS planned_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wo_title TEXT,
+            organization_id INTEGER,
+            client_id INTEGER,
+            project_id INTEGER,
+            assignment_id TEXT,
+            site_id TEXT,
+            address TEXT,
+            rate_type TEXT DEFAULT 'hourly',
+            pay_rate_id INTEGER,
+            flat_amount REAL,
+            travel_reimb REAL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -119,7 +218,14 @@ def init_db():
             ('breaks_enabled', '1'),
             ('paid_breaks', '0'),
             ('break_frequency_minutes', '120'),
-            ('break_length_minutes', '15');
+            ('break_length_minutes', '15'),
+            ('ftp_enabled', '0'),
+            ('ftp_host', ''),
+            ('ftp_port', '21'),
+            ('ftp_user', ''),
+            ('ftp_password', ''),
+            ('ftp_path', '/timeclock/photos'),
+            ('mileage_rate', '0.67');
         """)
 
 
@@ -157,6 +263,59 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('paid_breaks', '0')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_frequency_minutes', '120')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('break_length_minutes', '15')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_enabled', '0')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_host', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_port', '21')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_user', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_password', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('ftp_path', '/timeclock/photos')",
+        "ALTER TABLE entry_photos ADD COLUMN folder TEXT",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('mileage_rate', '0.67')",
+        """CREATE TABLE IF NOT EXISTS trip_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trip_id INTEGER NOT NULL,
+            photo_type TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            folder TEXT,
+            original_name TEXT,
+            ftp_synced INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+        )""",
+        "ALTER TABLE trips ADD COLUMN total_pause_seconds INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN pay_adjustment REAL",
+        "ALTER TABLE time_entries ADD COLUMN pay_adjustment_note TEXT",
+        "ALTER TABLE time_entries ADD COLUMN received_date TEXT",
+        "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
+        """CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            defaults TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS planned_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wo_title TEXT,
+            organization_id INTEGER,
+            client_id INTEGER,
+            project_id INTEGER,
+            assignment_id TEXT,
+            site_id TEXT,
+            address TEXT,
+            rate_type TEXT DEFAULT 'hourly',
+            pay_rate_id INTEGER,
+            flat_amount REAL,
+            travel_reimb REAL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS trip_pauses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trip_id INTEGER NOT NULL,
+    pause_start TEXT NOT NULL,
+    pause_end TEXT,
+    FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
+)""",
     ]
     with get_db() as db:
         for stmt in migrations:
@@ -164,6 +323,10 @@ def migrate_db():
                 db.execute(stmt)
             except Exception:
                 pass  # column or row already exists
+    with get_db() as db:
+        if db.execute("SELECT COUNT(*) FROM trip_categories").fetchone()[0] == 0:
+            for i, name in enumerate(["In Route to WO","Returning Home","OffClock Tools/Supplies","OnClock Tools/Supplies","Other"]):
+                db.execute("INSERT OR IGNORE INTO trip_categories (name, sort_order) VALUES (?,?)", (name, i))
 
 
 def row_to_dict(row):
@@ -174,6 +337,32 @@ def row_to_dict(row):
 
 def rows_to_list(rows):
     return [dict(r) for r in rows]
+
+
+def ftp_sync_photo(local_path, remote_filename, settings):
+    if settings.get('ftp_enabled') != '1' or not settings.get('ftp_host', '').strip():
+        return False
+    try:
+        ftp = ftplib.FTP()
+        ftp.connect(settings['ftp_host'], int(settings.get('ftp_port', 21)), timeout=15)
+        ftp.login(settings.get('ftp_user', ''), settings.get('ftp_password', ''))
+        remote_dir = settings.get('ftp_path', '/timeclock/photos').rstrip('/')
+        # Create directory tree
+        parts = remote_dir.lstrip('/').split('/')
+        ftp.cwd('/')
+        for part in parts:
+            try:
+                ftp.cwd(part)
+            except ftplib.error_perm:
+                ftp.mkd(part)
+                ftp.cwd(part)
+        with open(local_path, 'rb') as f:
+            ftp.storbinary(f'STOR {remote_filename}', f)
+        ftp.quit()
+        return True
+    except Exception as exc:
+        print(f"FTP sync failed: {exc}", file=sys.stderr)
+        return False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -348,11 +537,13 @@ def h_delete_rate(req, groups):
 
 ENTRY_SELECT = """
     SELECT e.*, o.name as org_name, c.name as client_name,
-           p.name as rate_name, p.rate as hourly_rate, p.currency
+           p.name as rate_name, p.rate as hourly_rate, p.currency,
+           pr.name as project_name
     FROM time_entries e
     LEFT JOIN organizations o ON e.organization_id = o.id
     LEFT JOIN clients c ON e.client_id = c.id
     LEFT JOIN pay_rates p ON e.pay_rate_id = p.id
+    LEFT JOIN projects pr ON e.project_id = pr.id
 """
 
 
@@ -408,8 +599,8 @@ def h_post_entry(req, _groups):
              assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
-             status, release_code, no_release_code, materials)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             status, release_code, no_release_code, materials, project_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -422,7 +613,8 @@ def h_post_entry(req, _groups):
              data.get("work_summary"), data.get("additional_info"),
              data.get("wo_title"), data.get("travel_reimb"),
              data.get("status", "pending"), data.get("release_code"),
-             1 if data.get("no_release_code") else 0, materials_str)
+             1 if data.get("no_release_code") else 0, materials_str,
+             data.get("project_id"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -432,10 +624,12 @@ def h_post_entry(req, _groups):
 def h_put_entry(req, groups):
     data = req.get("body", {})
     eid = groups[0]
+    old_folder = new_folder = None
     with get_db() as db:
         ex = row_to_dict(db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone())
         if not ex:
             return 404, {"error": "Not found"}
+        old_folder = _photo_folder(ex, eid)
         materials = data.get("materials")
         if materials is not None:
             materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else materials
@@ -449,7 +643,8 @@ def h_put_entry(req, groups):
                 parking_tolls=?, is_replacement=?, old_serial=?, new_serial=?,
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
-                status=?, release_code=?, no_release_code=?, materials=?
+                status=?, release_code=?, no_release_code=?, materials=?,
+                pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -486,10 +681,32 @@ def h_put_entry(req, groups):
             data.get("release_code", ex.get("release_code")),
             1 if data.get("no_release_code", ex.get("no_release_code", 0)) else 0,
             materials_str,
+            data.get("pay_adjustment", ex.get("pay_adjustment")),
+            data.get("pay_adjustment_note", ex.get("pay_adjustment_note")),
+            data.get("received_date", ex.get("received_date")),
+            data.get("project_id", ex.get("project_id")),
             eid
         ))
+        new_folder = _photo_folder({
+            "clock_in":      data.get("clock_in", ex["clock_in"]),
+            "assignment_id": data.get("assignment_id", ex.get("assignment_id")),
+        }, eid)
+        if old_folder != new_folder:
+            db.execute(
+                "UPDATE entry_photos SET folder=? WHERE entry_id=? AND folder=?",
+                (new_folder, eid, old_folder)
+            )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
+    if old_folder and new_folder and old_folder != new_folder:
+        old_dir = UPLOADS_DIR / old_folder
+        new_dir = UPLOADS_DIR / new_folder
+        if old_dir.exists():
+            try:
+                new_dir.parent.mkdir(parents=True, exist_ok=True)
+                old_dir.rename(new_dir)
+            except Exception:
+                pass
     return 200, entry
 
 
@@ -581,12 +798,255 @@ def h_end_break(req, groups):
     return 200, b
 
 
-def h_delete_entry(req, groups):
+def h_start_trip_pause(req, groups):
+    data = req.get("body", {})
+    tid = groups[0]
     with get_db() as db:
-        cur = db.execute("DELETE FROM time_entries WHERE id=?", (groups[0],))
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=? AND status='active'", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Trip not found or not active"}
+        existing = db.execute("SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)).fetchone()
+        if existing:
+            return 409, {"error": "Trip already paused"}
+        pause_start = data.get("pause_start") or now_iso()
+        cur = db.execute("INSERT INTO trip_pauses (trip_id, pause_start) VALUES (?, ?)", (tid, pause_start))
+        # Append pause note
+        now_str = datetime.now().strftime('%H:%M')
+        old_notes = (trip.get("notes") or "").strip()
+        pause_note = f"{now_str} - Trip paused"
+        new_notes = (old_notes + "\n" + pause_note).strip() if old_notes else pause_note
+        db.execute("UPDATE trips SET notes=?, updated_at=datetime('now') WHERE id=?", (new_notes, tid))
+        b = row_to_dict(db.execute("SELECT * FROM trip_pauses WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, b
+
+
+def h_end_trip_pause(req, groups):
+    data = req.get("body", {})
+    tid = groups[0]
+    with get_db() as db:
+        active = db.execute("SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)).fetchone()
+        if not active:
+            return 404, {"error": "No active pause"}
+        pause_end = data.get("pause_end") or now_iso()
+        db.execute("UPDATE trip_pauses SET pause_end=? WHERE id=?", (pause_end, active["id"]))
+        pauses = rows_to_list(db.execute(
+            "SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NOT NULL", (tid,)
+        ).fetchall())
+        total_pause = sum(dt_diff_seconds(p["pause_start"], p["pause_end"]) for p in pauses)
+        # Append resume note
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        now_str = datetime.now().strftime('%H:%M')
+        old_notes = (trip.get("notes") or "").strip()
+        resume_note = f"{now_str} - Trip resumed"
+        new_notes = (old_notes + "\n" + resume_note).strip() if old_notes else resume_note
+        db.execute(
+            "UPDATE trips SET total_pause_seconds=?, notes=?, updated_at=datetime('now') WHERE id=?",
+            (total_pause, new_notes, tid)
+        )
+        b = row_to_dict(db.execute("SELECT * FROM trip_pauses WHERE id=?", (active["id"],)).fetchone())
+    return 200, b
+
+
+def h_delete_entry(req, groups):
+    eid = groups[0]
+    photos = []
+    with get_db() as db:
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=?", (eid,)
+        ).fetchall())
+        cur = db.execute("DELETE FROM time_entries WHERE id=?", (eid,))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
+    for photo in photos:
+        fp = UPLOADS_DIR / (photo.get('folder') or str(eid)) / photo['filename']
+        try: fp.unlink(missing_ok=True)
+        except Exception: pass
     return 200, {"success": True}
+
+
+# ── Photos ─────────────────────────────────────────────────────────────────────
+
+def _photo_folder(entry_row, eid):
+    """Compute folder path: YYYY/MM/DD-AssignmentID"""
+    clock_in = (entry_row or {}).get('clock_in') or ''
+    assignment_id = re.sub(r'[^\w-]', '', ((entry_row or {}).get('assignment_id') or '').strip())
+    try:
+        dt = datetime.fromisoformat(clock_in.replace('Z', '+00:00'))
+        yyyy, mm, dd = dt.strftime('%Y'), dt.strftime('%m'), dt.strftime('%d')
+    except Exception:
+        yyyy, mm, dd = 'XXXX', 'XX', 'XX'
+    suffix = assignment_id if assignment_id else str(eid)
+    return f"{yyyy}/{mm}/{dd}-{suffix}"
+
+
+CAT_SHORTCUTS = {
+    "In Route to WO":        "WO",
+    "Returning Home":        "HOME",
+    "OffClock Tools/Supplies": "ONT",
+    "OnClock Tools/Supplies":  "OFFT",
+    "Other":                  "OTH",
+}
+
+def _trip_folder(start_time_iso):
+    """All trip photos land in Miles/YYYY/MM/DD (based on trip start only)."""
+    try:
+        dt = datetime.fromisoformat(start_time_iso.replace('Z', '+00:00'))
+        return f"Miles/{dt.strftime('%Y')}/{dt.strftime('%m')}/{dt.strftime('%d')}"
+    except Exception:
+        return "Miles/XXXX/XX/XX"
+
+def _trip_id_str(db_id, category, assignment_id):
+    """
+    Global auto-increment id as the base.
+    In Route to WO + assignment : '{db_id}-{assignment_id}'
+    In Route to WO + no assignment: '{db_id}-TMPNOID'
+    All other categories: '{db_id}'
+    """
+    if category == "In Route to WO":
+        if assignment_id and assignment_id.strip():
+            return f"{db_id}-{assignment_id.strip()}"
+        return f"{db_id}-TMPNOID"
+    return str(db_id)
+
+def _trip_photo_filename(start_time_iso, photo_type, category, trip_id_str, ext='.jpg'):
+    """YY-MM-DD-Bef/Aft-CAT-TripID.ext"""
+    try:
+        dt = datetime.fromisoformat(start_time_iso.replace('Z', '+00:00'))
+        prefix = dt.strftime('%y-%m-%d')
+    except Exception:
+        prefix = 'XX-XX-XX'
+    bef_aft = 'Aft' if 'after' in photo_type.lower() else 'Bef'
+    cat = CAT_SHORTCUTS.get(category, 'OTH')
+    return f"{prefix}-{bef_aft}-{cat}-{trip_id_str}{ext}"
+
+
+def h_get_photos(req, groups):
+    eid = groups[0]
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=? ORDER BY created_at", (eid,)
+        ).fetchall())
+    for r in rows:
+        folder = r.get('folder') or str(eid)
+        r['url'] = f"/uploads/{folder}/{r['filename']}"
+    return 200, rows
+
+
+def h_post_photo(req, groups):
+    eid = groups[0]
+    data = req.get("body", {})
+    photo_type = (data.get("photo_type") or "before").strip()
+    b64data = data.get("data", "")
+    original_name = (data.get("filename") or "photo.jpg").strip()
+    mime = (data.get("mime") or "image/jpeg").lower()
+
+    if not b64data:
+        return 400, {"error": "No image data"}
+    try:
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return 400, {"error": "Invalid base64 data"}
+
+    ext = ".jpg"
+    if "png" in mime: ext = ".png"
+    elif "webp" in mime: ext = ".webp"
+    elif "gif" in mime: ext = ".gif"
+    elif "pdf" in mime: ext = ".pdf"
+
+    with get_db() as db:
+        entry_row = row_to_dict(db.execute(
+            "SELECT clock_in, assignment_id FROM time_entries WHERE id=?", (eid,)
+        ).fetchone())
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+
+    folder = _photo_folder(entry_row, eid)
+    name_hint = re.sub(r'[^\w-]', '', (data.get("name_hint") or "").strip().replace(' ', '-'))[:60]
+    if name_hint:
+        safe_name = f"{name_hint}-{uuid.uuid4().hex[:6]}{ext}"
+    else:
+        safe_name = f"{photo_type}_{uuid.uuid4().hex[:10]}{ext}"
+    entry_dir = UPLOADS_DIR / folder
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    file_path = entry_dir / safe_name
+    file_path.write_bytes(img_bytes)
+
+    ftp_remote = f"{folder.replace('/', '_')}_{safe_name}"
+    ftp_synced = 1 if ftp_sync_photo(str(file_path), ftp_remote, settings) else 0
+
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO entry_photos (entry_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?, ?, ?, ?, ?, ?)",
+            (eid, photo_type, safe_name, folder, original_name, ftp_synced)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM entry_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+
+    row['url'] = f"/uploads/{folder}/{safe_name}"
+    return 201, row
+
+
+def h_delete_photo(req, groups):
+    eid, photo_id = groups
+    with get_db() as db:
+        photo = row_to_dict(db.execute(
+            "SELECT * FROM entry_photos WHERE id=? AND entry_id=?", (photo_id, eid)
+        ).fetchone())
+        if not photo:
+            return 404, {"error": "Not found"}
+        db.execute("DELETE FROM entry_photos WHERE id=?", (photo_id,))
+
+    folder = photo.get('folder') or str(eid)
+    file_path = UPLOADS_DIR / folder / photo['filename']
+    try:
+        file_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return 200, {"success": True}
+
+
+def h_get_pay_periods(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM pay_periods ORDER BY week_start DESC"
+        ).fetchall())
+    return 200, rows
+
+
+def h_upsert_pay_period(req, _groups):
+    data = req.get("body", {})
+    week_start = (data.get("week_start") or "").strip()
+    week_end   = (data.get("week_end")   or "").strip()
+    if not week_start or not week_end:
+        return 400, {"error": "week_start and week_end required"}
+    status          = data.get("status", "pending")
+    received_amount = data.get("received_amount")
+    expected_total  = data.get("expected_total")
+    notes           = data.get("notes")
+    paid_at         = data.get("paid_at")
+    with get_db() as db:
+        existing = db.execute(
+            "SELECT id FROM pay_periods WHERE week_start=?", (week_start,)
+        ).fetchone()
+        if existing:
+            db.execute(
+                """UPDATE pay_periods
+                   SET status=?, received_amount=?, expected_total=?, notes=?,
+                       paid_at=?, updated_at=datetime('now')
+                   WHERE week_start=?""",
+                (status, received_amount, expected_total, notes, paid_at, week_start)
+            )
+            pid = existing["id"]
+        else:
+            cur = db.execute(
+                """INSERT INTO pay_periods
+                   (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
+            )
+            pid = cur.lastrowid
+        row = row_to_dict(db.execute(
+            "SELECT * FROM pay_periods WHERE id=?", (pid,)
+        ).fetchone())
+    return 200, row
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
@@ -710,110 +1170,714 @@ def h_month_report(req, _groups):
 
 
 def h_export_csv(req, _groups):
+    from datetime import timedelta
+
+    from datetime import timezone as _tz
     params = req.get("query", {})
     frm = params.get("from", [None])[0]
-    to  = params.get("to", [None])[0]
+    to  = params.get("to",  [None])[0]
+    tz_offset = int(params.get("tz", [0])[0] or 0)  # minutes west of UTC (JS getTimezoneOffset())
+    local_tz = _tz(timedelta(minutes=-tz_offset))
 
     sql = ENTRY_SELECT + " WHERE 1=1"
     args = []
-    if frm:
-        sql += " AND e.clock_in >= ?"; args.append(frm)
-    if to:
-        sql += " AND e.clock_in <= ?"; args.append(to)
+    if frm: sql += " AND e.clock_in >= ?"; args.append(frm)
+    if to:  sql += " AND e.clock_in <= ?"; args.append(to)
     sql += " ORDER BY e.clock_in ASC"
 
     with get_db() as db:
-        rows = rows_to_list(db.execute(sql, args).fetchall())
+        rows       = rows_to_list(db.execute(sql, args).fetchall())
+        pp_rows    = rows_to_list(db.execute("SELECT * FROM pay_periods ORDER BY week_start").fetchall())
+        ws_setting = db.execute("SELECT value FROM settings WHERE key='week_start'").fetchone()
+        pb_setting = db.execute("SELECT value FROM settings WHERE key='paid_breaks'").fetchone()
 
-    DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-    lines = ["Date,Day,WO Title,Company,Customer,Site ID,Assignment ID,Ticket #,INC #,MOD Name,NOC Name,PM/PC Name,Pay Rate,Rate Type,Rate,Currency,Clock In,Clock Out,Gross Hours,Break Hours,Net Hours,Total Labor,Travel Reimb,Parking/Tolls,Total Expected,Received Pay,Pay Status,Status,Release Code,Return Track #,Materials,Address,Work Summary"]
+    week_start_wd = ((int(ws_setting["value"]) if ws_setting else 1) - 1) % 7  # Mon=0..Sun=6
+    paid_breaks   = (pb_setting["value"] if pb_setting else "0") == "1"
+    pay_map       = {pp["week_start"]: pp for pp in pp_rows}
 
-    def fmth(s):
-        return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+    multi_week = False
+    if frm and to:
+        try:
+            multi_week = (datetime.fromisoformat(to[:10]) - datetime.fromisoformat(frm[:10])).days > 8
+        except Exception:
+            pass
 
     def cell(v):
         return '"' + str(v or "").replace('"', '""') + '"'
 
     def fmt_time(iso):
-        if not iso:
-            return ""
+        if not iso: return ""
         try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.strftime("%H:%M")
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz)
+            return dt.strftime("%-I:%M %p")
+        except Exception: return iso[:16]
+
+    def fmt_date(iso):
+        if not iso: return ""
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz)
+            return dt.strftime("%Y-%m-%d")
+        except Exception: return iso[:10]
+
+    def fmth(s):
+        if s is None: return ""
+        return f"{int(s) / 3600:.2f}"
+
+    def get_week_start(dt_obj):
+        return (dt_obj.date() - timedelta(days=(dt_obj.weekday() - week_start_wd) % 7))
+
+    def mat_total(mat_str):
+        try:
+            mats = json.loads(mat_str or "[]")
+            return sum(float(m.get("price") or 0) for m in (mats if isinstance(mats, list) else []))
+        except Exception:
+            return 0.0
+
+    def calc_entry(e):
+        gross  = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else 0
+        net    = gross if paid_breaks else max(0, gross - (e["total_break_seconds"] or 0))
+        if e.get("rate_type") == "none":
+            labor = 0.0
+        elif e.get("rate_type") == "flat":
+            labor = float(e.get("flat_amount") or 0)
+        elif e.get("hourly_rate") and net > 0:
+            labor = (net / 3600) * float(e["hourly_rate"])
+        else:
+            labor = 0.0
+        travel  = float(e.get("travel_reimb")  or 0)
+        parking = float(e.get("parking_tolls") or 0)
+        mats    = mat_total(e.get("materials"))
+        return net, labor, travel, mats, parking, labor + travel + parking + mats
+
+    def pay_type_str(e):
+        rt = e.get("rate_type")
+        if rt == "flat": return "Flat"
+        if rt == "none": return "Non-Billable"
+        return "Hourly"
+
+    def pay_rate_str(e):
+        rt = e.get("rate_type")
+        if rt == "none":
+            return ""
+        if rt == "flat":
+            return f"${float(e.get('flat_amount') or 0):.2f} flat"
+        return f"${e['hourly_rate']}/hr" if e.get("hourly_rate") else ""
+
+    HEADERS = [
+        "Date","WO Title","WO Status","Company","Customer","Assignment ID",
+        "Pay Type","Pay Rate","Clock In","Clock Out","Total Hours",
+        "Total Labor","Travel Reimb","Materials Reimb","Parking/Tolls",
+        "Total Expected Pay","Pay Status","Total Received","Received Date","Pay Notes",
+    ]
+    lines = [",".join(f'"{h}"' for h in HEADERS)]
+
+    def entry_row(e, wk_received=False):
+        net, labor, travel, mats, parking, total = calc_entry(e)
+        pay_status = ""
+        received_str = ""
+        rec_date = ""
+        # Received data only appears once the week's pay is actually confirmed
+        if wk_received:
+            override = e.get("received_pay")
+            paid = float(override) if override is not None else total
+            received_str = f"{paid:.2f}"
+            if paid < total - 0.005:
+                pay_status = "LOWERED"
+            rec_date = (e.get("received_date") or "")[:10]
+        return ",".join([
+            cell(fmt_date(e["clock_in"])),
+            cell(e.get("wo_title") or ""),
+            cell((e.get("status") or "pending").upper()),
+            cell(e.get("org_name") or ""),
+            cell(e.get("client_name") or ""),
+            cell(e.get("assignment_id") or ""),
+            cell(pay_type_str(e)),
+            cell(pay_rate_str(e)),
+            cell(fmt_time(e["clock_in"])),
+            cell(fmt_time(e["clock_out"])),
+            cell(fmth(net)),
+            cell(f"{labor:.2f}"),
+            cell(f"{travel:.2f}" if travel else ""),
+            cell(f"{mats:.2f}"   if mats   else ""),
+            cell(f"{parking:.2f}" if parking else ""),
+            cell(f"{total:.2f}"),
+            cell(pay_status),
+            cell(received_str),
+            cell(rec_date),
+            cell(e.get("pay_adjustment_note") or ""),
+        ])
+
+    def summary_row(label, exp, pay_status="", received="", notes="", rec_date=""):
+        return ",".join([
+            cell(label), *[cell("")] * 14,
+            cell(f"{exp:.2f}"),
+            cell(pay_status),
+            cell(received),
+            cell(rec_date),
+            cell(notes),
+        ])
+
+    if not multi_week:
+        pp = None
+        ws_str = None
+        if rows:
+            try:
+                dt0    = datetime.fromisoformat(rows[0]["clock_in"].replace("Z", "+00:00")).astimezone(local_tz)
+                ws_str = str(get_week_start(dt0))
+                pp     = pay_map.get(ws_str)
+            except Exception:
+                pass
+        wk_received = bool(pp and (pp.get("status") == "received"))
+        for e in rows:
+            lines.append(entry_row(e, wk_received))
+        if pp:
+            week_exp = sum(calc_entry(e)[5] for e in rows)
+            lines.append(summary_row(
+                f"Week: {ws_str}",
+                week_exp,
+                (pp.get("status") or "pending").upper(),
+                f"{float(pp.get('received_amount') or 0):.2f}" if wk_received else "",
+                pp.get("notes") or "",
+                (pp.get("paid_at") or "")[:10] if wk_received else "",
+            ))
+    else:
+        weeks_map = {}
+        for e in rows:
+            try:
+                dt     = datetime.fromisoformat(e["clock_in"].replace("Z", "+00:00")).astimezone(local_tz)
+                ws_str = str(get_week_start(dt))
+            except Exception:
+                ws_str = "0000-00-00"
+            weeks_map.setdefault(ws_str, []).append(e)
+
+        month_exp = 0.0
+        month_rcv = 0.0
+        for ws_str in sorted(weeks_map.keys()):
+            entries  = weeks_map[ws_str]
+            pp       = pay_map.get(ws_str)
+            wk_received = bool(pp and (pp.get("status") == "received"))
+            week_exp = sum(calc_entry(e)[5] for e in entries)
+            rcv_amt  = float(pp.get("received_amount") or 0) if wk_received else 0.0
+            month_exp += week_exp
+            month_rcv += rcv_amt
+
+            try:
+                ws_dt   = datetime.strptime(ws_str, "%Y-%m-%d")
+                we_dt   = ws_dt + timedelta(days=6)
+                hdr_lbl = f"Week: {ws_dt.strftime('%b %d')} – {we_dt.strftime('%b %d')}"
+            except Exception:
+                hdr_lbl = f"Week: {ws_str}"
+
+            lines.append(summary_row(
+                hdr_lbl, week_exp,
+                (pp.get("status") or "").upper() if pp else "",
+                f"{rcv_amt:.2f}" if wk_received else "",
+                pp.get("notes") or "" if pp else "",
+                (pp.get("paid_at") or "")[:10] if wk_received else "",
+            ))
+            for e in entries:
+                lines.append(entry_row(e, wk_received))
+            lines.append("")
+
+        lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", ""))
+
+    return "csv", "\n".join(lines)
+
+
+def h_export_entry_zip(req, groups):
+    import io
+    import zipfile
+    from datetime import timedelta, timezone as _tz
+
+    eid = groups[0]
+    params = req.get("query", {})
+    tz_offset = int(params.get("tz", [0])[0] or 0)
+    local_tz = _tz(timedelta(minutes=-tz_offset))
+
+    with get_db() as db:
+        row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
+        if not row:
+            return 404, {"error": "Not found"}
+        entry = attach_breaks(db, row_to_dict(row))
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM entry_photos WHERE entry_id=? ORDER BY created_at", (eid,)
+        ).fetchall())
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+
+    def fmt_local(iso):
+        if not iso: return ""
+        try:
+            return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(local_tz).strftime("%-I:%M %p")
         except Exception:
             return iso[:16]
 
-    def fmt_date(iso):
-        if not iso:
-            return ""
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
-        except Exception:
-            return iso[:10]
+    sym = settings.get("currency_symbol") or "$"
+    paid_breaks = (settings.get("paid_breaks") or "0") == "1"
+    gross = dt_diff_seconds(entry["clock_in"], entry["clock_out"]) if entry.get("clock_out") else 0
+    net = gross if paid_breaks else max(0, gross - (entry.get("total_break_seconds") or 0))
+    total_hrs = f"{net / 3600:.2f} hrs"
 
-    total_net = 0; total_earn = 0
-    for e in rows:
-        gross = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else 0
-        net = max(0, gross - (e["total_break_seconds"] or 0))
-        earn = (net / 3600 * e["hourly_rate"]) if (e["hourly_rate"] and net > 0) else 0
-        total_net += net; total_earn += earn
+    try:
+        mats = json.loads(entry.get("materials") or "[]")
+        mats = mats if isinstance(mats, list) else []
+    except Exception:
+        mats = []
+    mats_str = ", ".join(
+        m.get("name", "") + (f" - {sym}{m['price']}" if m.get("price") else "")
+        for m in mats
+    ) or "N/a"
+
+    site_and_id = " #".join(x for x in [entry.get("client_name"), entry.get("site_id")] if x)
+    release_code = "N/a" if entry.get("no_release_code") else (entry.get("release_code") or "N/a")
+    return_track = "N/a" if entry.get("no_return_track") else (entry.get("return_track") or "N/a")
+    parking = f"{sym}{entry['parking_tolls']}" if entry.get("parking_tolls") else "N/a"
+
+    report = f"""Tech name: {settings.get('tech_name') or ''}
+Assignment ID: {entry.get('assignment_id') or ''}
+Site name & ID: {site_and_id}
+Address: {entry.get('address') or ''}
+Buyer/Representing company: {entry.get('org_name') or ''}
+Onsite (Check in): {fmt_local(entry.get('clock_in'))}
+Offsite (Check out): {fmt_local(entry.get('clock_out'))}
+Total time: {total_hrs}
+Parking/Tolls: {parking}
+PM/PC name: {entry.get('pm_pc_name') or 'N/a'}
+MOD name: {entry.get('mod_name') or 'N/a'}
+NOC name: {entry.get('noc_name') or 'N/a'}
+Ticket #: {entry.get('ticket_num') or 'N/a'}
+Release code: {release_code}
+Return track #: {return_track}
+Materials used: {mats_str}
+Work summary: {entry.get('work_summary') or ''}
+"""
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("report.txt", report)
+        used_names = set()
+        for p in photos:
+            folder = p.get("folder") or str(eid)
+            fp = UPLOADS_DIR / folder / p["filename"]
+            if not fp.exists():
+                continue
+            arc = f"{p['photo_type']}/{p['filename']}"
+            if arc in used_names:
+                arc = f"{p['photo_type']}/{p['id']}_{p['filename']}"
+            used_names.add(arc)
+            zf.write(fp, arcname=arc)
+
+    safe_id = re.sub(r'[^\w-]', '', (entry.get("assignment_id") or f"entry-{eid}"))
+    try:
+        date_str = datetime.fromisoformat(entry["clock_in"].replace("Z", "+00:00")).astimezone(local_tz).strftime("%Y-%m-%d")
+    except Exception:
+        date_str = "export"
+    return "zip", (f"WO-{safe_id}-{date_str}.zip", buf.getvalue())
+
+
+# ── Trips ──────────────────────────────────────────────────────────────────────
+
+def h_get_trips(req, _groups):
+    params = req.get("query", {})
+    frm = params.get("from", [None])[0]
+    to  = params.get("to",  [None])[0]
+    sql = "SELECT * FROM trips WHERE 1=1"
+    args = []
+    if frm: sql += " AND start_time >= ?"; args.append(frm)
+    if to:  sql += " AND start_time <= ?"; args.append(to)
+    sql += " ORDER BY start_time DESC"
+    with get_db() as db:
+        rows = rows_to_list(db.execute(sql, args).fetchall())
+    return 200, rows
+
+def _augment_trip(db, trip_dict):
+    if not trip_dict:
+        return trip_dict
+    tid = trip_dict["id"]
+    active_pause = row_to_dict(db.execute(
+        "SELECT * FROM trip_pauses WHERE trip_id=? AND pause_end IS NULL", (tid,)
+    ).fetchone())
+    trip_dict["active_pause"] = active_pause
+    return trip_dict
+
+
+def h_get_current_trip(req, _groups):
+    with get_db() as db:
+        row = row_to_dict(db.execute(
+            "SELECT * FROM trips WHERE status='active' ORDER BY start_time DESC LIMIT 1"
+        ).fetchone())
+        if not row:
+            return 404, {"error": "No active trip"}
+        _augment_trip(db, row)
+    return 200, row
+
+def h_start_trip(req, _groups):
+    data = req.get("body", {})
+    category      = (data.get("category") or "Other").strip()
+    assignment_id = (data.get("assignment_id") or "").strip() or None
+    start_time    = data.get("start_time") or now_iso()
+    mileage_start = data.get("mileage_start")
+    notes         = data.get("notes")
+    with get_db() as db:
+        # Insert first to get the auto-increment id, then use it for trip_id
+        cur = db.execute(
+            "INSERT INTO trips (category, assignment_id, trip_id, folder, start_time, mileage_start, notes) VALUES (?,?,?,?,?,?,?)",
+            (category, assignment_id, '', '', start_time, mileage_start, notes)
+        )
+        db_id  = cur.lastrowid
+        trip_id = _trip_id_str(db_id, category, assignment_id)
+        folder  = _trip_folder(start_time)
+        db.execute("UPDATE trips SET trip_id=?, folder=? WHERE id=?", (trip_id, folder, db_id))
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (db_id,)).fetchone())
+        _augment_trip(db, row)
+    return 201, row
+
+def h_stop_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    end_time    = data.get("end_time") or now_iso()
+    mileage_end = data.get("mileage_end")
+    notes       = data.get("notes")
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+        rate = float(settings.get("mileage_rate") or "0.67")
+        distance = None
+        tax_ded  = None
+        if mileage_end is not None and trip.get("mileage_start") is not None:
+            distance = round(float(mileage_end) - float(trip["mileage_start"]), 2)
+            tax_ded  = round(max(0, distance) * rate, 2)
+        merged_notes = data.get("notes", trip.get("notes"))
+        db.execute(
+            "UPDATE trips SET end_time=?, mileage_end=?, distance=?, tax_deduction=?, notes=?, status='completed', updated_at=datetime('now') WHERE id=?",
+            (end_time, mileage_end, distance, tax_ded, merged_notes, tid)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    return 200, row
+
+def h_get_trip(req, groups):
+    tid = groups[0]
+    with get_db() as db:
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not row:
+            return 404, {"error": "Not found"}
+        _augment_trip(db, row)
+    return 200, row
+
+def h_update_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        for field in ("category","assignment_id","notes","mileage_start","mileage_end","distance","tax_deduction"):
+            if field in data:
+                trip[field] = data[field]
+        db.execute(
+            "UPDATE trips SET category=?,assignment_id=?,notes=?,mileage_start=?,mileage_end=?,distance=?,tax_deduction=?,updated_at=datetime('now') WHERE id=?",
+            (trip["category"],trip["assignment_id"],trip["notes"],trip["mileage_start"],trip["mileage_end"],trip["distance"],trip["tax_deduction"],tid)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+    return 200, row
+
+def h_delete_trip(req, groups):
+    tid = groups[0]
+    photos = []
+    trip_folder = None
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        trip_folder = trip.get("folder")
+        photos = rows_to_list(db.execute(
+            "SELECT * FROM trip_photos WHERE trip_id=?", (tid,)
+        ).fetchall())
+        db.execute("DELETE FROM trips WHERE id=?", (tid,))  # CASCADE deletes trip_photos
+    for photo in photos:
+        folder = photo.get('folder') or trip_folder or str(tid)
+        fp = UPLOADS_DIR / folder / photo['filename']
+        try: fp.unlink(missing_ok=True)
+        except Exception: pass
+    return 200, {"success": True}
+
+
+def h_reassign_trip(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    new_category      = (data.get("category") or "").strip()
+    new_assignment_id = (data.get("assignment_id") or "").strip() or None
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        old_category = trip["category"]
+        old_trip_id  = trip.get("trip_id") or str(tid)
+        folder       = trip.get("folder") or _trip_folder(trip["start_time"])
+        category     = new_category or old_category
+        new_trip_id  = _trip_id_str(int(tid), category, new_assignment_id)
+
+        # Append reassign note only when category actually changes
+        old_notes = (trip.get("notes") or "").strip()
+        if old_category != category:
+            now_str = datetime.now().strftime('%H:%M')
+            reassign_note = f"{now_str} - Reassign from: {old_category} to: {category}"
+            new_notes = (old_notes + "\n" + reassign_note).strip() if old_notes else reassign_note
+        else:
+            new_notes = old_notes or None
+
+        photos = rows_to_list(db.execute("SELECT * FROM trip_photos WHERE trip_id=?", (tid,)).fetchall())
+
+        db.execute(
+            "UPDATE trips SET category=?, assignment_id=?, folder=?, trip_id=?, notes=?, updated_at=datetime('now') WHERE id=?",
+            (category, new_assignment_id, folder, new_trip_id, new_notes, tid)
+        )
+
+        # Rename filenames in DB — folder never moves, only names change
+        file_renames = []
+        if old_trip_id != new_trip_id:
+            for photo in photos:
+                old_fname = photo['filename']
+                ext = Path(old_fname).suffix or '.jpg'
+                new_fname = _trip_photo_filename(
+                    trip["start_time"], photo['photo_type'], category, new_trip_id, ext
+                )
+                if new_fname != old_fname:
+                    db.execute("UPDATE trip_photos SET filename=? WHERE id=?", (new_fname, photo['id']))
+                    file_renames.append((UPLOADS_DIR / folder / old_fname,
+                                         UPLOADS_DIR / folder / new_fname))
+
+        row = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        _augment_trip(db, row)
+
+    # Filesystem: rename photo files in-place (folder never changes)
+    for old_file, new_file in file_renames:
         try:
-            wd = datetime.fromisoformat(e["clock_in"].replace("Z","+00:00")).weekday()
-            day_name = DAYS[wd]
+            if old_file.exists():
+                old_file.rename(new_file)
         except Exception:
-            day_name = ""
-        rate_val = e["hourly_rate"] if e.get("rate_type","hourly") == "hourly" else e.get("flat_amount","")
-        labor = earn
-        travel = float(e.get("travel_reimb") or 0)
-        parking_amt = 0
+            pass
+
+    return 200, row
+
+def h_get_trip_photos(req, groups):
+    tid = groups[0]
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT folder FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        rows = rows_to_list(db.execute(
+            "SELECT * FROM trip_photos WHERE trip_id=? ORDER BY created_at", (tid,)
+        ).fetchall())
+    trip_folder = trip.get("folder") or str(tid)
+    for r in rows:
+        r['url'] = f"/uploads/{r.get('folder') or trip_folder}/{r['filename']}"
+    return 200, rows
+
+def h_post_trip_photo(req, groups):
+    tid = groups[0]
+    data = req.get("body", {})
+    photo_type = (data.get("photo_type") or "before").strip()
+    b64data = data.get("data", "")
+    original_name = (data.get("filename") or "photo.jpg").strip()
+    mime = (data.get("mime") or "image/jpeg").lower()
+    if not b64data:
+        return 400, {"error": "No image data"}
+    try:
+        img_bytes = base64.b64decode(b64data)
+    except Exception:
+        return 400, {"error": "Invalid base64 data"}
+    ext = ".jpg"
+    if "png" in mime: ext = ".png"
+    elif "webp" in mime: ext = ".webp"
+    with get_db() as db:
+        trip = row_to_dict(db.execute("SELECT * FROM trips WHERE id=?", (tid,)).fetchone())
+        if not trip:
+            return 404, {"error": "Not found"}
+        settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
+    folder    = trip.get("folder") or _trip_folder(trip["start_time"])
+    safe_name = _trip_photo_filename(trip["start_time"], photo_type, trip["category"], trip["trip_id"] or str(tid), ext)
+    entry_dir = UPLOADS_DIR / folder
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    file_path = entry_dir / safe_name
+    file_path.write_bytes(img_bytes)
+    ftp_remote = f"{folder.replace('/', '_')}_{safe_name}"
+    ftp_synced = 1 if ftp_sync_photo(str(file_path), ftp_remote, settings) else 0
+    with get_db() as db:
+        cur = db.execute(
+            "INSERT INTO trip_photos (trip_id, photo_type, filename, folder, original_name, ftp_synced) VALUES (?,?,?,?,?,?)",
+            (tid, f"trip_{photo_type}", safe_name, folder, original_name, ftp_synced)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM trip_photos WHERE id=?", (cur.lastrowid,)).fetchone())
+    row['url'] = f"/uploads/{folder}/{safe_name}"
+    return 201, row
+
+# ── Projects ────────────────────────────────────────────────────────────────────
+
+def h_get_projects(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("SELECT * FROM projects ORDER BY name").fetchall())
+    return 200, rows
+
+def h_create_project(req, _groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name required"}
+    defaults = data.get("defaults")
+    defaults_str = json.dumps(defaults) if isinstance(defaults, dict) else (defaults or None)
+    with get_db() as db:
+        cur = db.execute("INSERT INTO projects (name, defaults) VALUES (?, ?)", (name, defaults_str))
+        row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+def h_update_project(req, groups):
+    pid = groups[0]
+    data = req.get("body", {})
+    with get_db() as db:
+        ex = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+        if not ex:
+            return 404, {"error": "Not found"}
+        name = (data.get("name") or ex["name"]).strip()
+        defaults = data.get("defaults", ex.get("defaults"))
+        defaults_str = json.dumps(defaults) if isinstance(defaults, dict) else (defaults or None)
+        db.execute("UPDATE projects SET name=?, defaults=? WHERE id=?", (name, defaults_str, pid))
+        row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+    return 200, row
+
+def h_delete_project(req, groups):
+    with get_db() as db:
+        cur = db.execute("DELETE FROM projects WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+
+# ── Planned jobs ────────────────────────────────────────────────────────────────
+
+def h_get_planned_jobs(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("""
+            SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name
+            FROM planned_jobs pj
+            LEFT JOIN organizations o ON pj.organization_id = o.id
+            LEFT JOIN clients c ON pj.client_id = c.id
+            LEFT JOIN projects pr ON pj.project_id = pr.id
+            ORDER BY pj.created_at DESC
+        """).fetchall())
+    return 200, rows
+
+def h_create_planned_job(req, _groups):
+    data = req.get("body", {})
+    with get_db() as db:
+        cur = db.execute(
+            """INSERT INTO planned_jobs
+            (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
+             address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
+             data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
+             data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
+             data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"))
+        )
+        row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+def h_delete_planned_job(req, groups):
+    with get_db() as db:
+        cur = db.execute("DELETE FROM planned_jobs WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+
+# ── Trip categories ─────────────────────────────────────────────────────────────
+
+def h_get_trip_categories(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("SELECT * FROM trip_categories ORDER BY sort_order, name").fetchall())
+    return 200, rows
+
+def h_create_trip_category(req, _groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name required"}
+    with get_db() as db:
         try:
-            parking_amt = float(e.get("parking_tolls") or 0)
-        except (ValueError, TypeError):
-            parking_amt = 0
-        total_exp = labor + travel + parking_amt
-        recv = e.get("received_pay")
-        if recv is None:
-            recv = total_exp
-        pay_status = "PAID" if recv >= total_exp else ("PARTIAL" if recv > 0 else "PENDING")
+            cur = db.execute("INSERT INTO trip_categories (name, sort_order) VALUES (?, (SELECT COALESCE(MAX(sort_order),0)+1 FROM trip_categories))", (name,))
+            row = row_to_dict(db.execute("SELECT * FROM trip_categories WHERE id=?", (cur.lastrowid,)).fetchone())
+        except Exception:
+            return 409, {"error": "Category already exists"}
+    return 201, row
+
+def h_delete_trip_category(req, groups):
+    cid = groups[0]
+    with get_db() as db:
+        cur = db.execute("DELETE FROM trip_categories WHERE id=?", (cid,))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+# ── Mileage CSV export ──────────────────────────────────────────────────────────
+
+def h_export_mileage_csv(req, _groups):
+    from datetime import timedelta
+    params = req.get("query", {})
+    frm = params.get("from", [None])[0]
+    to  = params.get("to",  [None])[0]
+    sql = "SELECT * FROM trips WHERE status='completed'"
+    args = []
+    if frm: sql += " AND start_time >= ?"; args.append(frm)
+    if to:  sql += " AND start_time <= ?"; args.append(to)
+    sql += " ORDER BY start_time ASC"
+    with get_db() as db:
+        rows = rows_to_list(db.execute(sql, args).fetchall())
+
+    def cell(v): return '"' + str(v or "").replace('"','""') + '"'
+    def fmt_dt(iso):
+        if not iso: return ""
+        try: return datetime.fromisoformat(iso.replace("Z","+00:00")).strftime("%Y-%m-%d %H:%M")
+        except: return iso[:16]
+    def fmth(s):
+        if not s and s != 0: return ""
+        s = int(s); return f"{s//3600}:{str((s%3600)//60).zfill(2)}"
+
+    headers = ["Date/Time","TripID","Driving Time","Mileage Start","Mileage End","Distance","Write-Off Amount","Trip Category","Note"]
+    lines = [",".join(f'"{h}"' for h in headers)]
+
+    total_dist = 0.0; total_tax = 0.0; total_sec = 0
+    for t in rows:
+        start_sec = 0
+        if t.get("start_time") and t.get("end_time"):
+            try:
+                s = datetime.fromisoformat(t["start_time"].replace("Z","+00:00"))
+                e = datetime.fromisoformat(t["end_time"].replace("Z","+00:00"))
+                start_sec = int((e - s).total_seconds())
+            except: pass
+        dist = float(t.get("distance") or 0)
+        tax  = float(t.get("tax_deduction") or 0)
+        total_dist += dist; total_tax += tax; total_sec += start_sec
         lines.append(",".join([
-            cell(fmt_date(e["clock_in"])),
-            cell(day_name),
-            cell(e.get("wo_title") or ""),
-            cell(e["org_name"] or ""),
-            cell(e["client_name"] or ""),
-            cell(e.get("site_id") or ""),
-            cell(e.get("assignment_id") or ""),
-            cell(e.get("ticket_num") or ""),
-            cell(e.get("inc_num") or ""),
-            cell(e.get("mod_name") or ""),
-            cell(e.get("noc_name") or ""),
-            cell(e.get("pm_pc_name") or ""),
-            cell(e["rate_name"] or ""),
-            cell(e.get("rate_type") or "hourly"),
-            cell(rate_val or ""),
-            cell(e["currency"] or ""),
-            cell(fmt_time(e["clock_in"])),
-            cell(fmt_time(e["clock_out"])),
-            cell(fmth(gross)),
-            cell(fmth(e["total_break_seconds"] or 0)),
-            cell(fmth(net)),
-            cell(f"{labor:.2f}"),
-            cell(f"{travel:.2f}"),
-            cell(e.get("parking_tolls") or ""),
-            cell(f"{total_exp:.2f}"),
-            cell(f"{recv:.2f}"),
-            cell(pay_status),
-            cell(e.get("status") or ""),
-            cell(e.get("release_code") or ("N/a" if e.get("no_release_code") else "")),
-            cell(e.get("return_track") or ("N/a" if e.get("no_return_track") else "")),
-            cell(e.get("materials") or ""),
-            cell(e["address"] or ""),
-            cell(e.get("work_summary") or ""),
+            cell(fmt_dt(t.get("start_time"))),
+            cell(t.get("trip_id") or ""),
+            cell(fmth(start_sec)),
+            cell(str(t.get("mileage_start") or "")),
+            cell(str(t.get("mileage_end") or "")),
+            cell(f"{dist:.2f}" if t.get("distance") is not None else ""),
+            cell(f"{tax:.2f}" if t.get("tax_deduction") is not None else ""),
+            cell(t.get("category") or ""),
+            cell(t.get("notes") or ""),
         ]))
 
-    th = total_net // 3600; tm = (total_net % 3600) // 60
-    lines.append(f'"","","","","","","","","","","","","","","","","TOTAL","","","{th}:{str(tm).zfill(2)}","{total_earn:.2f}","","","","","","","","","","","","",""')
+    lines.append(",".join([
+        cell("TOTALS"), cell(""), cell(fmth(total_sec)),
+        cell(""), cell(""),
+        cell(f"{total_dist:.2f}"),
+        cell(f"{total_tax:.2f}"),
+        cell(""), cell(""),
+    ]))
     return "csv", "\n".join(lines)
 
 
@@ -828,6 +1892,23 @@ ROUTES = [
     (r"/api/entries/(\d+)/break/start", ["POST"],   h_start_break),
     (r"/api/entries/(\d+)/break/end",   ["POST"],   h_end_break),
     (r"/api/entries/(\d+)",             ["DELETE"], h_delete_entry),
+    (r"/api/entries/(\d+)/photos",          ["GET"],    h_get_photos),
+    (r"/api/entries/(\d+)/photos",          ["POST"],   h_post_photo),
+    (r"/api/entries/(\d+)/photos/(\d+)",    ["DELETE"], h_delete_photo),
+    (r"/api/entries/(\d+)/export/zip",      ["GET"],    h_export_entry_zip),
+    (r"/api/pay-periods",              ["GET"],  h_get_pay_periods),
+    (r"/api/pay-periods",              ["POST"], h_upsert_pay_period),
+    (r"/api/trips/current",                ["GET"],    h_get_current_trip),
+    (r"/api/trips/(\d+)/stop",             ["POST"],   h_stop_trip),
+    (r"/api/trips/(\d+)/reassign",         ["POST"],   h_reassign_trip),
+    (r"/api/trips/(\d+)/pause/start",      ["POST"],   h_start_trip_pause),
+    (r"/api/trips/(\d+)/pause/end",        ["POST"],   h_end_trip_pause),
+    (r"/api/trips/(\d+)/photos",           ["GET","POST"], lambda req,g: h_get_trip_photos(req,g) if req["method"]=="GET" else h_post_trip_photo(req,g)),
+    (r"/api/trips/(\d+)",                  ["GET","PUT","DELETE"], lambda req,g: h_get_trip(req,g) if req["method"]=="GET" else h_update_trip(req,g) if req["method"]=="PUT" else h_delete_trip(req,g)),
+    (r"/api/trips",                        ["GET","POST"], lambda req,g: h_get_trips(req,g) if req["method"]=="GET" else h_start_trip(req,g)),
+    (r"/api/trip-categories/(\d+)",        ["DELETE"], h_delete_trip_category),
+    (r"/api/trip-categories",              ["GET","POST"], lambda req,g: h_get_trip_categories(req,g) if req["method"]=="GET" else h_create_trip_category(req,g)),
+    (r"/api/reports/mileage/export/csv",   ["GET"],    h_export_mileage_csv),
     (r"/api/organizations",             ["GET"],    h_get_orgs),
     (r"/api/organizations",             ["POST"],   h_post_org),
     (r"/api/organizations/(\d+)",       ["PUT"],    h_put_org),
@@ -840,6 +1921,13 @@ ROUTES = [
     (r"/api/pay-rates",                 ["POST"],   h_post_rate),
     (r"/api/pay-rates/(\d+)",           ["PUT"],    h_put_rate),
     (r"/api/pay-rates/(\d+)",           ["DELETE"], h_delete_rate),
+    (r"/api/projects",                  ["GET"],    h_get_projects),
+    (r"/api/projects",                  ["POST"],   h_create_project),
+    (r"/api/projects/(\d+)",            ["PUT"],    h_update_project),
+    (r"/api/projects/(\d+)",            ["DELETE"], h_delete_project),
+    (r"/api/planned-jobs",              ["GET"],    h_get_planned_jobs),
+    (r"/api/planned-jobs",              ["POST"],   h_create_planned_job),
+    (r"/api/planned-jobs/(\d+)",        ["DELETE"], h_delete_planned_job),
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),
     (r"/api/reports/week",              ["GET"],    h_week_report),
@@ -885,7 +1973,37 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_zip(self, result):
+        fn, data = result
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _serve_static(self, path):
+        if path.startswith('/uploads/'):
+            rel = path[len('/uploads/'):]
+            file_path = (UPLOADS_DIR / rel).resolve()
+            try:
+                file_path.relative_to(UPLOADS_DIR.resolve())
+            except ValueError:
+                self._send(403, {"error": "Forbidden"})
+                return
+            if not file_path.exists():
+                self._send(404, {"error": "Not found"})
+                return
+            img_mime = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+                        '.gif': 'image/gif', '.webp': 'image/webp',
+                        '.pdf': 'application/pdf'}.get(file_path.suffix.lower(), 'application/octet-stream')
+            data = file_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", img_mime)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         rel = path.lstrip("/") or "index.html"
         file_path = (PUBLIC / rel).resolve()
         try:
@@ -924,7 +2042,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
-        req = {"body": body, "query": query, "path": path}
+        req = {"body": body, "query": query, "path": path, "method": method}
 
         try:
             status, result = handler(req, groups or ())
@@ -935,6 +2053,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if status == "csv":
             self._send_csv(result)
+        elif status == "zip":
+            self._send_zip(result)
         else:
             self._send(status, result)
 
@@ -954,6 +2074,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     init_db()
     migrate_db()
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"TimeClock running on http://localhost:{PORT}")
     try:
