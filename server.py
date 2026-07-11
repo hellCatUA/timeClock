@@ -911,7 +911,11 @@ def h_post_photo(req, groups):
         settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
 
     folder = _photo_folder(entry_row, eid)
-    safe_name = f"{photo_type}_{uuid.uuid4().hex[:10]}{ext}"
+    name_hint = re.sub(r'[^\w-]', '', (data.get("name_hint") or "").strip().replace(' ', '-'))[:60]
+    if name_hint:
+        safe_name = f"{name_hint}-{uuid.uuid4().hex[:6]}{ext}"
+    else:
+        safe_name = f"{photo_type}_{uuid.uuid4().hex[:10]}{ext}"
     entry_dir = UPLOADS_DIR / folder
     entry_dir.mkdir(parents=True, exist_ok=True)
     file_path = entry_dir / safe_name
@@ -1183,7 +1187,9 @@ def h_export_csv(req, _groups):
     def calc_entry(e):
         gross  = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else 0
         net    = gross if paid_breaks else max(0, gross - (e["total_break_seconds"] or 0))
-        if e.get("rate_type") == "flat":
+        if e.get("rate_type") == "none":
+            labor = 0.0
+        elif e.get("rate_type") == "flat":
             labor = float(e.get("flat_amount") or 0)
         elif e.get("hourly_rate") and net > 0:
             labor = (net / 3600) * float(e["hourly_rate"])
@@ -1195,10 +1201,16 @@ def h_export_csv(req, _groups):
         return net, labor, travel, mats, parking, labor + travel + parking + mats
 
     def pay_type_str(e):
-        return "Flat" if e.get("rate_type") == "flat" else "Hourly"
+        rt = e.get("rate_type")
+        if rt == "flat": return "Flat"
+        if rt == "none": return "Non-Billable"
+        return "Hourly"
 
     def pay_rate_str(e):
-        if e.get("rate_type") == "flat":
+        rt = e.get("rate_type")
+        if rt == "none":
+            return ""
+        if rt == "flat":
             return f"${float(e.get('flat_amount') or 0):.2f} flat"
         return f"${e['hourly_rate']}/hr" if e.get("hourly_rate") else ""
 

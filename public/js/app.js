@@ -91,6 +91,7 @@ function getNetSeconds(entry) {
 }
 function calcLabor(entry, netSec) {
   const s = netSec !== undefined ? netSec : getNetSeconds(entry);
+  if (entry.rate_type === 'none') return 0;   // non-billable visit
   if (entry.rate_type === 'flat') return parseFloat(entry.flat_amount) || 0;
   if (entry.hourly_rate) return (s / 3600) * entry.hourly_rate;
   return 0;
@@ -200,7 +201,7 @@ function compressImage(file, maxPx = 1920, quality = 0.82) {
   });
 }
 
-async function uploadPhoto(entryId, file, photoType) {
+async function uploadPhoto(entryId, file, photoType, nameHint = null) {
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
   const blob = isPdf ? file : await compressImage(file);
   const mime = isPdf ? 'application/pdf' : 'image/jpeg';
@@ -210,7 +211,7 @@ async function uploadPhoto(entryId, file, photoType) {
       try {
         const b64 = e.target.result.split(',')[1];
         const result = await api.uploadPhoto(entryId, {
-          data: b64, filename: file.name, photo_type: photoType, mime
+          data: b64, filename: file.name, photo_type: photoType, mime, name_hint: nameHint
         });
         resolve(result);
       } catch (err) { reject(err); }
@@ -250,14 +251,15 @@ function buildPhotoSection(photoType, label, photos, opts = {}) {
 
 function buildPhotoGallery(photos) {
   if (!photos || !photos.length) return '';
-  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues', add_info: 'Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', equipment_left: 'Equipment Left', new_serial: 'New Serials' };
+  const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues', add_info: 'Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', equipment_left: 'Equipment Left', new_serial: 'New Serials', material: 'Materials', return_track: 'Return Track', signature: 'Signatures' };
   const grouped = {};
   photos.forEach(p => { if (!grouped[p.photo_type]) grouped[p.photo_type] = []; grouped[p.photo_type].push(p); });
+  const typeLabel = t => LABELS[t] || (t.startsWith('cf_') ? t.slice(3) : t);
   return `<div class="det-photo-section">
     <div class="subsection-label" style="margin:12px 0 8px;">Photos</div>
     ${Object.entries(grouped).map(([type, list]) => `
       <div style="margin-bottom:10px;">
-        <div class="photo-section-label">${LABELS[type] || type}</div>
+        <div class="photo-section-label">${escHtml(typeLabel(type))}</div>
         <div class="photo-gallery-row">
           ${list.map(p => isPdfFile(p)
             ? `<a href="${escHtml(p.url)}" target="_blank" class="photo-gallery-item photo-gallery-pdf" title="${escHtml(p.original_name || 'PDF')}">${svg('file')}<span>PDF</span></a>`
@@ -586,6 +588,7 @@ function renderIdleClockPage() {
           <div class="toggle-group" id="pay-type-toggle">
             <button class="toggle-btn active" data-type="hourly">Hourly</button>
             <button class="toggle-btn" data-type="flat">Flat</button>
+            <button class="toggle-btn" data-type="none">Non-Billable</button>
           </div>
         </div>
         <div class="form-group" id="hourly-rate-group">
@@ -629,8 +632,8 @@ function renderIdleClockPage() {
     if (!btn) return;
     rateType = btn.dataset.type;
     document.querySelectorAll('#pay-type-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
-    document.getElementById('hourly-rate-group').classList.toggle('hidden', rateType === 'flat');
-    document.getElementById('flat-rate-group').classList.toggle('hidden', rateType === 'hourly');
+    document.getElementById('hourly-rate-group').classList.toggle('hidden', rateType !== 'hourly');
+    document.getElementById('flat-rate-group').classList.toggle('hidden', rateType !== 'flat');
   });
 
   let geoCoords = null;
@@ -1009,11 +1012,13 @@ function renderActiveClockPage() {
         <span class="dot"></span>${onBreak ? 'ON BREAK' : 'WORKING'}
       </div>
       <div class="elapsed-time" id="elapsed-display">00:00:00</div>
-      ${isFlat && entry.flat_amount
-        ? `<div class="earnings-display">${fmtMoney(entry.flat_amount)}</div><div class="earning-rate">Flat Rate</div>`
-        : entry.hourly_rate
-          ? `<div class="earnings-display" id="earnings-display">${fmtMoney(0)}</div><div class="earning-rate">${sym}${entry.hourly_rate}/hr</div>`
-          : ''}
+      ${entry.rate_type === 'none'
+        ? `<div class="earning-rate" style="margin-top:4px;">Non-Billable Visit</div>`
+        : isFlat && entry.flat_amount
+          ? `<div class="earnings-display">${fmtMoney(entry.flat_amount)}</div><div class="earning-rate">Flat Rate</div>`
+          : entry.hourly_rate
+            ? `<div class="earnings-display" id="earnings-display">${fmtMoney(0)}</div><div class="earning-rate">${sym}${entry.hourly_rate}/hr</div>`
+            : ''}
       ${onBreak ? `<div class="break-timer">Break: <span id="break-elapsed">00:00:00</span></div>` : ''}
       <div class="clock-meta">
         ${svg('clock')} Started ${fmtTime(entry.clock_in)}
@@ -1148,6 +1153,8 @@ function renderActiveClockPage() {
       <div id="photos-sign-off" class="photo-sections-group">
         <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
+      <div id="custom-photo-sections"></div>
+      <button class="btn btn-ghost btn-sm" id="add-custom-photo-field" style="margin-top:6px;">${svg('plus')} Add Picture Field</button>
       <div class="divider"></div>
       <div class="form-group" style="margin-bottom:8px;">
         <div class="toggle-row">
@@ -1174,6 +1181,10 @@ function renderActiveClockPage() {
           <label class="form-label">Return Track #</label>
           <div class="input-row">
             <input type="text" class="form-control" id="jd-return-track" value="${escHtml(entry.return_track||'')}" ${entry.no_return_track?'disabled':''}>
+            <label class="btn btn-ghost btn-sm" title="Add Return Track photo" style="flex-shrink:0;">
+              ${svg('camera')}
+              <input type="file" accept="image/*" class="visually-hidden" id="jd-return-photo-inp">
+            </label>
             <button class="btn btn-ghost btn-sm" id="no-return-btn" style="white-space:nowrap;">${entry.no_return_track?'Undo N/a':'No Return'}</button>
           </div>
           <div id="no-return-label" class="${entry.no_return_track?'':'hidden'} field-hint" style="color:var(--orange);">⚠ Marked as N/a</div>
@@ -1332,6 +1343,32 @@ function renderActiveClockPage() {
   wireSectionToggle('jd-addinfo-toggle', 'photos-addinfo-wrap');
   wireSectionToggle('jd-equipment-toggle', 'photos-equipment-wrap');
 
+  // Return Track photo
+  document.getElementById('jd-return-photo-inp')?.addEventListener('change', async e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      await uploadPhoto(entry.id, file, 'return_track', 'Return-Track');
+      showToast('Return track photo saved', 'success');
+    } catch (err) { showToast(err.message || 'Upload failed', 'error'); }
+    e.target.value = '';
+  });
+
+  // Custom picture fields
+  document.getElementById('add-custom-photo-field')?.addEventListener('click', async () => {
+    const name = (prompt('Picture field name:') || '').trim();
+    if (!name) return;
+    const fields = getCustomPhotoFields();
+    if (fields.some(f => f.toLowerCase() === name.toLowerCase())) { showToast('Field already exists', 'error'); return; }
+    fields.push(name);
+    try {
+      await api.saveSettings({ custom_photo_fields: JSON.stringify(fields) });
+      state.settings.custom_photo_fields = JSON.stringify(fields);
+      await autoSaveActiveForm();
+      renderActiveClockPage();
+    } catch (err) { showToast(err.message || 'Failed to add field', 'error'); }
+  });
+
   // Replacement toggle
   let noReturn = !!entry.no_return_track;
   document.getElementById('jd-replacement').addEventListener('change', e => {
@@ -1352,7 +1389,7 @@ function renderActiveClockPage() {
     try {
       const photos = await api.getPhotos(entry.id);
       const grouped = { before: [], serial_before: [], issues: [], add_info: [], after: [], work_order: [], sign_off: [], equipment_left: [], new_serial: [] };
-      photos.forEach(p => { if (grouped[p.photo_type] !== undefined) grouped[p.photo_type].push(p); });
+      photos.forEach(p => { (grouped[p.photo_type] = grouped[p.photo_type] || []).push(p); });
       document.getElementById('photos-before').innerHTML =
         buildPhotoSection('before', 'Before Photo', grouped.before) +
         buildPhotoSection('serial_before', 'Serial Numbers', grouped.serial_before);
@@ -1370,6 +1407,16 @@ function renderActiveClockPage() {
         buildPhotoSection('equipment_left', 'Equipment Left', grouped.equipment_left);
       document.getElementById('photos-new-serial').innerHTML =
         buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
+      // User-defined custom picture fields (stored in settings)
+      const customFields = getCustomPhotoFields();
+      const customBox = document.getElementById('custom-photo-sections');
+      if (customBox) {
+        customBox.innerHTML = customFields.map(name => `
+          <div class="divider"></div>
+          <div class="subsection-label">${escHtml(name)}</div>
+          <div class="photo-sections-group">${buildPhotoSection('cf_' + name, name, grouped['cf_' + name] || [])}</div>`
+        ).join('');
+      }
       // Auto-expand collapsed sections that already have content
       const autoExpand = (list, toggleId, wrapId) => {
         if (!list.length) return;
@@ -1414,7 +1461,7 @@ function renderActiveClockPage() {
   });
 
   // Materials add
-  setupMaterialsUI(mats);
+  setupMaterialsUI(mats, entry.id);
 
   // Reimbursements save
   document.getElementById('save-reimb-btn').addEventListener('click', () => {
@@ -1438,7 +1485,7 @@ async function saveSection(entry, data) {
 }
 
 /* ── Materials helpers ───────────────────────────────────────────── */
-function buildMaterialRow(index, name='', price='') {
+function buildMaterialRow(index, name='', price='', withPhoto=false) {
   const sym = state.settings.currency_symbol || '$';
   return `<div class="material-row" data-index="${index}">
     <input type="text" class="form-control mat-name" placeholder="Material name" value="${escHtml(name)}" style="flex:2;min-width:0;">
@@ -1446,11 +1493,16 @@ function buildMaterialRow(index, name='', price='') {
       <span class="money-sym">${sym}</span>
       <input type="number" class="form-control mat-price" placeholder="0.00" value="${escHtml(String(price))}" min="0" step="0.01">
     </div>
+    ${withPhoto ? `
+    <label class="btn btn-ghost btn-sm mat-photo-btn" style="flex-shrink:0;" title="Add photo of this material">
+      ${svg('camera')}
+      <input type="file" accept="image/*" class="visually-hidden mat-photo-inp">
+    </label>` : ''}
     <button class="btn btn-ghost btn-sm remove-mat" style="color:var(--red);flex-shrink:0;" title="Remove">${svg('trash')}</button>
   </div>`;
 }
 
-function setupMaterialsUI(existing) {
+function setupMaterialsUI(existing, photoEntryId = null) {
   let rows = existing.map(m => ({ name: m.name || '', price: m.price || '' }));
   const list = document.getElementById('materials-list');
   if (!list) return;
@@ -1466,10 +1518,25 @@ function setupMaterialsUI(existing) {
 
   const rerender = () => {
     syncFromDOM();
-    list.innerHTML = rows.map((m, i) => buildMaterialRow(i, m.name, m.price)).join('');
+    list.innerHTML = rows.map((m, i) => buildMaterialRow(i, m.name, m.price, !!photoEntryId)).join('');
     list.querySelectorAll('.remove-mat').forEach((btn, i) => {
       btn.addEventListener('click', () => { syncFromDOM(); rows.splice(i, 1); rerender(); });
     });
+    if (photoEntryId) {
+      list.querySelectorAll('.mat-photo-inp').forEach((inp, i) => {
+        inp.addEventListener('change', async e => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          syncFromDOM();
+          const matName = rows[i]?.name || `Item-${i + 1}`;
+          try {
+            await uploadPhoto(photoEntryId, file, 'material', `Material-${matName}`);
+            showToast(`Photo saved for "${matName}"`, 'success');
+          } catch (err) { showToast(err.message || 'Upload failed', 'error'); }
+          e.target.value = '';
+        });
+      });
+    }
   };
 
   rerender();
@@ -1481,6 +1548,13 @@ function setupMaterialsUI(existing) {
     const newRow = list.querySelectorAll('.material-row');
     newRow[newRow.length - 1]?.querySelector('.mat-name')?.focus();
   });
+}
+
+function getCustomPhotoFields() {
+  try {
+    const arr = JSON.parse(state.settings.custom_photo_fields || '[]');
+    return Array.isArray(arr) ? arr.filter(n => typeof n === 'string' && n.trim()) : [];
+  } catch { return []; }
 }
 
 /* ── Multi-value inputs (tickets, MODs) — stored comma-joined ────── */
@@ -1789,6 +1863,22 @@ function showFinalReview(entry, coData) {
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
+      <div class="divider" style="margin:10px 0;"></div>
+      <div class="subsection-label">Manager Signature <span class="opt-label">optional</span></div>
+      <div class="form-group" style="margin-top:6px;">
+        <div class="input-row">
+          <select class="form-control" id="fr-sig-mod" style="flex:1;">
+            ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+            <option value="__other__">+ Other person...</option>
+          </select>
+        </div>
+        <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
+      </div>
+      <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:120px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
+      <div class="input-row" style="margin-top:4px;">
+        <span class="field-hint" id="fr-sig-hint" style="flex:1;">Sign above with finger or mouse</span>
+        <button class="btn btn-ghost btn-sm" id="fr-sig-clear">Clear</button>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
@@ -1799,19 +1889,65 @@ function showFinalReview(entry, coData) {
     showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
   );
 
+  // Signature pad
+  let sigDrawn = false;
+  const sigCanvas = document.getElementById('fr-sig-pad');
+  const sigCtx = sigCanvas.getContext('2d');
+  sigCtx.lineWidth = 2.5; sigCtx.lineCap = 'round'; sigCtx.strokeStyle = '#1a2433';
+  const sigPos = e => {
+    const r = sigCanvas.getBoundingClientRect();
+    const p = e.touches ? e.touches[0] : e;
+    return { x: (p.clientX - r.left) * (sigCanvas.width / r.width), y: (p.clientY - r.top) * (sigCanvas.height / r.height) };
+  };
+  let sigActive = false;
+  const sigStart = e => { e.preventDefault(); sigActive = true; const { x, y } = sigPos(e); sigCtx.beginPath(); sigCtx.moveTo(x, y); };
+  const sigMove = e => { if (!sigActive) return; e.preventDefault(); const { x, y } = sigPos(e); sigCtx.lineTo(x, y); sigCtx.stroke(); sigDrawn = true; };
+  const sigEnd = () => { sigActive = false; };
+  sigCanvas.addEventListener('mousedown', sigStart); sigCanvas.addEventListener('mousemove', sigMove);
+  window.addEventListener('mouseup', sigEnd);
+  sigCanvas.addEventListener('touchstart', sigStart, { passive: false });
+  sigCanvas.addEventListener('touchmove', sigMove, { passive: false });
+  sigCanvas.addEventListener('touchend', sigEnd);
+  document.getElementById('fr-sig-clear').addEventListener('click', () => {
+    sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+    sigDrawn = false;
+  });
+  document.getElementById('fr-sig-mod').addEventListener('change', e => {
+    document.getElementById('fr-sig-name').classList.toggle('hidden', e.target.value !== '__other__');
+  });
+
   document.getElementById('fr-confirm-btn').addEventListener('click', async () => {
     try {
-      const totalExp = labor + travel + parking;
+      // Manager signature (uploaded before clock-out, file: MOD-{Name}-Signature.png)
+      let modNameFinal = coData.modName || entry.mod_name;
+      if (sigDrawn) {
+        const modSel = document.getElementById('fr-sig-mod').value;
+        const signer = modSel === '__other__'
+          ? (document.getElementById('fr-sig-name').value.trim() || 'Manager')
+          : (modSel || 'Manager');
+        if (modSel === '__other__' && signer !== 'Manager' && !splitMulti(modNameFinal).includes(signer)) {
+          modNameFinal = splitMulti(modNameFinal).concat(signer).join(', ');
+        }
+        try {
+          const dataUrl = sigCanvas.toDataURL('image/png');
+          await api.uploadPhoto(entry.id, {
+            data: dataUrl.split(',')[1],
+            filename: `MOD-${signer}-Signature.png`,
+            photo_type: 'signature',
+            mime: 'image/png',
+            name_hint: `MOD-${signer}-Signature`,
+          });
+        } catch (err) { showToast('Signature upload failed: ' + err.message, 'error'); }
+      }
       const completed = await api.clockOut(entry.id, {
         clock_out:        coData.clockOutISO,
         status:           coData.status,
         work_summary:     coData.workSummary,
         assignment_id:    coData.assignId,
-        mod_name:         coData.modName || entry.mod_name,
+        mod_name:         modNameFinal,
         release_code:     coData.releaseCode,
         no_release_code:  coData.noCode,
         revisit_required: coData.revisit ? 1 : 0,
-        received_pay:     totalExp,
       });
       state.currentEntry = null;
       state.lastCompletedEntry = completed;
@@ -2824,8 +2960,8 @@ function openEntryDetail(entry) {
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
       <div class="review-row"><span>Clock Out:</span><span>${fmtTime(entry.clock_out)}</span></div>
       <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
-      <div class="review-row"><span>Pay Type:</span><span>${entry.rate_type === 'flat' ? 'Flat' : 'Hourly'}</span></div>
-      ${entry.rate_type !== 'flat' ? `<div class="review-row"><span>Rate:</span><span>${sym}${entry.hourly_rate||'—'}/hr</span></div>` : ''}
+      <div class="review-row"><span>Pay Type:</span><span>${entry.rate_type === 'flat' ? 'Flat' : entry.rate_type === 'none' ? 'Non-Billable' : 'Hourly'}</span></div>
+      ${entry.rate_type === 'hourly' || !entry.rate_type ? `<div class="review-row"><span>Rate:</span><span>${sym}${entry.hourly_rate||'—'}/hr</span></div>` : ''}
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
       ${entry.travel_reimb ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(entry.travel_reimb)}</span></div>` : ''}
       ${entry.parking_tolls ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(entry.parking_tolls)}</span></div>` : ''}
