@@ -400,6 +400,9 @@ function showTextModal(text) {
 }
 
 function startElapsedTimer(entry) {
+  // renderActiveClockPage re-renders often (banners, saves, back-to-work) —
+  // always kill the previous interval or stale snapshots fight over the display
+  clearInterval(state.elapsedInterval);
   const isFlat = entry.rate_type === 'flat';
   const update = () => {
     const onBreak = !!entry.active_break;
@@ -425,6 +428,7 @@ function startElapsedTimer(entry) {
 }
 
 function startBreakElapsedTimer(breakStart) {
+  clearInterval(state.breakElapsedInterval);
   const update = () => {
     const el = document.getElementById('break-elapsed');
     if (el) el.textContent = fmtDuration(Math.floor((Date.now() - new Date(breakStart)) / 1000));
@@ -870,12 +874,14 @@ function openPlannedScheduleModal(applyPlannedJob) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="ps-close">Close</button>
+      <button class="btn btn-secondary" id="ps-revisit">${svg('return')} Plan Revisit</button>
       <button class="btn btn-primary" id="ps-add">${svg('plus')} Plan a Job</button>
     </div>`);
 
   document.getElementById('ps-x').addEventListener('click', closeModal);
   document.getElementById('ps-close').addEventListener('click', closeModal);
   document.getElementById('ps-add').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
+  document.getElementById('ps-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
 
   document.querySelectorAll('.ps-start').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -893,6 +899,42 @@ function openPlannedScheduleModal(applyPlannedJob) {
         closeModal();
         renderIdleClockPage();
       } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  });
+}
+
+/* ── Pick a completed WO to plan a revisit from ──────────────────── */
+async function openPickWoForRevisitModal() {
+  let entries = [];
+  try {
+    entries = (await api.getEntries()).filter(e => e.clock_out).slice(0, 30);
+  } catch { /* empty list below */ }
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('return')} Plan Revisit</h3>
+      <button class="btn btn-ghost btn-sm" id="pw-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint" style="margin-bottom:8px;">Pick the original work order:</div>
+      ${entries.length ? entries.map(e => `
+        <div class="card pw-item" data-id="${e.id}" style="padding:8px 10px;margin-bottom:6px;cursor:pointer;">
+          <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</div>
+          <div class="field-hint">${escHtml(fmtDateShort(e.clock_in))}${e.org_name ? ' · ' + escHtml(e.org_name) : ''}${e.client_name ? ' · ' + escHtml(e.client_name) : ''}</div>
+        </div>`).join('') : '<div class="empty-state">No completed work orders yet</div>'}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pw-cancel">Cancel</button>
+    </div>`);
+
+  document.getElementById('pw-x').addEventListener('click', closeModal);
+  document.getElementById('pw-cancel').addEventListener('click', closeModal);
+  document.querySelectorAll('.pw-item').forEach(card => {
+    card.addEventListener('click', () => {
+      const en = entries.find(e => e.id === Number(card.dataset.id));
+      if (!en) return;
+      closeModal();
+      openRevisitModal(en);
     });
   });
 }
@@ -1674,8 +1716,17 @@ function renderActiveClockPage() {
       <div id="photos-sign-off" class="photo-sections-group">
         <div class="photo-section-loading">${svg('camera')} Loading…</div>
       </div>
-      <div id="custom-photo-sections"></div>
-      <button class="btn btn-ghost btn-sm" id="add-custom-photo-field" style="margin-top:6px;">${svg('plus')} Add Picture Field</button>
+      <div class="divider"></div>
+      <div class="form-group" style="margin-bottom:8px;">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Custom Pictures?</label>
+          <label class="switch"><input type="checkbox" id="jd-custom-pics-toggle"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="custom-pics-wrap" class="hidden">
+        <div id="custom-photo-sections"></div>
+        <button class="btn btn-ghost btn-sm" id="add-custom-photo-field" style="margin-top:6px;">${svg('plus')} Add Picture Field</button>
+      </div>
       <div class="divider"></div>
       <div class="form-group" style="margin-bottom:8px;">
         <div class="toggle-row">
@@ -1864,6 +1915,15 @@ function renderActiveClockPage() {
   wireSectionToggle('jd-addinfo-toggle', 'photos-addinfo-wrap');
   wireSectionToggle('jd-equipment-toggle', 'photos-equipment-wrap');
 
+  // Custom pictures toggle — first activation with no fields asks for a name
+  document.getElementById('jd-custom-pics-toggle')?.addEventListener('change', e => {
+    state.customPicsOpen = e.target.checked;
+    document.getElementById('custom-pics-wrap')?.classList.toggle('hidden', !e.target.checked);
+    if (e.target.checked && getCustomPhotoFields().length === 0) {
+      document.getElementById('add-custom-photo-field')?.click();
+    }
+  });
+
   // Return Track photo
   document.getElementById('jd-return-photo-inp')?.addEventListener('change', async e => {
     const file = e.target.files?.[0];
@@ -1933,10 +1993,15 @@ function renderActiveClockPage() {
       const customBox = document.getElementById('custom-photo-sections');
       if (customBox) {
         customBox.innerHTML = customFields.map(name => `
-          <div class="divider"></div>
-          <div class="subsection-label">${escHtml(name)}</div>
+          <div class="subsection-label" style="margin-top:8px;">${escHtml(name)}</div>
           <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
         ).join('');
+        const hasCfPhotos = Object.keys(grouped).some(k => k.startsWith('cf_') && grouped[k].length);
+        if (hasCfPhotos || state.customPicsOpen) {
+          const t = document.getElementById('jd-custom-pics-toggle');
+          if (t) t.checked = true;
+          document.getElementById('custom-pics-wrap')?.classList.remove('hidden');
+        }
       }
       // Auto-expand collapsed sections that already have content
       const autoExpand = (list, toggleId, wrapId) => {
@@ -2189,7 +2254,7 @@ async function initiateClockOut(entry) {
         ${!modName ? `
         <div class="form-group">
           <label class="form-label">MOD Name</label>
-          <input type="text" class="form-control" id="mf-mod" placeholder="Manager on duty (comma-separate several)">
+          ${buildMultiInputs('mf-mods', '', 'Manager on duty')}
         </div>` : ''}
         ${otherMissing.length ? `
         <p style="color:var(--text2);margin-bottom:8px;">Also empty:</p>
@@ -2203,9 +2268,10 @@ async function initiateClockOut(entry) {
         </button>
       </div>`);
 
+    wireMultiInputs('mf-mods');
     document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
     document.getElementById('co-continue-btn').addEventListener('click', async () => {
-      const modName2 = modName || document.getElementById('mf-mod')?.value.trim() || '';
+      const modName2 = modName || (document.getElementById('mf-mods') ? readMultiInputs('mf-mods') : null) || '';
       if (!modName && !modName2 && !otherMissing.length) {
         showToast('Enter the MOD name or go back', 'error');
         return;
@@ -2451,12 +2517,12 @@ function showSignatureModal(entry, coData) {
       </div>
       <div class="input-row" style="margin-top:4px;">
         <span class="field-hint" id="fr-sig-hint" style="flex:1;">Sign above with finger or mouse</span>
+        <button class="btn btn-ghost btn-sm" id="fr-sig-none" style="font-size:12px;">No Signature</button>
         <button class="btn btn-ghost btn-sm" id="fr-sig-clear">Clear</button>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-sig-back">← Back</button>
-      <button class="btn btn-ghost" id="fr-sig-none">No Signature</button>
       <button class="btn btn-danger" id="fr-sig-done">${svg('check')} Clock Out</button>
     </div>`);
 
