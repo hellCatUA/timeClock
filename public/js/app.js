@@ -254,7 +254,7 @@ function buildPhotoGallery(photos) {
   const LABELS = { before: 'Before', serial_before: 'Serial Numbers', issues: 'Issues', add_info: 'Add. Info', after: 'After', work_order: 'Work Order', sign_off: 'Sign Off', equipment_left: 'Equipment Left', new_serial: 'New Serials', material: 'Materials', return_track: 'Return Track', signature: 'Signatures' };
   const grouped = {};
   photos.forEach(p => { if (!grouped[p.photo_type]) grouped[p.photo_type] = []; grouped[p.photo_type].push(p); });
-  const typeLabel = t => LABELS[t] || (t.startsWith('cf_') ? t.slice(3) : t);
+  const typeLabel = t => LABELS[t] || (t.startsWith('cf_') ? cfLabel(t) : t);
   return `<div class="det-photo-section">
     <div class="subsection-label" style="margin:12px 0 8px;">Photos</div>
     ${Object.entries(grouped).map(([type, list]) => `
@@ -297,10 +297,11 @@ function setupPictureSectionEvents(picSection, entryId) {
     const photoType = inp.dataset.type;
     const label = inp.closest('.photo-section')?.querySelector('.photo-section-label')?.textContent || photoType;
     const thumbsDiv = picSection.querySelector(`[data-thumbs="${photoType}"]`);
+    const nameHint = photoType.startsWith('cf_') ? photoType.slice(3) : null;
     inp.disabled = true;
     for (const file of files) {
       try {
-        const photo = await uploadPhoto(entryId, file, photoType);
+        const photo = await uploadPhoto(entryId, file, photoType, nameHint);
         thumbsDiv?.insertAdjacentHTML('beforeend', buildPhotoThumb(photo, label));
         showToast('Photo uploaded', 'success');
       } catch (err) {
@@ -522,7 +523,7 @@ async function renderClockPage() {
   try { state.currentTrip = await api.getCurrentTrip(); } catch { state.currentTrip = null; }
   if (state.currentEntry) renderActiveClockPage();
   else if (state.currentTrip) renderActiveTripPage();
-  else if (state.lastCompletedEntry) renderSummaryPage(state.lastCompletedEntry);
+  else if (state.lastCompletedEntry && !state.pendingRevisit) renderSummaryPage(state.lastCompletedEntry);
   else renderIdleClockPage();
 }
 
@@ -727,6 +728,28 @@ async function renderIdleClockPage() {
     });
   });
 
+  // Revisit prefill (set by openRevisitModal)
+  if (state.pendingRevisit) {
+    const rv = state.pendingRevisit;
+    state.pendingRevisit = null;
+    if (rv.wo_title)        document.getElementById('wo-title-input').value = rv.wo_title;
+    if (rv.project_id)      document.getElementById('project-select').value = String(rv.project_id);
+    if (rv.organization_id) document.getElementById('company-select').value = String(rv.organization_id);
+    if (rv.client_id)       document.getElementById('customer-select').value = String(rv.client_id);
+    if (rv.address)         document.getElementById('addr-input').value = rv.address;
+    if (rv.rate_type)       setRateType(rv.rate_type);
+    if (rv.pay_rate_id)     document.getElementById('rate-select').value = String(rv.pay_rate_id);
+    if (rv.flat_amount != null && rv.flat_amount !== '') document.getElementById('flat-amount-input').value = rv.flat_amount;
+    if (rv.travel_reimb != null && rv.travel_reimb !== '') document.getElementById('travel-reimb-input').value = rv.travel_reimb;
+    ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name'].forEach(k => {
+      if (rv[k]) prefillExtras[k] = rv[k];
+    });
+    setTimeout(() => {
+      document.getElementById('clock-in-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 50);
+    showToast('Revisit pre-filled — pick a clock-in time to start', 'success');
+  }
+
   let geoCoords = null;
   document.getElementById('geo-btn').addEventListener('click', async () => {
     const statusEl = document.getElementById('geo-status');
@@ -778,6 +801,11 @@ async function renderIdleClockPage() {
         travel_reimb:    travel,
         assignment_id:   state.pendingTripAssignment || prefillExtras.assignment_id || null,
         site_id:         prefillExtras.site_id || null,
+        ticket_num:      prefillExtras.ticket_num || null,
+        inc_num:         prefillExtras.inc_num || null,
+        mod_name:        prefillExtras.mod_name || null,
+        noc_name:        prefillExtras.noc_name || null,
+        pm_pc_name:      prefillExtras.pm_pc_name || null,
         project_id:      projectSel ? Number(projectSel) : null,
         status:          'pending',
       });
@@ -996,6 +1024,103 @@ function openProjectsModal() {
       showToast('Project created', 'success');
       renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+  });
+}
+
+/* ── Revisit modal ───────────────────────────────────────────────── */
+function openRevisitModal(entry) {
+  // Fields importable from the original WO. Address/Company/Customer/Site ID
+  // are on by default; the rest is opt-in.
+  const FIELDS = [
+    { key: 'address',         label: 'Address',        def: true,  has: !!entry.address },
+    { key: 'organization_id', label: 'Company',        def: true,  has: !!entry.organization_id },
+    { key: 'client_id',       label: 'Customer',       def: true,  has: !!entry.client_id },
+    { key: 'site_id',         label: 'Site ID',        def: true,  has: !!entry.site_id },
+    { key: 'wo_title',        label: 'WO Title',       def: false, has: !!entry.wo_title },
+    { key: 'project_id',      label: 'Project',        def: false, has: !!entry.project_id },
+    { key: 'pay',             label: 'Pay Type & Rate',def: false, has: true },
+    { key: 'travel_reimb',    label: 'Travel Reimb',   def: false, has: entry.travel_reimb != null && entry.travel_reimb !== '' },
+    { key: 'ticket_num',      label: 'Ticket #',       def: false, has: !!entry.ticket_num },
+    { key: 'inc_num',         label: 'INC #',          def: false, has: !!entry.inc_num },
+    { key: 'mod_name',        label: 'MOD Name',       def: false, has: !!entry.mod_name },
+    { key: 'noc_name',        label: 'NOC Name',       def: false, has: !!entry.noc_name },
+    { key: 'pm_pc_name',      label: 'PM/PC Name',     def: false, has: !!entry.pm_pc_name },
+  ].filter(f => f.has);
+
+  const hasAssign = !!entry.assignment_id;
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('return')} Revisit</h3>
+      <button class="btn btn-ghost btn-sm" id="rv-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint" style="margin-bottom:10px;">New WO based on <b>${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</b> — pick what to carry over:</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-bottom:12px;">
+        ${FIELDS.map(f => `
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" class="rv-field" data-key="${f.key}" ${f.def ? 'checked' : ''}> ${escHtml(f.label)}
+          </label>`).join('')}
+      </div>
+      <div class="divider"></div>
+      <div class="form-group" style="margin-top:10px;">
+        <label class="form-label">Assignment ID</label>
+        ${hasAssign ? `
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;cursor:pointer;">
+          <input type="radio" name="rv-assign-mode" value="same" checked>
+          Same as original → <b>${escHtml(entry.assignment_id)}-R</b>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:6px;cursor:pointer;">
+          <input type="radio" name="rv-assign-mode" value="new"> New Assignment ID:
+        </label>` : ''}
+        <input type="text" class="form-control ${hasAssign ? 'hidden' : ''}" id="rv-assign-input" placeholder="e.g. 171624976">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="rv-cancel">Cancel</button>
+      <button class="btn btn-primary" id="rv-go">${svg('clock')} Continue to Clock In</button>
+    </div>`);
+
+  document.getElementById('rv-x').addEventListener('click', closeModal);
+  document.getElementById('rv-cancel').addEventListener('click', closeModal);
+
+  document.querySelectorAll('input[name="rv-assign-mode"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const isNew = document.querySelector('input[name="rv-assign-mode"]:checked')?.value === 'new';
+      document.getElementById('rv-assign-input').classList.toggle('hidden', !isNew);
+      if (isNew) document.getElementById('rv-assign-input').focus();
+    });
+  });
+
+  document.getElementById('rv-go').addEventListener('click', () => {
+    const picked = new Set([...document.querySelectorAll('.rv-field:checked')].map(c => c.dataset.key));
+    const rv = {};
+    if (picked.has('address'))         rv.address = entry.address;
+    if (picked.has('organization_id')) rv.organization_id = entry.organization_id;
+    if (picked.has('client_id'))       rv.client_id = entry.client_id;
+    if (picked.has('site_id'))         rv.site_id = entry.site_id;
+    if (picked.has('wo_title'))        rv.wo_title = entry.wo_title;
+    if (picked.has('project_id'))      rv.project_id = entry.project_id;
+    if (picked.has('travel_reimb'))    rv.travel_reimb = entry.travel_reimb;
+    if (picked.has('ticket_num'))      rv.ticket_num = entry.ticket_num;
+    if (picked.has('inc_num'))         rv.inc_num = entry.inc_num;
+    if (picked.has('mod_name'))        rv.mod_name = entry.mod_name;
+    if (picked.has('noc_name'))        rv.noc_name = entry.noc_name;
+    if (picked.has('pm_pc_name'))      rv.pm_pc_name = entry.pm_pc_name;
+    if (picked.has('pay')) {
+      rv.rate_type = entry.rate_type || 'hourly';
+      rv.pay_rate_id = entry.pay_rate_id;
+      rv.flat_amount = entry.flat_amount;
+    }
+    const mode = document.querySelector('input[name="rv-assign-mode"]:checked')?.value;
+    if (hasAssign && mode === 'same') {
+      rv.assignment_id = `${entry.assignment_id}-R`;
+    } else {
+      rv.assignment_id = document.getElementById('rv-assign-input').value.trim() || null;
+    }
+    state.pendingRevisit = rv;
+    closeModal();
+    navigateTo('clock');
   });
 }
 
@@ -1708,7 +1833,7 @@ function renderActiveClockPage() {
         customBox.innerHTML = customFields.map(name => `
           <div class="divider"></div>
           <div class="subsection-label">${escHtml(name)}</div>
-          <div class="photo-sections-group">${buildPhotoSection('cf_' + name, name, grouped['cf_' + name] || [])}</div>`
+          <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
         ).join('');
       }
       // Auto-expand collapsed sections that already have content
@@ -1849,6 +1974,15 @@ function getCustomPhotoFields() {
     const arr = JSON.parse(state.settings.custom_photo_fields || '[]');
     return Array.isArray(arr) ? arr.filter(n => typeof n === 'string' && n.trim()) : [];
   } catch { return []; }
+}
+// photo_type must be id/filename-safe — spaces in field names broke the
+// file input label binding and produced URLs the server 404'd on
+function cfSlug(name) {
+  return 'cf_' + String(name).trim().replace(/[^\w-]+/g, '_');
+}
+function cfLabel(type) {
+  const match = getCustomPhotoFields().find(f => cfSlug(f) === type);
+  return match || type.slice(3).replace(/_/g, ' ');
 }
 
 /* ── Multi-value inputs (tickets, MODs) — stored comma-joined ────── */
@@ -2202,18 +2336,21 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
       <div class="divider" style="margin:10px 0;"></div>
       <div class="subsection-label">Manager Signature <span class="opt-label">optional</span></div>
-      <div class="form-group" style="margin-top:6px;">
-        <div class="input-row">
-          <select class="form-control" id="fr-sig-mod" style="flex:1;">
-            ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
-            <option value="__other__">+ Other person...</option>
-          </select>
+      <div id="fr-sig-area">
+        <div class="form-group" style="margin-top:6px;">
+          <div class="input-row">
+            <select class="form-control" id="fr-sig-mod" style="flex:1;">
+              ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+              <option value="__other__">+ Other person...</option>
+            </select>
+          </div>
+          <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
         </div>
-        <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
+        <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:120px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
       </div>
-      <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:120px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
       <div class="input-row" style="margin-top:4px;">
         <span class="field-hint" id="fr-sig-hint" style="flex:1;">Sign above with finger or mouse</span>
+        <button class="btn btn-ghost btn-sm" id="fr-sig-none">No Signature</button>
         <button class="btn btn-ghost btn-sm" id="fr-sig-clear">Clear</button>
       </div>
     </div>
@@ -2252,12 +2389,22 @@ function showFinalReview(entry, coData) {
   document.getElementById('fr-sig-mod').addEventListener('change', e => {
     document.getElementById('fr-sig-name').classList.toggle('hidden', e.target.value !== '__other__');
   });
+  let sigSkipped = false;
+  document.getElementById('fr-sig-none').addEventListener('click', () => {
+    sigSkipped = !sigSkipped;
+    document.getElementById('fr-sig-area').classList.toggle('hidden', sigSkipped);
+    document.getElementById('fr-sig-clear').classList.toggle('hidden', sigSkipped);
+    document.getElementById('fr-sig-hint').textContent = sigSkipped
+      ? 'No signature will be attached'
+      : 'Sign above with finger or mouse';
+    document.getElementById('fr-sig-none').textContent = sigSkipped ? 'Add Signature' : 'No Signature';
+  });
 
   document.getElementById('fr-confirm-btn').addEventListener('click', async () => {
     try {
       // Manager signature (uploaded before clock-out, file: MOD-{Name}-Signature.png)
       let modNameFinal = coData.modName || entry.mod_name;
-      if (sigDrawn) {
+      if (sigDrawn && !sigSkipped) {
         const modSel = document.getElementById('fr-sig-mod').value;
         const signer = modSel === '__other__'
           ? (document.getElementById('fr-sig-name').value.trim() || 'Manager')
@@ -3318,6 +3465,7 @@ function openEntryDetail(entry) {
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
       <a class="btn btn-ghost btn-sm" href="${api.getEntryZipUrl(entry.id)}" download>${svg('download')} Export ZIP</a>
+      ${entry.clock_out ? `<button class="btn btn-secondary btn-sm" id="det-revisit-btn">${svg('return')} Revisit</button>` : ''}
       <button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>
     </div>`);
 
@@ -3326,6 +3474,10 @@ function openEntryDetail(entry) {
     copyToClipboard(buildTextReport(entry));
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
+  document.getElementById('det-revisit-btn')?.addEventListener('click', () => {
+    if (state.currentEntry) { showToast('Clock out of the current job first', 'error'); return; }
+    openRevisitModal(entry);
+  });
 
   (async () => {
     const photosDiv = document.getElementById('det-photos');
