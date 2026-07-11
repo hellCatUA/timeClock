@@ -49,6 +49,17 @@ const api = (() => {
     updatePayRate:      (id, d)  => req('PUT',    `/api/pay-rates/${id}`, d),
     deletePayRate:      (id)     => req('DELETE', `/api/pay-rates/${id}`),
 
+    // Projects
+    getProjects:        ()       => req('GET',    '/api/projects'),
+    createProject:      (d)      => req('POST',   '/api/projects', d),
+    updateProject:      (id, d)  => req('PUT',    `/api/projects/${id}`, d),
+    deleteProject:      (id)     => req('DELETE', `/api/projects/${id}`),
+
+    // Planned jobs
+    getPlannedJobs:     ()       => req('GET',    '/api/planned-jobs'),
+    createPlannedJob:   (d)      => req('POST',   '/api/planned-jobs', d),
+    deletePlannedJob:   (id)     => req('DELETE', `/api/planned-jobs/${id}`),
+
     // Settings
     getSettings:        ()       => req('GET',    '/api/settings'),
     saveSettings:       (d)      => req('PUT',    '/api/settings', d),

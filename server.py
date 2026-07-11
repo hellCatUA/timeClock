@@ -187,6 +187,28 @@ def init_db():
             pause_end TEXT,
             FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE
         );
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            defaults TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS planned_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wo_title TEXT,
+            organization_id INTEGER,
+            client_id INTEGER,
+            project_id INTEGER,
+            assignment_id TEXT,
+            site_id TEXT,
+            address TEXT,
+            rate_type TEXT DEFAULT 'hourly',
+            pay_rate_id INTEGER,
+            flat_amount REAL,
+            travel_reimb REAL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
         INSERT OR IGNORE INTO settings (key, value) VALUES
             ('break_reminder_minutes', '120'),
             ('break_return_minutes', '10'),
@@ -264,6 +286,29 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN pay_adjustment REAL",
         "ALTER TABLE time_entries ADD COLUMN pay_adjustment_note TEXT",
         "ALTER TABLE time_entries ADD COLUMN received_date TEXT",
+        "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
+        """CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            defaults TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )""",
+        """CREATE TABLE IF NOT EXISTS planned_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            wo_title TEXT,
+            organization_id INTEGER,
+            client_id INTEGER,
+            project_id INTEGER,
+            assignment_id TEXT,
+            site_id TEXT,
+            address TEXT,
+            rate_type TEXT DEFAULT 'hourly',
+            pay_rate_id INTEGER,
+            flat_amount REAL,
+            travel_reimb REAL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        )""",
         """CREATE TABLE IF NOT EXISTS trip_pauses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     trip_id INTEGER NOT NULL,
@@ -492,11 +537,13 @@ def h_delete_rate(req, groups):
 
 ENTRY_SELECT = """
     SELECT e.*, o.name as org_name, c.name as client_name,
-           p.name as rate_name, p.rate as hourly_rate, p.currency
+           p.name as rate_name, p.rate as hourly_rate, p.currency,
+           pr.name as project_name
     FROM time_entries e
     LEFT JOIN organizations o ON e.organization_id = o.id
     LEFT JOIN clients c ON e.client_id = c.id
     LEFT JOIN pay_rates p ON e.pay_rate_id = p.id
+    LEFT JOIN projects pr ON e.project_id = pr.id
 """
 
 
@@ -552,8 +599,8 @@ def h_post_entry(req, _groups):
              assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
-             status, release_code, no_release_code, materials)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             status, release_code, no_release_code, materials, project_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -566,7 +613,8 @@ def h_post_entry(req, _groups):
              data.get("work_summary"), data.get("additional_info"),
              data.get("wo_title"), data.get("travel_reimb"),
              data.get("status", "pending"), data.get("release_code"),
-             1 if data.get("no_release_code") else 0, materials_str)
+             1 if data.get("no_release_code") else 0, materials_str,
+             data.get("project_id"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -596,7 +644,7 @@ def h_put_entry(req, groups):
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?,
-                pay_adjustment=?, pay_adjustment_note=?, received_date=?
+                pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -636,6 +684,7 @@ def h_put_entry(req, groups):
             data.get("pay_adjustment", ex.get("pay_adjustment")),
             data.get("pay_adjustment_note", ex.get("pay_adjustment_note")),
             data.get("received_date", ex.get("received_date")),
+            data.get("project_id", ex.get("project_id")),
             eid
         ))
         new_folder = _photo_folder({
@@ -1664,6 +1713,85 @@ def h_post_trip_photo(req, groups):
     row['url'] = f"/uploads/{folder}/{safe_name}"
     return 201, row
 
+# ── Projects ────────────────────────────────────────────────────────────────────
+
+def h_get_projects(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("SELECT * FROM projects ORDER BY name").fetchall())
+    return 200, rows
+
+def h_create_project(req, _groups):
+    data = req.get("body", {})
+    name = (data.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "Name required"}
+    defaults = data.get("defaults")
+    defaults_str = json.dumps(defaults) if isinstance(defaults, dict) else (defaults or None)
+    with get_db() as db:
+        cur = db.execute("INSERT INTO projects (name, defaults) VALUES (?, ?)", (name, defaults_str))
+        row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+def h_update_project(req, groups):
+    pid = groups[0]
+    data = req.get("body", {})
+    with get_db() as db:
+        ex = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+        if not ex:
+            return 404, {"error": "Not found"}
+        name = (data.get("name") or ex["name"]).strip()
+        defaults = data.get("defaults", ex.get("defaults"))
+        defaults_str = json.dumps(defaults) if isinstance(defaults, dict) else (defaults or None)
+        db.execute("UPDATE projects SET name=?, defaults=? WHERE id=?", (name, defaults_str, pid))
+        row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
+    return 200, row
+
+def h_delete_project(req, groups):
+    with get_db() as db:
+        cur = db.execute("DELETE FROM projects WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+
+# ── Planned jobs ────────────────────────────────────────────────────────────────
+
+def h_get_planned_jobs(req, _groups):
+    with get_db() as db:
+        rows = rows_to_list(db.execute("""
+            SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name
+            FROM planned_jobs pj
+            LEFT JOIN organizations o ON pj.organization_id = o.id
+            LEFT JOIN clients c ON pj.client_id = c.id
+            LEFT JOIN projects pr ON pj.project_id = pr.id
+            ORDER BY pj.created_at DESC
+        """).fetchall())
+    return 200, rows
+
+def h_create_planned_job(req, _groups):
+    data = req.get("body", {})
+    with get_db() as db:
+        cur = db.execute(
+            """INSERT INTO planned_jobs
+            (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
+             address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
+             data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
+             data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
+             data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"))
+        )
+        row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, row
+
+def h_delete_planned_job(req, groups):
+    with get_db() as db:
+        cur = db.execute("DELETE FROM planned_jobs WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
+
+
 # ── Trip categories ─────────────────────────────────────────────────────────────
 
 def h_get_trip_categories(req, _groups):
@@ -1793,6 +1921,13 @@ ROUTES = [
     (r"/api/pay-rates",                 ["POST"],   h_post_rate),
     (r"/api/pay-rates/(\d+)",           ["PUT"],    h_put_rate),
     (r"/api/pay-rates/(\d+)",           ["DELETE"], h_delete_rate),
+    (r"/api/projects",                  ["GET"],    h_get_projects),
+    (r"/api/projects",                  ["POST"],   h_create_project),
+    (r"/api/projects/(\d+)",            ["PUT"],    h_update_project),
+    (r"/api/projects/(\d+)",            ["DELETE"], h_delete_project),
+    (r"/api/planned-jobs",              ["GET"],    h_get_planned_jobs),
+    (r"/api/planned-jobs",              ["POST"],   h_create_planned_job),
+    (r"/api/planned-jobs/(\d+)",        ["DELETE"], h_delete_planned_job),
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),
     (r"/api/reports/week",              ["GET"],    h_week_report),

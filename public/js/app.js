@@ -527,15 +527,21 @@ async function renderClockPage() {
 }
 
 /* ── Idle (pre-clock-in) ─────────────────────────────────────────── */
-function renderIdleClockPage() {
+async function renderIdleClockPage() {
   const orgs  = state.organizations;
   const clis  = state.clients;
   const rates = state.payRates;
   const sym   = state.settings.currency_symbol || '$';
 
+  try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
+  try { state.plannedJobs = await api.getPlannedJobs(); } catch { state.plannedJobs = state.plannedJobs || []; }
+  const projects = state.projects || [];
+  const plannedJobs = state.plannedJobs || [];
+
   const orgOpts  = orgs.map(o  => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
   const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
+  const projOpts = projects.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
 
   const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn || state.pendingTripId) ? `
     <div class="card" style="background:var(--green-bg);border:1px solid var(--green);padding:10px 14px;margin-bottom:4px;border-radius:8px;">
@@ -555,11 +561,35 @@ function renderIdleClockPage() {
         </button>
       </div>
       ${pendingBanner}
+      ${plannedJobs.length ? `
+      <div class="section-label">Planned Jobs</div>
+      ${plannedJobs.map(pj => `
+        <div class="card" style="display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+            <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
+          </div>
+          <button class="btn btn-primary btn-sm planned-start" data-id="${pj.id}">${svg('play')} Start</button>
+          <button class="btn btn-ghost btn-sm planned-del" data-id="${pj.id}" style="color:var(--red);">✕</button>
+        </div>`).join('')}` : ''}
+      <div style="margin-bottom:12px;">
+        <button class="btn btn-ghost btn-sm" id="plan-job-btn">${svg('plus')} Plan a Job</button>
+      </div>
       <div class="section-label">New Work Order</div>
       <div class="card" id="clock-in-form-card">
         <div class="form-group">
           <label class="form-label">WO Title</label>
           <input type="text" class="form-control" id="wo-title-input" placeholder="Brief description of work...">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Project <span class="opt-label">optional</span></label>
+          <div class="input-row">
+            <select class="form-control" id="project-select" style="flex:1;">
+              <option value="">— No Project —</option>
+              ${projOpts}
+            </select>
+            <button class="btn btn-ghost btn-icon" id="manage-projects-btn" title="Manage projects">${svg('edit')}</button>
+          </div>
         </div>
         <div class="form-group">
           <label class="form-label">Company</label>
@@ -627,13 +657,74 @@ function renderIdleClockPage() {
   });
 
   let rateType = 'hourly';
+  const setRateType = (t) => {
+    rateType = t;
+    document.querySelectorAll('#pay-type-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.type === t));
+    document.getElementById('hourly-rate-group').classList.toggle('hidden', t !== 'hourly');
+    document.getElementById('flat-rate-group').classList.toggle('hidden', t !== 'flat');
+  };
   document.getElementById('pay-type-toggle').addEventListener('click', e => {
     const btn = e.target.closest('.toggle-btn');
     if (!btn) return;
-    rateType = btn.dataset.type;
-    document.querySelectorAll('#pay-type-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === btn));
-    document.getElementById('hourly-rate-group').classList.toggle('hidden', rateType !== 'hourly');
-    document.getElementById('flat-rate-group').classList.toggle('hidden', rateType !== 'flat');
+    setRateType(btn.dataset.type);
+  });
+
+  // Extra fields carried into clock-in from a planned job / project defaults
+  const prefillExtras = { assignment_id: null, site_id: null, plannedJobId: null };
+
+  const applyProjectDefaults = (p) => {
+    let d = {};
+    try { d = JSON.parse(p.defaults || '{}') || {}; } catch { d = {}; }
+    if (d.wo_title)          document.getElementById('wo-title-input').value = d.wo_title;
+    if (d.organization_id)   document.getElementById('company-select').value = String(d.organization_id);
+    if (d.client_id)         document.getElementById('customer-select').value = String(d.client_id);
+    if (d.address)           document.getElementById('addr-input').value = d.address;
+    if (d.rate_type)         setRateType(d.rate_type);
+    if (d.pay_rate_id)       document.getElementById('rate-select').value = String(d.pay_rate_id);
+    if (d.flat_amount != null && d.flat_amount !== '') document.getElementById('flat-amount-input').value = d.flat_amount;
+    if (d.travel_reimb != null && d.travel_reimb !== '') document.getElementById('travel-reimb-input').value = d.travel_reimb;
+    if (d.site_id)           prefillExtras.site_id = d.site_id;
+    if (d.assignment_id)     prefillExtras.assignment_id = d.assignment_id;
+  };
+
+  document.getElementById('project-select').addEventListener('change', e => {
+    const p = (state.projects || []).find(x => x.id === Number(e.target.value));
+    if (p) applyProjectDefaults(p);
+  });
+
+  document.getElementById('manage-projects-btn').addEventListener('click', () => openProjectsModal());
+  document.getElementById('plan-job-btn').addEventListener('click', () => openPlanJobModal());
+
+  document.querySelectorAll('.planned-start').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (!pj) return;
+      if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
+      if (pj.project_id)      document.getElementById('project-select').value = String(pj.project_id);
+      if (pj.organization_id) document.getElementById('company-select').value = String(pj.organization_id);
+      if (pj.client_id)       document.getElementById('customer-select').value = String(pj.client_id);
+      if (pj.address)         document.getElementById('addr-input').value = pj.address;
+      if (pj.rate_type)       setRateType(pj.rate_type);
+      if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
+      if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
+      if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
+      prefillExtras.assignment_id = pj.assignment_id || prefillExtras.assignment_id;
+      prefillExtras.site_id = pj.site_id || prefillExtras.site_id;
+      prefillExtras.plannedJobId = pj.id;
+      const formCard = document.getElementById('clock-in-form-card');
+      formCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      showToast('Job pre-filled — pick a clock-in time to start', 'success');
+    });
+  });
+
+  document.querySelectorAll('.planned-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this planned job?')) return;
+      try {
+        await api.deletePlannedJob(Number(btn.dataset.id));
+        renderIdleClockPage();
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
   });
 
   let geoCoords = null;
@@ -672,6 +763,7 @@ function renderIdleClockPage() {
       const woTitle  = document.getElementById('wo-title-input').value.trim();
       const travel   = parseFloat(document.getElementById('travel-reimb-input').value) || null;
 
+      const projectSel = document.getElementById('project-select').value;
       state.currentEntry = await api.clockIn({
         clock_in:        clockInISO,
         organization_id: org    ? Number(org)   : null,
@@ -684,9 +776,14 @@ function renderIdleClockPage() {
         longitude:       geoCoords?.lng || null,
         wo_title:        woTitle || null,
         travel_reimb:    travel,
-        assignment_id:   state.pendingTripAssignment || null,
+        assignment_id:   state.pendingTripAssignment || prefillExtras.assignment_id || null,
+        site_id:         prefillExtras.site_id || null,
+        project_id:      projectSel ? Number(projectSel) : null,
         status:          'pending',
       });
+      if (prefillExtras.plannedJobId) {
+        try { await api.deletePlannedJob(prefillExtras.plannedJobId); } catch { /* non-critical */ }
+      }
       state.pendingTripAssignment = null;
       state.pendingTripClockIn = null;
       // pendingTripId is intentionally NOT cleared here — it must survive
@@ -703,6 +800,203 @@ function renderIdleClockPage() {
   }
 
   renderTimeSelector('clockin-time-selector', 'Clock-in time', doClockIn, tripTimeOpts);
+}
+
+/* ── Plan a Job modal ────────────────────────────────────────────── */
+function buildJobFieldsHtml(prefix, sym) {
+  const orgOpts  = state.organizations.map(o => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
+  const cliOpts  = state.clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+  const rateOpts = state.payRates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
+  return `
+    <div class="form-group">
+      <label class="form-label">WO Title</label>
+      <input type="text" class="form-control" id="${prefix}-title" placeholder="Brief description...">
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label class="form-label">Company</label>
+        <select class="form-control" id="${prefix}-org"><option value="">—</option>${orgOpts}</select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Customer</label>
+        <select class="form-control" id="${prefix}-client"><option value="">—</option>${cliOpts}</select>
+      </div>
+    </div>
+    <div class="row-2">
+      <div class="form-group">
+        <label class="form-label">Assignment ID</label>
+        <input type="text" class="form-control" id="${prefix}-assign">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Site ID</label>
+        <input type="text" class="form-control" id="${prefix}-site">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Address</label>
+      <input type="text" class="form-control" id="${prefix}-addr">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Pay Type</label>
+      <div class="toggle-group" id="${prefix}-paytype">
+        <button type="button" class="toggle-btn active" data-type="hourly">Hourly</button>
+        <button type="button" class="toggle-btn" data-type="flat">Flat</button>
+        <button type="button" class="toggle-btn" data-type="none">Non-Billable</button>
+      </div>
+    </div>
+    <div class="form-group" id="${prefix}-hourly-group">
+      <label class="form-label">Hourly Rate</label>
+      <select class="form-control" id="${prefix}-rate"><option value="">—</option>${rateOpts}</select>
+    </div>
+    <div class="form-group hidden" id="${prefix}-flat-group">
+      <label class="form-label">Flat Rate</label>
+      <div class="money-wrap"><span class="money-sym">${sym}</span>
+        <input type="number" class="form-control" id="${prefix}-flat" min="0" step="0.01"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Travel Reimbursement</label>
+      <div class="money-wrap"><span class="money-sym">${sym}</span>
+        <input type="number" class="form-control" id="${prefix}-travel" min="0" step="0.01"></div>
+    </div>`;
+}
+
+function wireJobFieldsPayType(prefix) {
+  let t = 'hourly';
+  document.getElementById(`${prefix}-paytype`).addEventListener('click', e => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    t = btn.dataset.type;
+    document.querySelectorAll(`#${prefix}-paytype .toggle-btn`).forEach(b => b.classList.toggle('active', b === btn));
+    document.getElementById(`${prefix}-hourly-group`).classList.toggle('hidden', t !== 'hourly');
+    document.getElementById(`${prefix}-flat-group`).classList.toggle('hidden', t !== 'flat');
+  });
+  return () => t;
+}
+
+function readJobFields(prefix, getRateType) {
+  const g = id => document.getElementById(`${prefix}-${id}`);
+  const rt = getRateType();
+  return {
+    wo_title:        g('title').value.trim() || null,
+    organization_id: g('org').value ? Number(g('org').value) : null,
+    client_id:       g('client').value ? Number(g('client').value) : null,
+    assignment_id:   g('assign').value.trim() || null,
+    site_id:         g('site').value.trim() || null,
+    address:         g('addr').value.trim() || null,
+    rate_type:       rt,
+    pay_rate_id:     (rt === 'hourly' && g('rate').value) ? Number(g('rate').value) : null,
+    flat_amount:     rt === 'flat' ? (parseFloat(g('flat').value) || null) : null,
+    travel_reimb:    parseFloat(g('travel').value) || null,
+  };
+}
+
+function openPlanJobModal() {
+  const sym = state.settings.currency_symbol || '$';
+  const projOpts = (state.projects || []).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('plus')} Plan a Job</h3>
+      <button class="btn btn-ghost btn-sm" id="pj-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Project <span class="opt-label">optional</span></label>
+        <select class="form-control" id="pj-project"><option value="">— No Project —</option>${projOpts}</select>
+      </div>
+      ${buildJobFieldsHtml('pj', sym)}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pj-cancel">Cancel</button>
+      <button class="btn btn-primary" id="pj-save">${svg('check')} Save Planned Job</button>
+    </div>`);
+
+  document.getElementById('pj-x').addEventListener('click', closeModal);
+  document.getElementById('pj-cancel').addEventListener('click', closeModal);
+  const getRateType = wireJobFieldsPayType('pj');
+
+  document.getElementById('pj-save').addEventListener('click', async () => {
+    const data = readJobFields('pj', getRateType);
+    if (!data.wo_title && !data.assignment_id) { showToast('Add at least a WO Title or Assignment ID', 'error'); return; }
+    data.project_id = document.getElementById('pj-project').value ? Number(document.getElementById('pj-project').value) : null;
+    try {
+      await api.createPlannedJob(data);
+      closeModal();
+      showToast('Job planned', 'success');
+      renderIdleClockPage();
+    } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+  });
+}
+
+/* ── Projects modal ──────────────────────────────────────────────── */
+function openProjectsModal() {
+  const sym = state.settings.currency_symbol || '$';
+  const projects = state.projects || [];
+  const projList = projects.length ? projects.map(p => {
+    let d = {};
+    try { d = JSON.parse(p.defaults || '{}') || {}; } catch {}
+    const setKeys = Object.keys(d).filter(k => d[k] != null && d[k] !== '');
+    return `
+    <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:6px;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;">${escHtml(p.name)}</div>
+        <div class="field-hint">${setKeys.length ? `Auto-fills: ${setKeys.join(', ')}` : 'No defaults set'}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm proj-del" data-id="${p.id}" style="color:var(--red);">${svg('trash')}</button>
+    </div>`;
+  }).join('') : '<div class="empty-state" style="padding:12px;">No projects yet</div>';
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('org')} Projects</h3>
+      <button class="btn btn-ghost btn-sm" id="prj-x">✕</button>
+    </div>
+    <div class="modal-body">
+      ${projList}
+      <div class="divider" style="margin:12px 0;"></div>
+      <div class="subsection-label">New Project</div>
+      <div class="form-group" style="margin-top:8px;">
+        <label class="form-label">Project Name <span class="req-star">*</span></label>
+        <input type="text" class="form-control" id="prj-name" placeholder="e.g. Store rollout Q3">
+      </div>
+      <div class="field-hint" style="margin-bottom:8px;">Fill any fields below — they will auto-fill each new WO in this project.</div>
+      ${buildJobFieldsHtml('prj', sym)}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="prj-cancel">Close</button>
+      <button class="btn btn-primary" id="prj-save">${svg('check')} Create Project</button>
+    </div>`);
+
+  document.getElementById('prj-x').addEventListener('click', closeModal);
+  document.getElementById('prj-cancel').addEventListener('click', closeModal);
+  const getRateType = wireJobFieldsPayType('prj');
+
+  document.querySelectorAll('.proj-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this project? Entries keep their data, only the grouping is removed.')) return;
+      try {
+        await api.deleteProject(Number(btn.dataset.id));
+        state.projects = await api.getProjects();
+        closeModal();
+        openProjectsModal();
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  });
+
+  document.getElementById('prj-save').addEventListener('click', async () => {
+    const name = document.getElementById('prj-name').value.trim();
+    if (!name) { showToast('Project name is required', 'error'); return; }
+    const defaults = readJobFields('prj', getRateType);
+    // Keep only fields that were actually filled in
+    Object.keys(defaults).forEach(k => {
+      if (defaults[k] == null || defaults[k] === '' || (k === 'rate_type' && defaults[k] === 'hourly' && !defaults.pay_rate_id)) delete defaults[k];
+    });
+    try {
+      await api.createProject({ name, defaults });
+      closeModal();
+      showToast('Project created', 'success');
+      renderIdleClockPage();
+    } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+  });
 }
 
 /* ── Active trip page ────────────────────────────────────────────── */
@@ -2919,7 +3213,7 @@ function renderEntryCard(entry) {
       <div class="entry-card-top">
         <div class="entry-card-left">
           <div class="entry-title">${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</div>
-          <div class="entry-meta">${escHtml(entry.org_name||'')}${entry.client_name?' / '+escHtml(entry.client_name):''}</div>
+          <div class="entry-meta">${escHtml(entry.org_name||'')}${entry.client_name?' / '+escHtml(entry.client_name):''}${entry.project_name?` · <span style="color:var(--blue);">${escHtml(entry.project_name)}</span>`:''}</div>
           ${entry.address ? `<div class="entry-addr">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
         </div>
         <div class="entry-card-right">
@@ -2952,6 +3246,7 @@ function openEntryDetail(entry) {
     </div>
     <div class="modal-body">
       <div class="review-row"><span>Date:</span><span>${fmtDateFull(entry.clock_in)}</span></div>
+      ${entry.project_name ? `<div class="review-row"><span>Project:</span><span>${escHtml(entry.project_name)}</span></div>` : ''}
       <div class="review-row"><span>Company:</span><span>${escHtml(entry.org_name||'—')}</span></div>
       <div class="review-row"><span>Customer:</span><span>${escHtml(entry.client_name||'—')}</span></div>
       <div class="review-row"><span>Assignment ID:</span><span>${escHtml(entry.assignment_id||'—')}</span></div>
