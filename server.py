@@ -1307,9 +1307,11 @@ def h_export_csv(req, _groups):
             cell(e.get("pay_adjustment_note") or ""),
         ])
 
-    def summary_row(label, exp, pay_status="", received="", notes="", rec_date=""):
+    def summary_row(label, exp, pay_status="", received="", notes="", rec_date="", hours=""):
         return ",".join([
-            cell(label), *[cell("")] * 14,
+            cell(label), *[cell("")] * 9,
+            cell(hours),
+            *[cell("")] * 4,
             cell(f"{exp:.2f}"),
             cell(pay_status),
             cell(received),
@@ -1330,15 +1332,17 @@ def h_export_csv(req, _groups):
         wk_received = bool(pp and (pp.get("status") == "received"))
         for e in rows:
             lines.append(entry_row(e, wk_received))
-        if pp:
+        if rows:
             week_exp = sum(calc_entry(e)[5] for e in rows)
+            week_hrs = fmth(sum(calc_entry(e)[0] for e in rows))
             lines.append(summary_row(
-                f"Week: {ws_str}",
+                f"WEEK TOTAL{f' ({ws_str})' if ws_str else ''}",
                 week_exp,
-                (pp.get("status") or "pending").upper(),
+                ((pp.get("status") or "pending").upper() if pp else "PENDING"),
                 f"{float(pp.get('received_amount') or 0):.2f}" if wk_received else "",
-                pp.get("notes") or "",
+                pp.get("notes") or "" if pp else "",
                 (pp.get("paid_at") or "")[:10] if wk_received else "",
+                week_hrs,
             ))
     else:
         weeks_map = {}
@@ -1352,14 +1356,17 @@ def h_export_csv(req, _groups):
 
         month_exp = 0.0
         month_rcv = 0.0
+        month_sec = 0
         for ws_str in sorted(weeks_map.keys()):
             entries  = weeks_map[ws_str]
             pp       = pay_map.get(ws_str)
             wk_received = bool(pp and (pp.get("status") == "received"))
             week_exp = sum(calc_entry(e)[5] for e in entries)
+            week_sec = sum(calc_entry(e)[0] for e in entries)
             rcv_amt  = float(pp.get("received_amount") or 0) if wk_received else 0.0
             month_exp += week_exp
             month_rcv += rcv_amt
+            month_sec += week_sec
 
             try:
                 ws_dt   = datetime.strptime(ws_str, "%Y-%m-%d")
@@ -1374,12 +1381,13 @@ def h_export_csv(req, _groups):
                 f"{rcv_amt:.2f}" if wk_received else "",
                 pp.get("notes") or "" if pp else "",
                 (pp.get("paid_at") or "")[:10] if wk_received else "",
+                fmth(week_sec),
             ))
             for e in entries:
                 lines.append(entry_row(e, wk_received))
             lines.append("")
 
-        lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", ""))
+        lines.append(summary_row("MONTH TOTAL", month_exp, "", f"{month_rcv:.2f}", "", "", fmth(month_sec)))
 
     return "csv", "\n".join(lines)
 

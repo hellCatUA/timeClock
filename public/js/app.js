@@ -1949,19 +1949,62 @@ async function initiateClockOut(entry) {
         <h3>${svg('alert')} Missing Required Fields</h3>
       </div>
       <div class="modal-body">
-        <p style="color:var(--text2);margin-bottom:12px;">The following required fields are empty:</p>
-        ${missing.map(f => `<div class="missing-field-item">${svg('alert')} ${f}</div>`).join('')}
-        <p style="color:var(--text3);font-size:13px;margin-top:12px;">Fill them in or use Override to mark as "OVERRIDE!"</p>
+        <p style="color:var(--text2);margin-bottom:12px;">Fill them in right here, or Override to continue without them:</p>
+        ${!assignId ? `
+        <div class="form-group">
+          <label class="form-label">Assignment ID</label>
+          <input type="text" class="form-control" id="mf-assign" placeholder="e.g. 171624976">
+        </div>` : ''}
+        ${!modName ? `
+        <div class="form-group">
+          <label class="form-label">MOD Name</label>
+          <input type="text" class="form-control" id="mf-mod" placeholder="Manager on duty (comma-separate several)">
+        </div>` : ''}
+        ${!workSummary ? `
+        <div class="form-group">
+          <label class="form-label">Work Performed / Comments</label>
+          <textarea class="form-control" id="mf-summary" rows="3" placeholder="What was done on site..."></textarea>
+        </div>` : ''}
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" id="co-cancel-btn">Cancel</button>
         <button class="btn btn-danger" id="co-override-btn">Override & Continue</button>
+        <button class="btn btn-primary" id="co-fill-btn">${svg('check')} Save & Continue</button>
       </div>`);
-    document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
-    document.getElementById('co-override-btn').addEventListener('click', () => {
+
+    const persistAndGo = async (requireAll) => {
+      const assignId2 = assignId    || document.getElementById('mf-assign')?.value.trim()  || '';
+      const modName2  = modName     || document.getElementById('mf-mod')?.value.trim()     || '';
+      const summary2  = workSummary || document.getElementById('mf-summary')?.value.trim() || '';
+      const stillMissing = [];
+      if (!assignId2) stillMissing.push('Assignment ID');
+      if (!modName2)  stillMissing.push('MOD Name');
+      if (!summary2)  stillMissing.push('Work Performed / Comments');
+      if (requireAll && stillMissing.length) {
+        showToast('Still empty: ' + stillMissing.join(', '), 'error');
+        return;
+      }
+      // Persist newly filled values and keep the background form in sync
+      const data = {};
+      if (!assignId && assignId2) {
+        data.assignment_id = assignId2;
+        const el = document.getElementById('jd-assignment'); if (el) el.value = assignId2;
+      }
+      if (!modName && modName2) data.mod_name = modName2;
+      if (!workSummary && summary2) {
+        data.work_summary = summary2;
+        const el = document.getElementById('jd-work-summary'); if (el) el.value = summary2;
+      }
+      if (Object.keys(data).length) {
+        try { state.currentEntry = await api.updateEntry(entry.id, data); } catch { /* continue with local values */ }
+      }
       closeModal();
-      showClockOutTimePicker(entry, workSummary, assignId, modName, missing);
-    });
+      showClockOutTimePicker(state.currentEntry || entry, summary2, assignId2, modName2, stillMissing);
+    };
+
+    document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
+    document.getElementById('co-override-btn').addEventListener('click', () => persistAndGo(false));
+    document.getElementById('co-fill-btn').addEventListener('click', () => persistAndGo(true));
     return;
   }
   showClockOutTimePicker(entry, workSummary, assignId, modName, []);
@@ -3295,10 +3338,15 @@ function openEntryDetail(entry) {
   })();
 }
 
-function openEntryEdit(entry) {
+async function openEntryEdit(entry) {
   const sym    = state.settings.currency_symbol || '$';
   const isFlat = entry.rate_type === 'flat';
   const mats   = parseMaterials(entry.materials);
+
+  try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
+  const projOpts = (state.projects || []).map(p =>
+    `<option value="${p.id}" ${entry.project_id == p.id ? 'selected' : ''}>${escHtml(p.name)}</option>`
+  ).join('');
 
   const rateOpts = state.payRates.map(r =>
     `<option value="${r.id}" ${Number(entry.pay_rate_id) === r.id ? 'selected' : ''}>${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`
@@ -3314,6 +3362,13 @@ function openEntryEdit(entry) {
       <div class="form-group">
         <label class="form-label">WO Title</label>
         <input type="text" class="form-control" id="ee-wo-title" value="${escHtml(entry.wo_title||'')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Project</label>
+        <select class="form-control" id="ee-project">
+          <option value="">— No Project —</option>
+          ${projOpts}
+        </select>
       </div>
       <div class="form-group">
         <label class="form-label">Company</label>
@@ -3538,6 +3593,7 @@ function openEntryEdit(entry) {
     try {
       await api.updateEntry(entry.id, {
         wo_title:        document.getElementById('ee-wo-title').value.trim() || null,
+        project_id:      document.getElementById('ee-project').value ? Number(document.getElementById('ee-project').value) : null,
         organization_id: document.getElementById('ee-company').value    ? Number(document.getElementById('ee-company').value)    : null,
         client_id:       document.getElementById('ee-customer').value   ? Number(document.getElementById('ee-customer').value)   : null,
         site_id:         document.getElementById('ee-site-id').value.trim() || null,
