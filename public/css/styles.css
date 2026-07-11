@@ -464,6 +464,17 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .day-group { border-left: 2px solid var(--border); margin: 8px 0 8px 4px; padding-left: 8px; }
 .day-group-header { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 4px; }
 
+/* ===== Revisit link ===== */
+.rev-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--blue); background: var(--blue-bg);
+  border: 1px solid var(--blue); border-radius: 10px;
+  padding: 2px 7px; cursor: pointer;
+}
+.rev-badge svg { width: 11px; height: 11px; }
+.entry-card.linked-visit { border-left: 3px solid var(--blue); }
+
 /* ===== Pay modal entry rows ===== */
 .pay-entries-list { display: flex; flex-direction: column; gap: 8px; }
 .pay-entry-row { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; background: var(--bg2); }
