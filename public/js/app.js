@@ -546,7 +546,7 @@ async function renderIdleClockPage() {
   const orgOpts  = orgs.map(o  => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
   const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
-  const projOpts = projects.map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+  const projOpts = projects.filter(p => !p.archived).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
 
   const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn || state.pendingTripId) ? `
     <div class="card" style="background:var(--green-bg);border:1px solid var(--green);padding:10px 14px;margin-bottom:4px;border-radius:8px;">
@@ -746,6 +746,13 @@ async function renderIdleClockPage() {
     showToast('Revisit pre-filled — pick a clock-in time to start', 'success');
   }
 
+  // Planned job chosen when the trip started — pre-fill on arrival
+  if (state.pendingPlannedJobId) {
+    const pj = (state.plannedJobs || []).find(p => p.id === state.pendingPlannedJobId);
+    state.pendingPlannedJobId = null;
+    if (pj) applyPlannedJob(pj);
+  }
+
   let geoCoords = null;
   document.getElementById('geo-btn').addEventListener('click', async () => {
     const statusEl = document.getElementById('geo-status');
@@ -918,9 +925,12 @@ async function openPickWoForRevisitModal() {
     <div class="modal-body">
       <div class="field-hint" style="margin-bottom:8px;">Pick the original work order:</div>
       ${entries.length ? entries.map(e => `
-        <div class="card pw-item" data-id="${e.id}" style="padding:8px 10px;margin-bottom:6px;cursor:pointer;">
-          <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</div>
-          <div class="field-hint">${escHtml(fmtDateShort(e.clock_in))}${e.org_name ? ' · ' + escHtml(e.org_name) : ''}${e.client_name ? ' · ' + escHtml(e.client_name) : ''}</div>
+        <div class="card pw-item" data-id="${e.id}" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</div>
+            <div class="field-hint">${escHtml(fmtDateShort(e.clock_in))}${e.org_name ? ' · ' + escHtml(e.org_name) : ''}${e.client_name ? ' · ' + escHtml(e.client_name) : ''}</div>
+          </div>
+          <span class="status-chip ${e.status || 'pending'}" style="flex-shrink:0;">${(e.status || 'pending').toUpperCase()}</span>
         </div>`).join('') : '<div class="empty-state">No completed work orders yet</div>'}
     </div>
     <div class="modal-footer">
@@ -1028,13 +1038,14 @@ function readJobFields(prefix, getRateType) {
 
 function openPlanJobModal() {
   const sym = state.settings.currency_symbol || '$';
-  const projOpts = (state.projects || []).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
+  const projOpts = (state.projects || []).filter(p => !p.archived).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
   openModal(`
     <div class="modal-header">
       <h3>${svg('plus')} Plan a Job</h3>
       <button class="btn btn-ghost btn-sm" id="pj-x">✕</button>
     </div>
     <div class="modal-body">
+      <button class="btn btn-secondary btn-sm btn-full" id="pj-revisit" style="margin-bottom:12px;">${svg('return')} Planning a Revisit? Pick the original WO →</button>
       <div class="form-group">
         <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
         <input type="date" class="form-control" id="pj-date">
@@ -1052,6 +1063,7 @@ function openPlanJobModal() {
 
   document.getElementById('pj-x').addEventListener('click', closeModal);
   document.getElementById('pj-cancel').addEventListener('click', closeModal);
+  document.getElementById('pj-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
   const getRateType = wireJobFieldsPayType('pj');
 
   document.getElementById('pj-save').addEventListener('click', async () => {
@@ -1072,19 +1084,28 @@ function openPlanJobModal() {
 function openProjectsModal() {
   const sym = state.settings.currency_symbol || '$';
   const projects = state.projects || [];
-  const projList = projects.length ? projects.map(p => {
+  const projCard = (p) => {
     let d = {};
     try { d = JSON.parse(p.defaults || '{}') || {}; } catch {}
     const setKeys = Object.keys(d).filter(k => d[k] != null && d[k] !== '');
     return `
-    <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:6px;">
+    <div class="card" style="display:flex;align-items:center;gap:6px;padding:8px 12px;margin-bottom:6px;${p.archived ? 'opacity:.65;' : ''}">
       <div style="flex:1;min-width:0;">
         <div style="font-weight:600;">${escHtml(p.name)}</div>
         <div class="field-hint">${setKeys.length ? `Auto-fills: ${setKeys.join(', ')}` : 'No defaults set'}</div>
       </div>
+      <button class="btn btn-ghost btn-sm proj-arch" data-id="${p.id}" data-archived="${p.archived ? 1 : 0}" title="${p.archived ? 'Unarchive' : 'Archive'}">
+        ${p.archived ? svg('return') : svg('stop')}
+      </button>
       <button class="btn btn-ghost btn-sm proj-del" data-id="${p.id}" style="color:var(--red);">${svg('trash')}</button>
     </div>`;
-  }).join('') : '<div class="empty-state" style="padding:12px;">No projects yet</div>';
+  };
+  const active = projects.filter(p => !p.archived);
+  const archived = projects.filter(p => p.archived);
+  const projList = (active.length ? active.map(projCard).join('') : '<div class="empty-state" style="padding:12px;">No projects yet</div>')
+    + (archived.length ? `
+      <div class="subsection-label" style="margin-top:10px;">Archived</div>
+      ${archived.map(projCard).join('')}` : '');
 
   openModal(`
     <div class="modal-header">
@@ -1120,6 +1141,19 @@ function openProjectsModal() {
         closeModal();
         openProjectsModal();
       } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  });
+
+  document.querySelectorAll('.proj-arch').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const wasArchived = btn.dataset.archived === '1';
+      try {
+        await api.updateProject(Number(btn.dataset.id), { archived: !wasArchived });
+        state.projects = await api.getProjects();
+        showToast(wasArchived ? 'Project unarchived' : 'Project archived', 'success');
+        closeModal();
+        openProjectsModal();
+      } catch (err) { showToast(err.message || 'Update failed', 'error'); }
     });
   });
 
@@ -2713,7 +2747,7 @@ async function openTripStartModal() {
   const cats = state.tripCategories;
   const clocked = !!state.currentEntry;
   try { state.plannedJobs = await api.getPlannedJobs(); } catch { state.plannedJobs = state.plannedJobs || []; }
-  const plannedWithAssign = (state.plannedJobs || []).filter(p => p.assignment_id);
+  const plannedList = state.plannedJobs || [];
 
   // When clocked in, only OnClock/Other. When off-clock, everything except OnClock.
   const filteredCats = cats.filter(c => {
@@ -2744,11 +2778,11 @@ async function openTripStartModal() {
         <div class="trip-cat-grid" id="ts-cat-grid">${catBtnsHtml}</div>
       </div>
       <div class="form-group" id="ts-assignment-group" style="${isInRoute() ? '' : 'display:none;'}">
-        ${plannedWithAssign.length ? `
+        ${plannedList.length ? `
         <label class="form-label">From Planned Job <span class="opt-label">optional</span></label>
         <select class="form-control" id="ts-planned-select" style="margin-bottom:8px;">
           <option value="">— Pick a planned job —</option>
-          ${plannedWithAssign.map(p => `<option value="${escHtml(p.assignment_id)}">${escHtml(p.planned_date ? plannedDayLabel(p.planned_date) + ' — ' : '')}${escHtml(p.wo_title || p.assignment_id)}</option>`).join('')}
+          ${plannedList.map(p => `<option value="${p.id}">${escHtml(p.planned_date ? plannedDayLabel(p.planned_date) + ' — ' : '')}${escHtml(p.wo_title || p.assignment_id || 'Planned job')}</option>`).join('')}
         </select>` : ''}
         <label class="form-label">Assignment ID <span class="req-star">*</span></label>
         <div class="input-row">
@@ -2785,12 +2819,21 @@ async function openTripStartModal() {
   document.getElementById('ts-x').addEventListener('click', closeModal);
   document.getElementById('ts-cancel').addEventListener('click', closeModal);
 
+  let tripPlannedId = null;
   document.getElementById('ts-planned-select')?.addEventListener('change', e => {
-    if (!e.target.value) return;
+    const pj = plannedList.find(p => p.id === Number(e.target.value));
+    tripPlannedId = pj ? pj.id : null;
+    if (!pj) return;
     const inp = document.getElementById('ts-assignment');
-    inp.value = e.target.value;
     const later = document.getElementById('ts-add-later');
-    if (later) { later.checked = false; inp.disabled = false; }
+    if (pj.assignment_id) {
+      inp.value = pj.assignment_id;
+      if (later) { later.checked = false; inp.disabled = false; }
+    } else if (later) {
+      later.checked = true;
+      inp.value = '';
+      inp.disabled = true;
+    }
     document.getElementById('ts-assignment-hint')?.classList.add('hidden');
   });
 
@@ -2858,6 +2901,8 @@ async function openTripStartModal() {
         notes,
       });
       state.currentTrip = trip;
+      // Remember the planned job so the clock-in form is pre-filled on arrival
+      if (tripPlannedId && isInRoute()) state.pendingPlannedJobId = tripPlannedId;
       if (photoData) await uploadTripPhotoData(trip.id, 'before', photoData);
       closeModal();
       renderActiveTripPage();
@@ -3687,9 +3732,11 @@ async function openEntryEdit(entry) {
   const mats   = parseMaterials(entry.materials);
 
   try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
-  const projOpts = (state.projects || []).map(p =>
-    `<option value="${p.id}" ${entry.project_id == p.id ? 'selected' : ''}>${escHtml(p.name)}</option>`
-  ).join('');
+  // Hide archived projects except the one this entry already belongs to
+  const projOpts = (state.projects || [])
+    .filter(p => !p.archived || entry.project_id == p.id)
+    .map(p => `<option value="${p.id}" ${entry.project_id == p.id ? 'selected' : ''}>${escHtml(p.name)}${p.archived ? ' (archived)' : ''}</option>`)
+    .join('');
 
   // Candidates for "Revisit of" — recent completed WOs, excluding this one
   let revOpts = '';
@@ -3698,7 +3745,7 @@ async function openEntryEdit(entry) {
     revOpts = all
       .filter(e => e.id !== entry.id && e.clock_out)
       .slice(0, 100)
-      .map(e => `<option value="${e.id}" ${entry.revisit_of == e.id ? 'selected' : ''}>${escHtml(fmtDateShort(e.clock_in))} — ${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</option>`)
+      .map(e => `<option value="${e.id}" ${entry.revisit_of == e.id ? 'selected' : ''}>${escHtml(fmtDateShort(e.clock_in))} — ${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)} [${(e.status || 'pending').toUpperCase()}]</option>`)
       .join('');
   } catch { /* select stays minimal */ }
 

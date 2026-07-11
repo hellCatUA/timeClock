@@ -193,6 +193,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             defaults TEXT,
+            archived INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS planned_jobs (
@@ -294,6 +295,7 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN revisit_of INTEGER",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
+        "ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -1759,7 +1761,8 @@ def h_update_project(req, groups):
         name = (data.get("name") or ex["name"]).strip()
         defaults = data.get("defaults", ex.get("defaults"))
         defaults_str = json.dumps(defaults) if isinstance(defaults, dict) else (defaults or None)
-        db.execute("UPDATE projects SET name=?, defaults=? WHERE id=?", (name, defaults_str, pid))
+        archived = 1 if data.get("archived", ex.get("archived", 0)) else 0
+        db.execute("UPDATE projects SET name=?, defaults=?, archived=? WHERE id=?", (name, defaults_str, archived, pid))
         row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
     return 200, row
 
