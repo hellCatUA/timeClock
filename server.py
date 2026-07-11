@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 PORT = int(os.environ.get("PORT", 3000))
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "timeclock.db"))
@@ -1991,6 +1991,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _serve_static(self, path):
+        path = unquote(path)
         if path.startswith('/uploads/'):
             rel = path[len('/uploads/'):]
             file_path = (UPLOADS_DIR / rel).resolve()
