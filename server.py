@@ -104,6 +104,8 @@ def init_db():
             pay_adjustment REAL,
             pay_adjustment_note TEXT,
             received_date TEXT,
+            project_id INTEGER,
+            revisit_of INTEGER,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -207,6 +209,8 @@ def init_db():
             flat_amount REAL,
             travel_reimb REAL,
             notes TEXT,
+            planned_date TEXT,
+            revisit_of INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
         INSERT OR IGNORE INTO settings (key, value) VALUES
@@ -287,6 +291,9 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN pay_adjustment_note TEXT",
         "ALTER TABLE time_entries ADD COLUMN received_date TEXT",
         "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
+        "ALTER TABLE time_entries ADD COLUMN revisit_of INTEGER",
+        "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
         """CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -599,8 +606,8 @@ def h_post_entry(req, _groups):
              assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
-             status, release_code, no_release_code, materials, project_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             status, release_code, no_release_code, materials, project_id, revisit_of)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -614,7 +621,7 @@ def h_post_entry(req, _groups):
              data.get("wo_title"), data.get("travel_reimb"),
              data.get("status", "pending"), data.get("release_code"),
              1 if data.get("no_release_code") else 0, materials_str,
-             data.get("project_id"))
+             data.get("project_id"), data.get("revisit_of"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -644,7 +651,8 @@ def h_put_entry(req, groups):
                 return_track=?, no_return_track=?, work_summary=?, additional_info=?,
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?,
-                pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?
+                pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?,
+                revisit_of=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -685,6 +693,7 @@ def h_put_entry(req, groups):
             data.get("pay_adjustment_note", ex.get("pay_adjustment_note")),
             data.get("received_date", ex.get("received_date")),
             data.get("project_id", ex.get("project_id")),
+            data.get("revisit_of", ex.get("revisit_of")),
             eid
         ))
         new_folder = _photo_folder({
@@ -1782,12 +1791,14 @@ def h_create_planned_job(req, _groups):
         cur = db.execute(
             """INSERT INTO planned_jobs
             (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
-             address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+             address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
+             planned_date, revisit_of)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
-             data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"))
+             data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"),
+             data.get("planned_date"), data.get("revisit_of"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     return 201, row

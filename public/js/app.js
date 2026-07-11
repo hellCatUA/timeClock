@@ -562,17 +562,19 @@ async function renderIdleClockPage() {
         </button>
       </div>
       ${pendingBanner}
-      ${plannedJobs.length ? `
-      <div class="section-label">Planned Jobs</div>
-      ${plannedJobs.map(pj => `
-        <div class="card" style="display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:8px;">
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
-            <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
-          </div>
-          <button class="btn btn-primary btn-sm planned-start" data-id="${pj.id}">${svg('play')} Start</button>
-          <button class="btn btn-ghost btn-sm planned-del" data-id="${pj.id}" style="color:var(--red);">✕</button>
-        </div>`).join('')}` : ''}
+      ${plannedJobs.length ? (() => {
+        const dated = plannedJobs.filter(p => p.planned_date).sort((a,b) => a.planned_date.localeCompare(b.planned_date));
+        const next = dated[0] || plannedJobs[0];
+        const nextLbl = `${next.planned_date ? plannedDayLabel(next.planned_date) + ' — ' : ''}${next.wo_title || next.assignment_id || 'job'}`;
+        return `
+      <div class="card" id="planned-strip" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:14px;">${svg('bell')} Planned Jobs — ${plannedJobs.length}</div>
+          <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Next: ${escHtml(nextLbl)}</div>
+        </div>
+        ${svg('chevR')}
+      </div>`;
+      })() : ''}
       <div style="margin-bottom:12px;">
         <button class="btn btn-ghost btn-sm" id="plan-job-btn">${svg('plus')} Plan a Job</button>
       </div>
@@ -619,7 +621,6 @@ async function renderIdleClockPage() {
           <div class="toggle-group" id="pay-type-toggle">
             <button class="toggle-btn active" data-type="hourly">Hourly</button>
             <button class="toggle-btn" data-type="flat">Flat</button>
-            <button class="toggle-btn" data-type="none">Non-Billable</button>
           </div>
         </div>
         <div class="form-group" id="hourly-rate-group">
@@ -635,6 +636,7 @@ async function renderIdleClockPage() {
             <span class="money-sym">${sym}</span>
             <input type="number" class="form-control" id="flat-amount-input" min="0" step="0.01" placeholder="0.00">
           </div>
+          <div class="field-hint">Flat 0.00 = Non-Billable visit</div>
         </div>
         <div class="form-group">
           <label class="form-label">Travel Reimbursement</label>
@@ -696,36 +698,26 @@ async function renderIdleClockPage() {
   document.getElementById('manage-projects-btn').addEventListener('click', () => openProjectsModal());
   document.getElementById('plan-job-btn').addEventListener('click', () => openPlanJobModal());
 
-  document.querySelectorAll('.planned-start').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
-      if (!pj) return;
-      if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
-      if (pj.project_id)      document.getElementById('project-select').value = String(pj.project_id);
-      if (pj.organization_id) document.getElementById('company-select').value = String(pj.organization_id);
-      if (pj.client_id)       document.getElementById('customer-select').value = String(pj.client_id);
-      if (pj.address)         document.getElementById('addr-input').value = pj.address;
-      if (pj.rate_type)       setRateType(pj.rate_type);
-      if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
-      if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
-      if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
-      prefillExtras.assignment_id = pj.assignment_id || prefillExtras.assignment_id;
-      prefillExtras.site_id = pj.site_id || prefillExtras.site_id;
-      prefillExtras.plannedJobId = pj.id;
-      const formCard = document.getElementById('clock-in-form-card');
-      formCard?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      showToast('Job pre-filled — pick a clock-in time to start', 'success');
-    });
-  });
+  const applyPlannedJob = (pj) => {
+    if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
+    if (pj.project_id)      document.getElementById('project-select').value = String(pj.project_id);
+    if (pj.organization_id) document.getElementById('company-select').value = String(pj.organization_id);
+    if (pj.client_id)       document.getElementById('customer-select').value = String(pj.client_id);
+    if (pj.address)         document.getElementById('addr-input').value = pj.address;
+    if (pj.rate_type)       setRateType(pj.rate_type === 'none' ? 'flat' : pj.rate_type);
+    if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
+    if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
+    if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
+    prefillExtras.assignment_id = pj.assignment_id || prefillExtras.assignment_id;
+    prefillExtras.site_id = pj.site_id || prefillExtras.site_id;
+    prefillExtras.revisit_of = pj.revisit_of || prefillExtras.revisit_of;
+    prefillExtras.plannedJobId = pj.id;
+    document.getElementById('clock-in-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showToast('Job pre-filled — pick a clock-in time to start', 'success');
+  };
 
-  document.querySelectorAll('.planned-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this planned job?')) return;
-      try {
-        await api.deletePlannedJob(Number(btn.dataset.id));
-        renderIdleClockPage();
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
-    });
+  document.getElementById('planned-strip')?.addEventListener('click', () => {
+    openPlannedScheduleModal(applyPlannedJob);
   });
 
   // Revisit prefill (set by openRevisitModal)
@@ -741,7 +733,7 @@ async function renderIdleClockPage() {
     if (rv.pay_rate_id)     document.getElementById('rate-select').value = String(rv.pay_rate_id);
     if (rv.flat_amount != null && rv.flat_amount !== '') document.getElementById('flat-amount-input').value = rv.flat_amount;
     if (rv.travel_reimb != null && rv.travel_reimb !== '') document.getElementById('travel-reimb-input').value = rv.travel_reimb;
-    ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name'].forEach(k => {
+    ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','revisit_of'].forEach(k => {
       if (rv[k]) prefillExtras[k] = rv[k];
     });
     setTimeout(() => {
@@ -787,13 +779,15 @@ async function renderIdleClockPage() {
       const travel   = parseFloat(document.getElementById('travel-reimb-input').value) || null;
 
       const projectSel = document.getElementById('project-select').value;
+      // Flat rate with no amount = Non-Billable visit
+      const effRateType = (rateType === 'flat' && !flatAmt) ? 'none' : rateType;
       state.currentEntry = await api.clockIn({
         clock_in:        clockInISO,
         organization_id: org    ? Number(org)   : null,
         client_id:       client ? Number(client): null,
-        pay_rate_id:     (rateType === 'hourly' && rate) ? Number(rate) : null,
-        rate_type:       rateType,
-        flat_amount:     rateType === 'flat' ? flatAmt : null,
+        pay_rate_id:     (effRateType === 'hourly' && rate) ? Number(rate) : null,
+        rate_type:       effRateType,
+        flat_amount:     effRateType === 'flat' ? flatAmt : null,
         address:         addr    || null,
         latitude:        geoCoords?.lat || null,
         longitude:       geoCoords?.lng || null,
@@ -807,6 +801,7 @@ async function renderIdleClockPage() {
         noc_name:        prefillExtras.noc_name || null,
         pm_pc_name:      prefillExtras.pm_pc_name || null,
         project_id:      projectSel ? Number(projectSel) : null,
+        revisit_of:      prefillExtras.revisit_of || null,
         status:          'pending',
       });
       if (prefillExtras.plannedJobId) {
@@ -828,6 +823,78 @@ async function renderIdleClockPage() {
   }
 
   renderTimeSelector('clockin-time-selector', 'Clock-in time', doClockIn, tripTimeOpts);
+}
+
+/* ── Planned jobs mini-schedule ──────────────────────────────────── */
+function plannedDayLabel(iso) {
+  const today = new Date().toLocaleDateString('en-CA');
+  const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA');
+  if (iso === today) return 'Today';
+  if (iso === tomorrow) return 'Tomorrow';
+  return new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+function openPlannedScheduleModal(applyPlannedJob) {
+  const jobs = state.plannedJobs || [];
+  const byDay = {};
+  jobs.forEach(pj => {
+    const k = pj.planned_date || '';
+    (byDay[k] = byDay[k] || []).push(pj);
+  });
+  const dayKeys = Object.keys(byDay).sort((a, b) => {
+    if (!a) return 1; if (!b) return -1;   // undated last
+    return a.localeCompare(b);
+  });
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('bell')} Planned Jobs</h3>
+      <button class="btn btn-ghost btn-sm" id="ps-x">✕</button>
+    </div>
+    <div class="modal-body">
+      ${dayKeys.map(k => `
+        <div class="day-group" style="margin-left:0;">
+          <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
+          ${byDay[k].map(pj => `
+            <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                  ${pj.revisit_of ? '<span style="color:var(--blue);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
+                </div>
+                <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
+              </div>
+              <button class="btn btn-primary btn-sm ps-start" data-id="${pj.id}">${svg('play')}</button>
+              <button class="btn btn-ghost btn-sm ps-del" data-id="${pj.id}" style="color:var(--red);">✕</button>
+            </div>`).join('')}
+        </div>`).join('') || '<div class="empty-state">No planned jobs</div>'}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="ps-close">Close</button>
+      <button class="btn btn-primary" id="ps-add">${svg('plus')} Plan a Job</button>
+    </div>`);
+
+  document.getElementById('ps-x').addEventListener('click', closeModal);
+  document.getElementById('ps-close').addEventListener('click', closeModal);
+  document.getElementById('ps-add').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
+
+  document.querySelectorAll('.ps-start').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (!pj) return;
+      closeModal();
+      if (applyPlannedJob) applyPlannedJob(pj);
+    });
+  });
+  document.querySelectorAll('.ps-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this planned job?')) return;
+      try {
+        await api.deletePlannedJob(Number(btn.dataset.id));
+        closeModal();
+        renderIdleClockPage();
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
+  });
 }
 
 /* ── Plan a Job modal ────────────────────────────────────────────── */
@@ -869,7 +936,6 @@ function buildJobFieldsHtml(prefix, sym) {
       <div class="toggle-group" id="${prefix}-paytype">
         <button type="button" class="toggle-btn active" data-type="hourly">Hourly</button>
         <button type="button" class="toggle-btn" data-type="flat">Flat</button>
-        <button type="button" class="toggle-btn" data-type="none">Non-Billable</button>
       </div>
     </div>
     <div class="form-group" id="${prefix}-hourly-group">
@@ -928,6 +994,10 @@ function openPlanJobModal() {
     </div>
     <div class="modal-body">
       <div class="form-group">
+        <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
+        <input type="date" class="form-control" id="pj-date">
+      </div>
+      <div class="form-group">
         <label class="form-label">Project <span class="opt-label">optional</span></label>
         <select class="form-control" id="pj-project"><option value="">— No Project —</option>${projOpts}</select>
       </div>
@@ -946,6 +1016,7 @@ function openPlanJobModal() {
     const data = readJobFields('pj', getRateType);
     if (!data.wo_title && !data.assignment_id) { showToast('Add at least a WO Title or Assignment ID', 'error'); return; }
     data.project_id = document.getElementById('pj-project').value ? Number(document.getElementById('pj-project').value) : null;
+    data.planned_date = document.getElementById('pj-date').value || null;
     try {
       await api.createPlannedJob(data);
       closeModal();
@@ -1029,25 +1100,20 @@ function openProjectsModal() {
 
 /* ── Revisit modal ───────────────────────────────────────────────── */
 function openRevisitModal(entry) {
-  // Fields importable from the original WO. Address/Company/Customer/Site ID
-  // are on by default; the rest is opt-in.
-  const FIELDS = [
-    { key: 'address',         label: 'Address',        def: true,  has: !!entry.address },
-    { key: 'organization_id', label: 'Company',        def: true,  has: !!entry.organization_id },
-    { key: 'client_id',       label: 'Customer',       def: true,  has: !!entry.client_id },
-    { key: 'site_id',         label: 'Site ID',        def: true,  has: !!entry.site_id },
-    { key: 'wo_title',        label: 'WO Title',       def: false, has: !!entry.wo_title },
-    { key: 'project_id',      label: 'Project',        def: false, has: !!entry.project_id },
-    { key: 'pay',             label: 'Pay Type & Rate',def: false, has: true },
-    { key: 'travel_reimb',    label: 'Travel Reimb',   def: false, has: entry.travel_reimb != null && entry.travel_reimb !== '' },
-    { key: 'ticket_num',      label: 'Ticket #',       def: false, has: !!entry.ticket_num },
-    { key: 'inc_num',         label: 'INC #',          def: false, has: !!entry.inc_num },
-    { key: 'mod_name',        label: 'MOD Name',       def: false, has: !!entry.mod_name },
-    { key: 'noc_name',        label: 'NOC Name',       def: false, has: !!entry.noc_name },
-    { key: 'pm_pc_name',      label: 'PM/PC Name',     def: false, has: !!entry.pm_pc_name },
+  // Address / Company / Customer / Project / Site ID / WO Title (REV | ...)
+  // are carried automatically; extra fields are behind "Import more".
+  const EXTRA = [
+    { key: 'pay',          label: 'Pay Type & Rate', has: true },
+    { key: 'travel_reimb', label: 'Travel Reimb',    has: entry.travel_reimb != null && entry.travel_reimb !== '' },
+    { key: 'ticket_num',   label: 'Ticket #',        has: !!entry.ticket_num },
+    { key: 'inc_num',      label: 'INC #',           has: !!entry.inc_num },
+    { key: 'mod_name',     label: 'MOD Name',        has: !!entry.mod_name },
+    { key: 'noc_name',     label: 'NOC Name',        has: !!entry.noc_name },
+    { key: 'pm_pc_name',   label: 'PM/PC Name',      has: !!entry.pm_pc_name },
   ].filter(f => f.has);
 
   const hasAssign = !!entry.assignment_id;
+  const revTitle = entry.wo_title ? `REV | ${entry.wo_title.replace(/^REV \| /, '')}` : '';
 
   openModal(`
     <div class="modal-header">
@@ -1055,13 +1121,17 @@ function openRevisitModal(entry) {
       <button class="btn btn-ghost btn-sm" id="rv-x">✕</button>
     </div>
     <div class="modal-body">
-      <div class="field-hint" style="margin-bottom:10px;">New WO based on <b>${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</b> — pick what to carry over:</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-bottom:12px;">
-        ${FIELDS.map(f => `
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-            <input type="checkbox" class="rv-field" data-key="${f.key}" ${f.def ? 'checked' : ''}> ${escHtml(f.label)}
-          </label>`).join('')}
+      <div class="field-hint" style="margin-bottom:10px;">
+        Carrying over automatically: <b>Address, Company, Customer, Project, Site ID${revTitle ? `, WO Title ("${escHtml(revTitle)}")` : ''}</b>
       </div>
+      ${EXTRA.length ? `
+      <button class="btn btn-ghost btn-sm" id="rv-more-toggle" style="margin-bottom:8px;">${svg('plus')} Import more...</button>
+      <div id="rv-more" class="hidden" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin-bottom:12px;">
+        ${EXTRA.map(f => `
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" class="rv-field" data-key="${f.key}"> ${escHtml(f.label)}
+          </label>`).join('')}
+      </div>` : ''}
       <div class="divider"></div>
       <div class="form-group" style="margin-top:10px;">
         <label class="form-label">Assignment ID</label>
@@ -1075,14 +1145,22 @@ function openRevisitModal(entry) {
         </label>` : ''}
         <input type="text" class="form-control ${hasAssign ? 'hidden' : ''}" id="rv-assign-input" placeholder="e.g. 171624976">
       </div>
+      <div class="form-group hidden" id="rv-date-group">
+        <label class="form-label">Planned date</label>
+        <input type="date" class="form-control" id="rv-date">
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="rv-cancel">Cancel</button>
-      <button class="btn btn-primary" id="rv-go">${svg('clock')} Continue to Clock In</button>
+      <button class="btn btn-secondary" id="rv-plan">${svg('plus')} Plan for Later</button>
+      <button class="btn btn-primary" id="rv-go">${svg('clock')} Clock In Now</button>
     </div>`);
 
   document.getElementById('rv-x').addEventListener('click', closeModal);
   document.getElementById('rv-cancel').addEventListener('click', closeModal);
+  document.getElementById('rv-more-toggle')?.addEventListener('click', () => {
+    document.getElementById('rv-more').classList.toggle('hidden');
+  });
 
   document.querySelectorAll('input[name="rv-assign-mode"]').forEach(r => {
     r.addEventListener('change', () => {
@@ -1092,21 +1170,23 @@ function openRevisitModal(entry) {
     });
   });
 
-  document.getElementById('rv-go').addEventListener('click', () => {
+  const buildRevisit = () => {
+    const rv = {
+      address:         entry.address || null,
+      organization_id: entry.organization_id || null,
+      client_id:       entry.client_id || null,
+      project_id:      entry.project_id || null,
+      site_id:         entry.site_id || null,
+      wo_title:        revTitle || null,
+      revisit_of:      entry.id,
+    };
     const picked = new Set([...document.querySelectorAll('.rv-field:checked')].map(c => c.dataset.key));
-    const rv = {};
-    if (picked.has('address'))         rv.address = entry.address;
-    if (picked.has('organization_id')) rv.organization_id = entry.organization_id;
-    if (picked.has('client_id'))       rv.client_id = entry.client_id;
-    if (picked.has('site_id'))         rv.site_id = entry.site_id;
-    if (picked.has('wo_title'))        rv.wo_title = entry.wo_title;
-    if (picked.has('project_id'))      rv.project_id = entry.project_id;
-    if (picked.has('travel_reimb'))    rv.travel_reimb = entry.travel_reimb;
-    if (picked.has('ticket_num'))      rv.ticket_num = entry.ticket_num;
-    if (picked.has('inc_num'))         rv.inc_num = entry.inc_num;
-    if (picked.has('mod_name'))        rv.mod_name = entry.mod_name;
-    if (picked.has('noc_name'))        rv.noc_name = entry.noc_name;
-    if (picked.has('pm_pc_name'))      rv.pm_pc_name = entry.pm_pc_name;
+    if (picked.has('travel_reimb')) rv.travel_reimb = entry.travel_reimb;
+    if (picked.has('ticket_num'))   rv.ticket_num = entry.ticket_num;
+    if (picked.has('inc_num'))      rv.inc_num = entry.inc_num;
+    if (picked.has('mod_name'))     rv.mod_name = entry.mod_name;
+    if (picked.has('noc_name'))     rv.noc_name = entry.noc_name;
+    if (picked.has('pm_pc_name'))   rv.pm_pc_name = entry.pm_pc_name;
     if (picked.has('pay')) {
       rv.rate_type = entry.rate_type || 'hourly';
       rv.pay_rate_id = entry.pay_rate_id;
@@ -1118,9 +1198,31 @@ function openRevisitModal(entry) {
     } else {
       rv.assignment_id = document.getElementById('rv-assign-input').value.trim() || null;
     }
-    state.pendingRevisit = rv;
+    return rv;
+  };
+
+  document.getElementById('rv-go').addEventListener('click', () => {
+    if (state.currentEntry) { showToast('Clock out of the current job first', 'error'); return; }
+    state.pendingRevisit = buildRevisit();
     closeModal();
     navigateTo('clock');
+  });
+
+  // Plan for Later → creates a planned job (asks for a date on first tap)
+  document.getElementById('rv-plan').addEventListener('click', async () => {
+    const dateGroup = document.getElementById('rv-date-group');
+    if (dateGroup.classList.contains('hidden')) {
+      dateGroup.classList.remove('hidden');
+      document.getElementById('rv-date').focus();
+      return;
+    }
+    const rv = buildRevisit();
+    rv.planned_date = document.getElementById('rv-date').value || null;
+    try {
+      await api.createPlannedJob(rv);
+      closeModal();
+      showToast('Revisit planned', 'success');
+    } catch (err) { showToast(err.message || 'Save failed', 'error'); }
   });
 }
 
@@ -2078,67 +2180,45 @@ async function initiateClockOut(entry) {
   if (!workSummary) missing.push('Work Performed / Comments');
 
   if (missing.length) {
+    const otherMissing = missing.filter(f => f !== 'MOD Name');
     openModal(`
       <div class="modal-header">
         <h3>${svg('alert')} Missing Required Fields</h3>
       </div>
       <div class="modal-body">
-        <p style="color:var(--text2);margin-bottom:12px;">Fill them in right here, or Override to continue without them:</p>
-        ${!assignId ? `
-        <div class="form-group">
-          <label class="form-label">Assignment ID</label>
-          <input type="text" class="form-control" id="mf-assign" placeholder="e.g. 171624976">
-        </div>` : ''}
         ${!modName ? `
         <div class="form-group">
           <label class="form-label">MOD Name</label>
           <input type="text" class="form-control" id="mf-mod" placeholder="Manager on duty (comma-separate several)">
         </div>` : ''}
-        ${!workSummary ? `
-        <div class="form-group">
-          <label class="form-label">Work Performed / Comments</label>
-          <textarea class="form-control" id="mf-summary" rows="3" placeholder="What was done on site..."></textarea>
-        </div>` : ''}
+        ${otherMissing.length ? `
+        <p style="color:var(--text2);margin-bottom:8px;">Also empty:</p>
+        ${otherMissing.map(f => `<div class="missing-field-item">${svg('alert')} ${f}</div>`).join('')}
+        <p style="color:var(--text3);font-size:13px;margin-top:10px;">Go back to fill them, or Override to mark as "OVERRIDE!"</p>` : ''}
       </div>
       <div class="modal-footer">
-        <button class="btn btn-ghost" id="co-cancel-btn">Cancel</button>
-        <button class="btn btn-danger" id="co-override-btn">Override & Continue</button>
-        <button class="btn btn-primary" id="co-fill-btn">${svg('check')} Save & Continue</button>
+        <button class="btn btn-ghost" id="co-cancel-btn">← Back</button>
+        <button class="btn ${otherMissing.length ? 'btn-danger' : 'btn-primary'}" id="co-continue-btn">
+          ${otherMissing.length ? 'Override & Continue' : `${svg('check')} Continue`}
+        </button>
       </div>`);
 
-    const persistAndGo = async (requireAll) => {
-      const assignId2 = assignId    || document.getElementById('mf-assign')?.value.trim()  || '';
-      const modName2  = modName     || document.getElementById('mf-mod')?.value.trim()     || '';
-      const summary2  = workSummary || document.getElementById('mf-summary')?.value.trim() || '';
-      const stillMissing = [];
-      if (!assignId2) stillMissing.push('Assignment ID');
-      if (!modName2)  stillMissing.push('MOD Name');
-      if (!summary2)  stillMissing.push('Work Performed / Comments');
-      if (requireAll && stillMissing.length) {
-        showToast('Still empty: ' + stillMissing.join(', '), 'error');
+    document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
+    document.getElementById('co-continue-btn').addEventListener('click', async () => {
+      const modName2 = modName || document.getElementById('mf-mod')?.value.trim() || '';
+      if (!modName && !modName2 && !otherMissing.length) {
+        showToast('Enter the MOD name or go back', 'error');
         return;
       }
-      // Persist newly filled values and keep the background form in sync
-      const data = {};
-      if (!assignId && assignId2) {
-        data.assignment_id = assignId2;
-        const el = document.getElementById('jd-assignment'); if (el) el.value = assignId2;
+      // Persist a newly entered MOD name
+      if (!modName && modName2) {
+        try { state.currentEntry = await api.updateEntry(entry.id, { mod_name: modName2 }); } catch { /* keep local */ }
       }
-      if (!modName && modName2) data.mod_name = modName2;
-      if (!workSummary && summary2) {
-        data.work_summary = summary2;
-        const el = document.getElementById('jd-work-summary'); if (el) el.value = summary2;
-      }
-      if (Object.keys(data).length) {
-        try { state.currentEntry = await api.updateEntry(entry.id, data); } catch { /* continue with local values */ }
-      }
+      const stillMissing = [...otherMissing];
+      if (!modName2) stillMissing.push('MOD Name');
       closeModal();
-      showClockOutTimePicker(state.currentEntry || entry, summary2, assignId2, modName2, stillMissing);
-    };
-
-    document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
-    document.getElementById('co-override-btn').addEventListener('click', () => persistAndGo(false));
-    document.getElementById('co-fill-btn').addEventListener('click', () => persistAndGo(true));
+      showClockOutTimePicker(state.currentEntry || entry, workSummary, assignId, modName2, stillMissing);
+    });
     return;
   }
   showClockOutTimePicker(entry, workSummary, assignId, modName, []);
@@ -2334,25 +2414,6 @@ function showFinalReview(entry, coData) {
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
-      <div class="divider" style="margin:10px 0;"></div>
-      <div class="subsection-label">Manager Signature <span class="opt-label">optional</span></div>
-      <div id="fr-sig-area">
-        <div class="form-group" style="margin-top:6px;">
-          <div class="input-row">
-            <select class="form-control" id="fr-sig-mod" style="flex:1;">
-              ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
-              <option value="__other__">+ Other person...</option>
-            </select>
-          </div>
-          <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
-        </div>
-        <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:120px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
-      </div>
-      <div class="input-row" style="margin-top:4px;">
-        <span class="field-hint" id="fr-sig-hint" style="flex:1;">Sign above with finger or mouse</span>
-        <button class="btn btn-ghost btn-sm" id="fr-sig-none">No Signature</button>
-        <button class="btn btn-ghost btn-sm" id="fr-sig-clear">Clear</button>
-      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
@@ -2362,6 +2423,42 @@ function showFinalReview(entry, coData) {
   document.getElementById('fr-back-btn').addEventListener('click', () =>
     showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
   );
+
+  document.getElementById('fr-confirm-btn').addEventListener('click', () => {
+    closeModal();
+    showSignatureModal(entry, coData);
+  });
+}
+
+/* ── Manager sign-off (separate window — no money on screen) ─────── */
+function showSignatureModal(entry, coData) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('edit')} Manager Sign-Off</h3>
+    </div>
+    <div class="modal-body">
+      <div id="fr-sig-area">
+        <div class="form-group" style="margin-top:2px;">
+          <div class="input-row">
+            <select class="form-control" id="fr-sig-mod" style="flex:1;">
+              ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+              <option value="__other__">+ Other person...</option>
+            </select>
+          </div>
+          <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
+        </div>
+        <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:140px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
+      </div>
+      <div class="input-row" style="margin-top:4px;">
+        <span class="field-hint" id="fr-sig-hint" style="flex:1;">Sign above with finger or mouse</span>
+        <button class="btn btn-ghost btn-sm" id="fr-sig-clear">Clear</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="fr-sig-back">← Back</button>
+      <button class="btn btn-ghost" id="fr-sig-none">No Signature</button>
+      <button class="btn btn-danger" id="fr-sig-done">${svg('check')} Clock Out</button>
+    </div>`);
 
   // Signature pad
   let sigDrawn = false;
@@ -2389,22 +2486,15 @@ function showFinalReview(entry, coData) {
   document.getElementById('fr-sig-mod').addEventListener('change', e => {
     document.getElementById('fr-sig-name').classList.toggle('hidden', e.target.value !== '__other__');
   });
-  let sigSkipped = false;
-  document.getElementById('fr-sig-none').addEventListener('click', () => {
-    sigSkipped = !sigSkipped;
-    document.getElementById('fr-sig-area').classList.toggle('hidden', sigSkipped);
-    document.getElementById('fr-sig-clear').classList.toggle('hidden', sigSkipped);
-    document.getElementById('fr-sig-hint').textContent = sigSkipped
-      ? 'No signature will be attached'
-      : 'Sign above with finger or mouse';
-    document.getElementById('fr-sig-none').textContent = sigSkipped ? 'Add Signature' : 'No Signature';
+  document.getElementById('fr-sig-back').addEventListener('click', () => {
+    closeModal();
+    showFinalReview(entry, coData);
   });
 
-  document.getElementById('fr-confirm-btn').addEventListener('click', async () => {
+  const finishClockOut = async (withSignature) => {
     try {
-      // Manager signature (uploaded before clock-out, file: MOD-{Name}-Signature.png)
       let modNameFinal = coData.modName || entry.mod_name;
-      if (sigDrawn && !sigSkipped) {
+      if (withSignature && sigDrawn) {
         const modSel = document.getElementById('fr-sig-mod').value;
         const signer = modSel === '__other__'
           ? (document.getElementById('fr-sig-name').value.trim() || 'Manager')
@@ -2438,7 +2528,10 @@ function showFinalReview(entry, coData) {
       closeModal();
       renderSummaryPage(completed);
     } catch (e) { showToast(e.message || 'Clock out failed', 'error'); }
-  });
+  };
+
+  document.getElementById('fr-sig-none').addEventListener('click', () => finishClockOut(false));
+  document.getElementById('fr-sig-done').addEventListener('click', () => finishClockOut(true));
 }
 
 /* ── Summary page (post clock-out) ──────────────────────────────── */
@@ -2550,9 +2643,11 @@ async function compressFileToBase64(file) {
   });
 }
 
-function openTripStartModal() {
+async function openTripStartModal() {
   const cats = state.tripCategories;
   const clocked = !!state.currentEntry;
+  try { state.plannedJobs = await api.getPlannedJobs(); } catch { state.plannedJobs = state.plannedJobs || []; }
+  const plannedWithAssign = (state.plannedJobs || []).filter(p => p.assignment_id);
 
   // When clocked in, only OnClock/Other. When off-clock, everything except OnClock.
   const filteredCats = cats.filter(c => {
@@ -2583,6 +2678,12 @@ function openTripStartModal() {
         <div class="trip-cat-grid" id="ts-cat-grid">${catBtnsHtml}</div>
       </div>
       <div class="form-group" id="ts-assignment-group" style="${isInRoute() ? '' : 'display:none;'}">
+        ${plannedWithAssign.length ? `
+        <label class="form-label">From Planned Job <span class="opt-label">optional</span></label>
+        <select class="form-control" id="ts-planned-select" style="margin-bottom:8px;">
+          <option value="">— Pick a planned job —</option>
+          ${plannedWithAssign.map(p => `<option value="${escHtml(p.assignment_id)}">${escHtml(p.planned_date ? plannedDayLabel(p.planned_date) + ' — ' : '')}${escHtml(p.wo_title || p.assignment_id)}</option>`).join('')}
+        </select>` : ''}
         <label class="form-label">Assignment ID <span class="req-star">*</span></label>
         <div class="input-row">
           <input type="text" class="form-control" id="ts-assignment" placeholder="e.g. ABC-12345">
@@ -2617,6 +2718,15 @@ function openTripStartModal() {
 
   document.getElementById('ts-x').addEventListener('click', closeModal);
   document.getElementById('ts-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('ts-planned-select')?.addEventListener('change', e => {
+    if (!e.target.value) return;
+    const inp = document.getElementById('ts-assignment');
+    inp.value = e.target.value;
+    const later = document.getElementById('ts-add-later');
+    if (later) { later.checked = false; inp.disabled = false; }
+    document.getElementById('ts-assignment-hint')?.classList.add('hidden');
+  });
 
   const updateNoteLabel = () => {
     const noteField = document.getElementById('ts-note-field');
@@ -3045,6 +3155,16 @@ async function renderJournalPage() {
         });
       });
 
+      // REVISIT badge → jump to the first visit
+      journalBody.querySelectorAll('.rev-badge').forEach(badge => {
+        badge.addEventListener('click', e => {
+          e.stopPropagation();
+          const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
+          if (original) openEntryDetail(original);
+          else showToast('Original visit not found', 'error');
+        });
+      });
+
       journalBody.querySelectorAll('.entry-edit-btn').forEach(btn => {
         btn.addEventListener('click', e => {
           e.stopPropagation();
@@ -3114,7 +3234,14 @@ function renderWeekGroup(wg, ws, sym, payMap) {
         </div>
       </div>
       ${(() => {
-        // Group entries by calendar day, render a day header per group
+        // Group entries by calendar day, render a day header per group.
+        // Revisits whose original is in the same week get a visual link.
+        const revLinked = new Set();
+        wg.entries.forEach(e => {
+          if (e.revisit_of && wg.entries.some(o => o.id === e.revisit_of)) {
+            revLinked.add(e.id); revLinked.add(e.revisit_of);
+          }
+        });
         const sorted = [...wg.entries].sort((a,b) => new Date(a.clock_in) - new Date(b.clock_in));
         const days = {};
         for (const e of sorted) {
@@ -3127,7 +3254,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
           return `
           <div class="day-group">
             <div class="day-group-header">${label}</div>
-            ${days[k].map(e => renderEntryCard(e)).join('')}
+            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id))).join('')}
           </div>`;
         }).join('');
       })()}
@@ -3392,14 +3519,14 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
-function renderEntryCard(entry) {
+function renderEntryCard(entry, linked = false) {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
   const statusClass = entry.status || 'pending';
 
   return `
-    <div class="entry-card" data-id="${entry.id}">
+    <div class="entry-card${linked ? ' linked-visit' : ''}" data-id="${entry.id}">
       <div class="entry-card-top">
         <div class="entry-card-left">
           <div class="entry-title">${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</div>
@@ -3407,6 +3534,7 @@ function renderEntryCard(entry) {
           ${entry.address ? `<div class="entry-addr">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
         </div>
         <div class="entry-card-right">
+          ${entry.revisit_of ? `<button class="rev-badge" data-rev-of="${entry.revisit_of}" title="Open first visit">${svg('return')} REVISIT</button>` : ''}
           <span class="status-chip ${statusClass}">${statusClass.toUpperCase()}</span>
         </div>
       </div>
@@ -3474,10 +3602,7 @@ function openEntryDetail(entry) {
     copyToClipboard(buildTextReport(entry));
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
-  document.getElementById('det-revisit-btn')?.addEventListener('click', () => {
-    if (state.currentEntry) { showToast('Clock out of the current job first', 'error'); return; }
-    openRevisitModal(entry);
-  });
+  document.getElementById('det-revisit-btn')?.addEventListener('click', () => openRevisitModal(entry));
 
   (async () => {
     const photosDiv = document.getElementById('det-photos');
@@ -3500,6 +3625,17 @@ async function openEntryEdit(entry) {
     `<option value="${p.id}" ${entry.project_id == p.id ? 'selected' : ''}>${escHtml(p.name)}</option>`
   ).join('');
 
+  // Candidates for "Revisit of" — recent completed WOs, excluding this one
+  let revOpts = '';
+  try {
+    const all = await api.getEntries();
+    revOpts = all
+      .filter(e => e.id !== entry.id && e.clock_out)
+      .slice(0, 100)
+      .map(e => `<option value="${e.id}" ${entry.revisit_of == e.id ? 'selected' : ''}>${escHtml(fmtDateShort(e.clock_in))} — ${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</option>`)
+      .join('');
+  } catch { /* select stays minimal */ }
+
   const rateOpts = state.payRates.map(r =>
     `<option value="${r.id}" ${Number(entry.pay_rate_id) === r.id ? 'selected' : ''}>${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`
   ).join('');
@@ -3520,6 +3656,13 @@ async function openEntryEdit(entry) {
         <select class="form-control" id="ee-project">
           <option value="">— No Project —</option>
           ${projOpts}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Revisit of <span class="opt-label">optional</span></label>
+        <select class="form-control" id="ee-revisit-of">
+          <option value="">— Not a revisit —</option>
+          ${revOpts}
         </select>
       </div>
       <div class="form-group">
@@ -3746,6 +3889,7 @@ async function openEntryEdit(entry) {
       await api.updateEntry(entry.id, {
         wo_title:        document.getElementById('ee-wo-title').value.trim() || null,
         project_id:      document.getElementById('ee-project').value ? Number(document.getElementById('ee-project').value) : null,
+        revisit_of:      document.getElementById('ee-revisit-of').value ? Number(document.getElementById('ee-revisit-of').value) : null,
         organization_id: document.getElementById('ee-company').value    ? Number(document.getElementById('ee-company').value)    : null,
         client_id:       document.getElementById('ee-customer').value   ? Number(document.getElementById('ee-customer').value)   : null,
         site_id:         document.getElementById('ee-site-id').value.trim() || null,
