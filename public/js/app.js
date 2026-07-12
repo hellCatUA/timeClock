@@ -544,8 +544,8 @@ async function renderIdleClockPage() {
   const projects = state.projects || [];
   const plannedJobs = state.plannedJobs || [];
 
-  const orgOpts  = orgs.map(o  => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
-  const cliOpts  = clis.map(c  => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+  const orgOptions = orgs.map(o => ({ value: String(o.id), label: o.name }));
+  const cliOptions = clis.map(c => ({ value: String(c.id), label: c.name }));
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
   const projOpts = projects.filter(p => !p.archived).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
 
@@ -589,6 +589,7 @@ async function renderIdleClockPage() {
       </div>
       <div class="section-label">New Work Order</div>
       <div class="card" id="clock-in-form-card">
+        <button class="btn btn-ghost btn-sm" id="start-revisit-btn" style="margin-bottom:10px;color:var(--orange);">${svg('return')} Revisit of an existing WO?</button>
         <div class="form-group">
           <label class="form-label">WO Title</label>
           <input type="text" class="form-control" id="wo-title-input" placeholder="Brief description of work...">
@@ -605,17 +606,11 @@ async function renderIdleClockPage() {
         </div>
         <div class="form-group">
           <label class="form-label">Company</label>
-          <select class="form-control" id="company-select">
-            <option value="">— Select Company —</option>
-            ${orgOpts}
-          </select>
+          ${buildCombo('company-select', 'Type to search companies...')}
         </div>
         <div class="form-group">
           <label class="form-label">Customer</label>
-          <select class="form-control" id="customer-select">
-            <option value="">— Select Customer —</option>
-            ${cliOpts}
-          </select>
+          ${buildCombo('customer-select', 'Type to search customers...')}
         </div>
         <div class="form-group">
           <label class="form-label">Address</label>
@@ -658,6 +653,10 @@ async function renderIdleClockPage() {
       </div>
     </div>`;
 
+  wireCombo('company-select', orgOptions);
+  wireCombo('customer-select', cliOptions);
+  document.getElementById('start-revisit-btn').addEventListener('click', () => openPickWoForRevisitModal());
+
   document.getElementById('in-route-btn').addEventListener('click', () => openTripStartModal());
 
   document.getElementById('clock-in-start-btn').addEventListener('click', () => {
@@ -688,8 +687,8 @@ async function renderIdleClockPage() {
     let d = {};
     try { d = JSON.parse(p.defaults || '{}') || {}; } catch { d = {}; }
     if (d.wo_title)          document.getElementById('wo-title-input').value = d.wo_title;
-    if (d.organization_id)   document.getElementById('company-select').value = String(d.organization_id);
-    if (d.client_id)         document.getElementById('customer-select').value = String(d.client_id);
+    if (d.organization_id)   { document.getElementById('company-select').value = String(d.organization_id); comboSync('company-select', orgOptions); }
+    if (d.client_id)         { document.getElementById('customer-select').value = String(d.client_id); comboSync('customer-select', cliOptions); }
     if (d.address)           document.getElementById('addr-input').value = d.address;
     if (d.rate_type)         setRateType(d.rate_type);
     if (d.pay_rate_id)       document.getElementById('rate-select').value = String(d.pay_rate_id);
@@ -710,8 +709,8 @@ async function renderIdleClockPage() {
   const applyPlannedJob = (pj) => {
     if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
     if (pj.project_id)      document.getElementById('project-select').value = String(pj.project_id);
-    if (pj.organization_id) document.getElementById('company-select').value = String(pj.organization_id);
-    if (pj.client_id)       document.getElementById('customer-select').value = String(pj.client_id);
+    if (pj.organization_id) { document.getElementById('company-select').value = String(pj.organization_id); comboSync('company-select', orgOptions); }
+    if (pj.client_id)       { document.getElementById('customer-select').value = String(pj.client_id); comboSync('customer-select', cliOptions); }
     if (pj.address)         document.getElementById('addr-input').value = pj.address;
     if (pj.rate_type)       setRateType(pj.rate_type === 'none' ? 'flat' : pj.rate_type);
     if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
@@ -735,8 +734,8 @@ async function renderIdleClockPage() {
     state.pendingRevisit = null;
     if (rv.wo_title)        document.getElementById('wo-title-input').value = rv.wo_title;
     if (rv.project_id)      document.getElementById('project-select').value = String(rv.project_id);
-    if (rv.organization_id) document.getElementById('company-select').value = String(rv.organization_id);
-    if (rv.client_id)       document.getElementById('customer-select').value = String(rv.client_id);
+    if (rv.organization_id) { document.getElementById('company-select').value = String(rv.organization_id); comboSync('company-select', orgOptions); }
+    if (rv.client_id)       { document.getElementById('customer-select').value = String(rv.client_id); comboSync('customer-select', cliOptions); }
     if (rv.address)         document.getElementById('addr-input').value = rv.address;
     if (rv.rate_type)       setRateType(rv.rate_type);
     if (rv.pay_rate_id)     document.getElementById('rate-select').value = String(rv.pay_rate_id);
@@ -2254,6 +2253,52 @@ function cfLabel(type) {
   return match || type.slice(3).replace(/_/g, ' ');
 }
 
+/* ── Searchable combo (Company / Customer pickers) ───────────────── */
+function buildCombo(id, placeholder = 'Type to search...') {
+  return `<div class="combo" id="${id}-combo">
+    <input type="text" class="form-control" id="${id}-search" placeholder="${escHtml(placeholder)}" autocomplete="off">
+    <input type="hidden" id="${id}">
+    <div class="combo-list hidden" id="${id}-list"></div>
+  </div>`;
+}
+function wireCombo(id, options) {
+  const search = document.getElementById(`${id}-search`);
+  const hidden = document.getElementById(id);
+  const list = document.getElementById(`${id}-list`);
+  if (!search || !hidden || !list) return;
+  const render = (q = '') => {
+    const ql = q.trim().toLowerCase();
+    const items = options.filter(o => !ql || o.label.toLowerCase().includes(ql));
+    list.innerHTML = (ql ? '' : `<div class="combo-item" data-v="">— None —</div>`) +
+      (items.length
+        ? items.map(o => `<div class="combo-item" data-v="${escHtml(o.value)}">${escHtml(o.label)}</div>`).join('')
+        : '<div class="combo-empty">No matches</div>');
+  };
+  search.addEventListener('focus', () => { render(search.value); list.classList.remove('hidden'); });
+  search.addEventListener('input', () => {
+    render(search.value);
+    list.classList.remove('hidden');
+    const exact = options.find(o => o.label.toLowerCase() === search.value.trim().toLowerCase());
+    hidden.value = exact ? exact.value : '';
+  });
+  search.addEventListener('blur', () => setTimeout(() => list.classList.add('hidden'), 150));
+  list.addEventListener('mousedown', e => {
+    const item = e.target.closest('.combo-item');
+    if (!item) return;
+    e.preventDefault();
+    hidden.value = item.dataset.v || '';
+    search.value = item.dataset.v ? item.textContent : '';
+    list.classList.add('hidden');
+  });
+}
+function comboSync(id, options) {
+  const hidden = document.getElementById(id);
+  const search = document.getElementById(`${id}-search`);
+  if (!hidden || !search) return;
+  const o = options.find(x => String(x.value) === String(hidden.value));
+  search.value = o ? o.label : '';
+}
+
 /* ── Multi-value inputs (tickets, MODs) — stored comma-joined ────── */
 function splitMulti(str) {
   return (str || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -2357,6 +2402,7 @@ async function initiateClockOut(entry) {
         <div class="form-group">
           <label class="form-label">MOD Name</label>
           ${buildMultiInputs('mf-mods', '', 'Manager on duty')}
+          <button class="btn btn-ghost btn-sm" id="mf-no-mod" style="margin-top:4px;font-size:12px;">No MOD on site</button>
         </div>` : ''}
         ${otherMissing.length ? `
         <p style="color:var(--text2);margin-bottom:8px;">Also empty:</p>
@@ -2371,6 +2417,11 @@ async function initiateClockOut(entry) {
       </div>`);
 
     wireMultiInputs('mf-mods');
+    document.getElementById('mf-no-mod')?.addEventListener('click', async () => {
+      try { state.currentEntry = await api.updateEntry(entry.id, { mod_name: 'NO MOD' }); } catch { /* keep local */ }
+      closeModal();
+      showClockOutTimePicker(state.currentEntry || entry, workSummary, assignId, 'NO MOD', [...otherMissing]);
+    });
     document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
     document.getElementById('co-continue-btn').addEventListener('click', async () => {
       const modName2 = modName || (document.getElementById('mf-mods') ? readMultiInputs('mf-mods') : null) || '';
