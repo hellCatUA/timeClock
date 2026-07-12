@@ -100,7 +100,8 @@ function calcTotalExpected(entry) {
   const labor = calcLabor(entry);
   const travel = parseFloat(entry.travel_reimb) || 0;
   const parking = parseFloat(entry.parking_tolls) || 0;
-  return labor + travel + parking;
+  const mats = parseMaterials(entry.materials).reduce((s, m) => s + (parseFloat(m.price) || 0), 0);
+  return labor + travel + parking + mats;
 }
 function getWeekBounds(date, weekStartDay) {
   // weekStartDay: 0=Sun, 1=Mon
@@ -704,7 +705,7 @@ async function renderIdleClockPage() {
   });
 
   document.getElementById('manage-projects-btn').addEventListener('click', () => openProjectsModal());
-  document.getElementById('plan-job-btn').addEventListener('click', () => openPlanJobModal());
+  document.getElementById('plan-job-btn').addEventListener('click', () => openPlanJobChoiceModal());
 
   const applyPlannedJob = (pj) => {
     if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
@@ -882,7 +883,7 @@ function openPlannedScheduleModal(applyPlannedJob) {
               ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:56px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
               <div style="flex:1;min-width:0;">
                 <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                  ${pj.revisit_of ? '<span style="color:var(--blue);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
+                  ${pj.revisit_of ? '<span style="color:var(--orange);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
                 </div>
                 <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
               </div>
@@ -893,14 +894,12 @@ function openPlannedScheduleModal(applyPlannedJob) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="ps-close">Close</button>
-      <button class="btn btn-secondary" id="ps-revisit">${svg('return')} Plan Revisit</button>
       <button class="btn btn-primary" id="ps-add">${svg('plus')} Plan a Job</button>
     </div>`);
 
   document.getElementById('ps-x').addEventListener('click', closeModal);
   document.getElementById('ps-close').addEventListener('click', closeModal);
-  document.getElementById('ps-add').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
-  document.getElementById('ps-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
+  document.getElementById('ps-add').addEventListener('click', () => { closeModal(); openPlanJobChoiceModal(); });
 
   document.querySelectorAll('.ps-start').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -920,6 +919,27 @@ function openPlannedScheduleModal(applyPlannedJob) {
       } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
     });
   });
+}
+
+/* ── Plan a Job: new job or revisit? ─────────────────────────────── */
+function openPlanJobChoiceModal() {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('plus')} Plan a Job</h3>
+      <button class="btn btn-ghost btn-sm" id="pc-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text2);margin-bottom:12px;">Is this a brand-new job or a revisit to an existing work order?</p>
+      <button class="btn btn-primary btn-full" id="pc-new" style="margin-bottom:8px;">${svg('plus')} New Job</button>
+      <button class="btn btn-secondary btn-full" id="pc-revisit">${svg('return')} Revisit of a WO</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pc-cancel">Cancel</button>
+    </div>`);
+  document.getElementById('pc-x').addEventListener('click', closeModal);
+  document.getElementById('pc-cancel').addEventListener('click', closeModal);
+  document.getElementById('pc-new').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
+  document.getElementById('pc-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
 }
 
 /* ── Pick a completed WO to plan a revisit from ──────────────────── */
@@ -1073,7 +1093,6 @@ function openPlanJobModal() {
       <button class="btn btn-ghost btn-sm" id="pj-x">✕</button>
     </div>
     <div class="modal-body">
-      <button class="btn btn-secondary btn-sm btn-full" id="pj-revisit" style="margin-bottom:12px;">${svg('return')} Planning a Revisit? Pick the original WO →</button>
       <div class="row-2">
         <div class="form-group">
           <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
@@ -1097,7 +1116,6 @@ function openPlanJobModal() {
 
   document.getElementById('pj-x').addEventListener('click', closeModal);
   document.getElementById('pj-cancel').addEventListener('click', closeModal);
-  document.getElementById('pj-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
   const getRateType = wireJobFieldsPayType('pj');
 
   // Picking a project auto-fills its configured defaults
@@ -4126,15 +4144,10 @@ async function renderOverviewPage() {
     const totalExpected = filtered.reduce((s,e) => s + calcTotalExpected(e), 0);
     const totalHrs = filtered.reduce((s,e) => s + getNetSeconds(e)/3600, 0);
     const jobCount = filtered.length;
-    // Time-weighted: total labor / total paid hours (a 30-min flat job must
-    // not skew the average the way per-job rate averaging did)
-    let paidLabor = 0, paidHrs = 0;
-    for (const e of filtered) {
-      const hrs = getNetSeconds(e) / 3600;
-      const labor = calcLabor(e, getNetSeconds(e));
-      if (hrs > 0 && labor > 0) { paidLabor += labor; paidHrs += hrs; }
-    }
-    const avgRate = paidHrs > 0 ? paidLabor / paidHrs : null;
+    // Avg Rate = everything earned (labor + travel + materials + parking)
+    // over ALL active hours — paid breaks are already inside getNetSeconds
+    // when the paid-breaks setting is on, and non-billable visit hours count
+    const avgRate = totalHrs > 0 ? totalExpected / totalHrs : null;
 
     // By company
     const byCompany = {};
@@ -4237,13 +4250,13 @@ async function renderOverviewPage() {
           </div>
           <div class="stat-card">
             <div class="stat-label">Hours Worked</div>
-            <div class="stat-value">${totalHrs.toFixed(1)}</div>
+            <div class="stat-value">${totalHrs.toFixed(2)}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Jobs Done</div>
             <div class="stat-value">${jobCount}</div>
           </div>
-          ${avgRate ? `<div class="stat-card"><div class="stat-label">Avg Rate</div><div class="stat-value">${sym}${avgRate.toFixed(1)}/hr</div></div>` : ''}
+          ${avgRate ? `<div class="stat-card"><div class="stat-label">Avg Rate</div><div class="stat-value">${sym}${avgRate.toFixed(2)}/hr</div></div>` : ''}
         </div>
 
         <div class="section-label">Earnings — Last 8 Weeks</div>
