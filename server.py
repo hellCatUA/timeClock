@@ -211,6 +211,7 @@ def init_db():
             travel_reimb REAL,
             notes TEXT,
             planned_date TEXT,
+            planned_time TEXT,
             revisit_of INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
@@ -294,6 +295,7 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
         "ALTER TABLE time_entries ADD COLUMN revisit_of INTEGER",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
         "ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS projects (
@@ -1795,13 +1797,13 @@ def h_create_planned_job(req, _groups):
             """INSERT INTO planned_jobs
             (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
-             planned_date, revisit_of)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             planned_date, planned_time, revisit_of)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
              data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"),
-             data.get("planned_date"), data.get("revisit_of"))
+             data.get("planned_date"), data.get("planned_time"), data.get("revisit_of"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     return 201, row
