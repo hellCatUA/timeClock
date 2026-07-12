@@ -1019,6 +1019,22 @@ function wireJobFieldsPayType(prefix) {
   return () => t;
 }
 
+function applyProjectDefaultsToJobFields(prefix, p) {
+  let d = {};
+  try { d = JSON.parse(p.defaults || '{}') || {}; } catch { d = {}; }
+  const g = id => document.getElementById(`${prefix}-${id}`);
+  if (d.wo_title)        g('title').value = d.wo_title;
+  if (d.organization_id) g('org').value = String(d.organization_id);
+  if (d.client_id)       g('client').value = String(d.client_id);
+  if (d.assignment_id)   g('assign').value = d.assignment_id;
+  if (d.site_id)         g('site').value = d.site_id;
+  if (d.address)         g('addr').value = d.address;
+  if (d.rate_type)       document.querySelector(`#${prefix}-paytype .toggle-btn[data-type="${d.rate_type === 'none' ? 'flat' : d.rate_type}"]`)?.click();
+  if (d.pay_rate_id)     g('rate').value = String(d.pay_rate_id);
+  if (d.flat_amount != null && d.flat_amount !== '') g('flat').value = d.flat_amount;
+  if (d.travel_reimb != null && d.travel_reimb !== '') g('travel').value = d.travel_reimb;
+}
+
 function readJobFields(prefix, getRateType) {
   const g = id => document.getElementById(`${prefix}-${id}`);
   const rt = getRateType();
@@ -1065,6 +1081,12 @@ function openPlanJobModal() {
   document.getElementById('pj-cancel').addEventListener('click', closeModal);
   document.getElementById('pj-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
   const getRateType = wireJobFieldsPayType('pj');
+
+  // Picking a project auto-fills its configured defaults
+  document.getElementById('pj-project').addEventListener('change', e => {
+    const p = (state.projects || []).find(x => x.id === Number(e.target.value));
+    if (p) applyProjectDefaultsToJobFields('pj', p);
+  });
 
   document.getElementById('pj-save').addEventListener('click', async () => {
     const data = readJobFields('pj', getRateType);
