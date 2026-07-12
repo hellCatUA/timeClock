@@ -567,9 +567,13 @@ async function renderIdleClockPage() {
       </div>
       ${pendingBanner}
       ${plannedJobs.length ? (() => {
-        const dated = plannedJobs.filter(p => p.planned_date).sort((a,b) => a.planned_date.localeCompare(b.planned_date));
+        const sortKey = p => `${p.planned_date}T${p.planned_time || '23:59'}`;
+        const dated = plannedJobs.filter(p => p.planned_date).sort((a,b) => sortKey(a).localeCompare(sortKey(b)));
         const next = dated[0] || plannedJobs[0];
-        const nextLbl = `${next.planned_date ? plannedDayLabel(next.planned_date) + ' — ' : ''}${next.wo_title || next.assignment_id || 'job'}`;
+        const nextWhen = next.planned_date
+          ? plannedDayLabel(next.planned_date) + (next.planned_time ? ' ' + fmtPlannedTime(next.planned_time) : '')
+          : '';
+        const nextLbl = `${nextWhen ? nextWhen + ' — ' : ''}${next.wo_title || next.assignment_id || 'job'}`;
         return `
       <div class="card" id="planned-strip" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;">
         <div style="flex:1;min-width:0;">
@@ -837,6 +841,13 @@ async function renderIdleClockPage() {
 }
 
 /* ── Planned jobs mini-schedule ──────────────────────────────────── */
+function fmtPlannedTime(t) {
+  if (!t) return '';
+  const [h, m] = t.split(':').map(Number);
+  const d = new Date(); d.setHours(h, m || 0, 0, 0);
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 function plannedDayLabel(iso) {
   const today = new Date().toLocaleDateString('en-CA');
   const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA');
@@ -866,8 +877,9 @@ function openPlannedScheduleModal(applyPlannedJob) {
       ${dayKeys.map(k => `
         <div class="day-group" style="margin-left:0;">
           <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
-          ${byDay[k].map(pj => `
+          ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => `
             <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
+              ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:56px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
               <div style="flex:1;min-width:0;">
                 <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                   ${pj.revisit_of ? '<span style="color:var(--blue);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
@@ -1062,9 +1074,15 @@ function openPlanJobModal() {
     </div>
     <div class="modal-body">
       <button class="btn btn-secondary btn-sm btn-full" id="pj-revisit" style="margin-bottom:12px;">${svg('return')} Planning a Revisit? Pick the original WO →</button>
-      <div class="form-group">
-        <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
-        <input type="date" class="form-control" id="pj-date">
+      <div class="row-2">
+        <div class="form-group">
+          <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
+          <input type="date" class="form-control" id="pj-date">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Time <span class="opt-label">optional</span></label>
+          <input type="time" class="form-control" id="pj-time">
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Project <span class="opt-label">optional</span></label>
@@ -1093,6 +1111,7 @@ function openPlanJobModal() {
     if (!data.wo_title && !data.assignment_id) { showToast('Add at least a WO Title or Assignment ID', 'error'); return; }
     data.project_id = document.getElementById('pj-project').value ? Number(document.getElementById('pj-project').value) : null;
     data.planned_date = document.getElementById('pj-date').value || null;
+    data.planned_time = document.getElementById('pj-time').value || null;
     try {
       await api.createPlannedJob(data);
       closeModal();
@@ -1244,8 +1263,16 @@ function openRevisitModal(entry) {
         <input type="text" class="form-control ${hasAssign ? 'hidden' : ''}" id="rv-assign-input" placeholder="e.g. 171624976">
       </div>
       <div class="form-group hidden" id="rv-date-group">
-        <label class="form-label">Planned date</label>
-        <input type="date" class="form-control" id="rv-date">
+        <div class="row-2">
+          <div>
+            <label class="form-label">Planned date</label>
+            <input type="date" class="form-control" id="rv-date">
+          </div>
+          <div>
+            <label class="form-label">Time <span class="opt-label">optional</span></label>
+            <input type="time" class="form-control" id="rv-time">
+          </div>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
@@ -1316,6 +1343,7 @@ function openRevisitModal(entry) {
     }
     const rv = buildRevisit();
     rv.planned_date = document.getElementById('rv-date').value || null;
+    rv.planned_time = document.getElementById('rv-time').value || null;
     try {
       await api.createPlannedJob(rv);
       closeModal();
@@ -2804,7 +2832,7 @@ async function openTripStartModal() {
         <label class="form-label">From Planned Job <span class="opt-label">optional</span></label>
         <select class="form-control" id="ts-planned-select" style="margin-bottom:8px;">
           <option value="">— Pick a planned job —</option>
-          ${plannedList.map(p => `<option value="${p.id}">${escHtml(p.planned_date ? plannedDayLabel(p.planned_date) + ' — ' : '')}${escHtml(p.wo_title || p.assignment_id || 'Planned job')}</option>`).join('')}
+          ${plannedList.map(p => `<option value="${p.id}">${escHtml(p.planned_date ? plannedDayLabel(p.planned_date) + (p.planned_time ? ' ' + fmtPlannedTime(p.planned_time) : '') + ' — ' : '')}${escHtml(p.wo_title || p.assignment_id || 'Planned job')}</option>`).join('')}
         </select>` : ''}
         <label class="form-label">Assignment ID <span class="req-star">*</span></label>
         <div class="input-row">
