@@ -607,19 +607,24 @@ async function renderIdleClockPage() {
           return dayKeys.map(k => `
             <div class="day-group" style="margin-left:0;">
               <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
-              ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => `
-                <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
-                  ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:52px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
-                  <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                      ${pj.revisit_of ? '<span style="color:var(--orange);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
-                    </div>
-                    <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
+              ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => {
+                const soon = isPlannedSoon(pj);
+                return `
+                <div class="card sched-card${soon ? ' sched-soon' : ''}" data-id="${pj.id}">
+                  <div class="sched-card-head">
+                    <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
+                    ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
+                    ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
+                    <span style="flex:1;"></span>
+                    <button class="btn btn-ghost btn-sm sched-menu" data-id="${pj.id}" title="Actions">⋯</button>
                   </div>
-                  <button class="btn btn-primary btn-sm sched-start" data-id="${pj.id}" title="Start this job">${svg('play')}</button>
-                  <button class="btn btn-ghost btn-sm sched-edit" data-id="${pj.id}" title="Edit">${svg('edit')}</button>
-                  <button class="btn btn-ghost btn-sm sched-del" data-id="${pj.id}" style="color:var(--red);" title="Delete">✕</button>
-                </div>`).join('')}
+                  <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+                  ${pj.project_name ? `<div class="sched-line" style="color:var(--blue);">${svg('org')} ${escHtml(pj.project_name)}</div>` : ''}
+                  ${(pj.org_name || pj.client_name) ? `<div class="sched-line">${[pj.org_name, pj.client_name].filter(Boolean).map(escHtml).join(' · ')}</div>` : ''}
+                  ${pj.site_id ? `<div class="sched-line">Site: ${escHtml(pj.site_id)}</div>` : ''}
+                  ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:8px;">${svg('play')} Start This Job</button>` : ''}
+                </div>`;
+              }).join('')}
             </div>`).join('');
         })()}
       </div>
@@ -766,26 +771,26 @@ async function renderIdleClockPage() {
     showToast('Job pre-filled — pick a clock-in time to start', 'success');
   };
 
-  // Week schedule row actions
-  document.querySelectorAll('.sched-start').forEach(btn => {
-    btn.addEventListener('click', () => {
+  // Week schedule: card → read-only details, ⋯ → actions, soon-strip → start
+  document.querySelectorAll('.sched-card').forEach(card => {
+    card.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(card.dataset.id));
+      if (pj) openPlannedJobDetail(pj, applyPlannedJob);
+    });
+  });
+  document.querySelectorAll('.sched-menu').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (pj) openPlannedJobMenu(pj, applyPlannedJob);
+    });
+  });
+  document.querySelectorAll('.sched-soon-start').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
       const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
       if (pj) applyPlannedJob(pj);
-    });
-  });
-  document.querySelectorAll('.sched-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
-      if (pj) openPlanJobModal(pj);
-    });
-  });
-  document.querySelectorAll('.sched-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this planned job?')) return;
-      try {
-        await api.deletePlannedJob(Number(btn.dataset.id));
-        renderIdleClockPage();
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
     });
   });
 
@@ -921,6 +926,105 @@ function plannedDayLabel(iso) {
   if (iso === today) return 'Today';
   if (iso === tomorrow) return 'Tomorrow';
   return new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+// A timed job for today whose start is within 2 hours (or already due)
+function isPlannedSoon(pj) {
+  if (!pj.planned_date || !pj.planned_time) return false;
+  if (pj.planned_date !== new Date().toLocaleDateString('en-CA')) return false;
+  const [h, m] = pj.planned_time.split(':').map(Number);
+  const start = new Date(); start.setHours(h, m || 0, 0, 0);
+  return start.getTime() - Date.now() <= 2 * 3600 * 1000;
+}
+
+/* ── Planned job: read-only details ──────────────────────────────── */
+function openPlannedJobDetail(pj, onStart) {
+  const sym = state.settings.currency_symbol || '$';
+  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + fmtPlannedTime(pj.planned_time) : ''}`;
+  const rate = pj.rate_type === 'flat'
+    ? (pj.flat_amount ? `${sym}${parseFloat(pj.flat_amount).toFixed(2)} flat` : 'Non-Billable')
+    : pj.rate_type === 'none'
+      ? 'Non-Billable'
+      : (() => { const r = state.payRates.find(x => x.id === pj.pay_rate_id); return r ? `${escHtml(r.name)} — ${sym}${r.rate}/hr` : 'Hourly'; })();
+  const row = (label, val) => val ? `<div class="review-row"><span>${label}:</span><span>${val}</span></div>` : '';
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('bell')} Planned Job</h3>
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-ghost btn-sm" id="pjd-menu" title="Actions">⋯</button>
+        <button class="btn btn-ghost btn-sm" id="pjd-x">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="font-size:15px;font-weight:700;color:var(--blue);">${escHtml(when)}</span>
+        ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
+        ${isPlannedSoon(pj) ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
+      </div>
+      <div style="font-size:16px;font-weight:700;margin-bottom:10px;">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+      ${row('Project', pj.project_name ? escHtml(pj.project_name) : '')}
+      ${row('Company', pj.org_name ? escHtml(pj.org_name) : '')}
+      ${row('Customer', pj.client_name ? escHtml(pj.client_name) : '')}
+      ${row('Site ID', pj.site_id ? escHtml(pj.site_id) : '')}
+      ${row('Assignment ID', pj.assignment_id ? escHtml(pj.assignment_id) : '')}
+      ${pj.address ? `<div class="review-row"><span>Address:</span><a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(pj.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(pj.address)}</a></div>` : ''}
+      ${row('Pay', rate)}
+      ${pj.travel_reimb ? row('Travel Reimb', `${sym}${parseFloat(pj.travel_reimb).toFixed(2)}`) : ''}
+      ${row('Ticket #', pj.ticket_num ? escHtml(pj.ticket_num) : '')}
+      ${row('INC #', pj.inc_num ? escHtml(pj.inc_num) : '')}
+      ${row('MOD', pj.mod_name ? escHtml(pj.mod_name) : '')}
+      ${row('NOC', pj.noc_name ? escHtml(pj.noc_name) : '')}
+      ${row('PM/PC', pj.pm_pc_name ? escHtml(pj.pm_pc_name) : '')}
+      ${pj.notes ? `<div class="review-row" style="align-items:flex-start;"><span>Notes:</span><span style="white-space:pre-wrap;">${escHtml(pj.notes)}</span></div>` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pjd-close">Close</button>
+      <button class="btn btn-primary" id="pjd-start">${svg('play')} Start This Job</button>
+    </div>`);
+
+  document.getElementById('pjd-x').addEventListener('click', closeModal);
+  document.getElementById('pjd-close').addEventListener('click', closeModal);
+  document.getElementById('pjd-menu').addEventListener('click', () => openPlannedJobMenu(pj, onStart));
+  document.getElementById('pjd-start').addEventListener('click', () => {
+    closeModal();
+    if (onStart) onStart(pj);
+  });
+}
+
+/* ── Planned job: ⋯ actions menu ─────────────────────────────────── */
+function openPlannedJobMenu(pj, onStart) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('bell')} ${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</h3>
+      <button class="btn btn-ghost btn-sm" id="pjm-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="btn btn-secondary btn-full" id="pjm-details" style="margin-bottom:8px;">${svg('clock')} View Details</button>
+      <button class="btn btn-ghost btn-full" id="pjm-edit" style="margin-bottom:8px;">${svg('edit')} Edit</button>
+      <button class="btn btn-ghost btn-full" id="pjm-del" style="color:var(--red);">${svg('trash')} Delete</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pjm-cancel">Cancel</button>
+    </div>`);
+  document.getElementById('pjm-x').addEventListener('click', closeModal);
+  document.getElementById('pjm-cancel').addEventListener('click', closeModal);
+  document.getElementById('pjm-details').addEventListener('click', () => {
+    closeModal();
+    openPlannedJobDetail(pj, onStart);
+  });
+  document.getElementById('pjm-edit').addEventListener('click', () => {
+    closeModal();
+    openPlanJobModal(pj);
+  });
+  document.getElementById('pjm-del').addEventListener('click', async () => {
+    if (!confirm('Delete this planned job?')) return;
+    try {
+      await api.deletePlannedJob(pj.id);
+      closeModal();
+      renderIdleClockPage();
+    } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+  });
 }
 
 /* ── + New Work Order: start now, revisit, or plan for later ─────── */
@@ -3912,7 +4016,9 @@ function openEntryDetail(entry) {
       <div class="review-row"><span>Customer:</span><span>${escHtml(entry.client_name||'—')}</span></div>
       <div class="review-row"><span>Assignment ID:</span><span>${escHtml(entry.assignment_id||'—')}</span></div>
       <div class="review-row"><span>Site ID:</span><span>${escHtml(entry.site_id||'—')}</span></div>
-      <div class="review-row"><span>Address:</span><span>${escHtml(entry.address||'—')}</span></div>
+      <div class="review-row"><span>Address:</span>${entry.address
+        ? `<a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(entry.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(entry.address)}</a>`
+        : '<span>—</span>'}</div>
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
       <div class="review-row"><span>Clock Out:</span><span>${fmtTime(entry.clock_out)}</span></div>
       <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
