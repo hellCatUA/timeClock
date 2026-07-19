@@ -36,10 +36,15 @@ function roundTo5(date) {
 function adjustedTime(offsetMinutes) {
   return roundTo5(new Date(Date.now() + offsetMinutes * 60000));
 }
+// "0" base for time pickers: nearest 5-minute mark; offsets are relative to it
+function timeFromRoundedNow(offsetMinutes = 0) {
+  return new Date(roundTo5(new Date()).getTime() + offsetMinutes * 60000);
+}
 function fmtHHMM(date) {
   return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 function fmtDuration(totalSec) {
+  totalSec = Math.max(0, totalSec); // future clock-ins must never render negative time
   const h = Math.floor(totalSec / 3600);
   const m = Math.floor((totalSec % 3600) / 60);
   const s = totalSec % 60;
@@ -315,16 +320,19 @@ function setupPictureSectionEvents(picSection, entryId) {
 }
 
 /* ── Modal ──────────────────────────────────────────────────────── */
-function openModal(html) {
+let modalLocked = false; // critical flows (clock-out chain) must not close on overlay tap
+function openModal(html, { locked = false } = {}) {
+  modalLocked = locked;
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal-overlay').classList.remove('hidden');
 }
 function closeModal() {
+  modalLocked = false;
   document.getElementById('modal-overlay').classList.add('hidden');
   document.getElementById('modal-body').innerHTML = '';
 }
 document.getElementById('modal-overlay').addEventListener('click', e => {
-  if (e.target === e.currentTarget) closeModal();
+  if (e.target === e.currentTarget && !modalLocked) closeModal();
 });
 
 /* ── Navigation ─────────────────────────────────────────────────── */
@@ -405,13 +413,29 @@ function startElapsedTimer(entry) {
   // always kill the previous interval or stale snapshots fight over the display
   clearInterval(state.elapsedInterval);
   const isFlat = entry.rate_type === 'flat';
+  const startMs = new Date(entry.clock_in).getTime();
   const update = () => {
     const onBreak = !!entry.active_break;
+
+    // Clock-in scheduled in the future: hold at zero and say when it starts
+    const badge = document.getElementById('clock-status-badge');
+    if (Date.now() < startMs) {
+      const ed = document.getElementById('elapsed-display');
+      if (ed) ed.textContent = '00:00:00';
+      const earn = document.getElementById('earnings-display');
+      if (earn) earn.textContent = fmtMoney(0);
+      if (badge && !onBreak) badge.innerHTML = `<span class="dot"></span>STARTS AT ${fmtHHMM(new Date(startMs))}`;
+      return;
+    }
+    if (badge && !onBreak && badge.textContent.includes('STARTS AT')) {
+      badge.innerHTML = '<span class="dot"></span>WORKING';
+    }
+
     const breakSecs = onBreak
       ? Math.floor((Date.now() - new Date(entry.active_break.break_start)) / 1000)
       : 0;
     const paidBreaks = state.settings.paid_breaks === '1';
-    const grossSec = Math.floor((Date.now() - new Date(entry.clock_in)) / 1000);
+    const grossSec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
     const netSec = paidBreaks
       ? grossSec
       : Math.max(0, grossSec - (entry.total_break_seconds || 0) - (onBreak ? breakSecs : 0));
@@ -477,28 +501,31 @@ function renderTimeSelector(containerId, label, onConfirm, extraTimeOptions = []
         <div class="time-sel-label">${label}</div>
         ${extraBtnsHtml}
         <div class="time-sel-row">
-          <button class="btn btn-primary flex-1" id="ts-now">Now</button>
+          <button class="btn btn-primary flex-1" id="ts-now">Now · ${fmtHHMM(timeFromRoundedNow(0))}</button>
           <button class="btn btn-ghost flex-1" id="ts-later">Other time →</button>
         </div>
       </div>`;
     extraTimeOptions.forEach((opt, i) => {
       document.getElementById(`ts-extra-${i}`)?.addEventListener('click', () => onConfirm(opt.isoTime));
     });
-    document.getElementById('ts-now').addEventListener('click', () => onConfirm(new Date().toISOString()));
+    document.getElementById('ts-now').addEventListener('click', () => onConfirm(timeFromRoundedNow(0).toISOString()));
     document.getElementById('ts-later').addEventListener('click', phase2);
   }
 
   function phase2() {
-    const t = off => fmtHHMM(adjustedTime(off));
+    // Offsets are relative to the rounded "0" so round times are one tap away
+    const t = off => fmtHHMM(timeFromRoundedNow(off));
     container.innerHTML = `
       <div class="time-selector">
         <div class="time-sel-label">${label}</div>
-        <div class="time-sel-grid">
-          <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10 min<span>${t(-10)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5 min<span>${t(-5)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="5">+5 min<span>${t(5)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="10">+10 min<span>${t(10)}</span></button>
+        <div class="time-sel-grid5">
+          <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span>${t(-10)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span>${t(-5)}</span></button>
+          <button class="btn btn-primary time-adj-btn" data-offset="0">0<span>${t(0)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span>${t(5)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span>${t(10)}</span></button>
         </div>
+        <button class="btn btn-ghost btn-full" id="ts-exact">Exact now · ${fmtHHMM(new Date())}</button>
         <button class="btn btn-ghost btn-full" id="ts-custom">Enter time manually...</button>
         <div id="ts-custom-group" class="hidden" style="margin-top:8px;">
           <input type="datetime-local" class="form-control" id="ts-custom-input" value="${localISOString()}">
@@ -506,8 +533,9 @@ function renderTimeSelector(containerId, label, onConfirm, extraTimeOptions = []
         </div>
       </div>`;
     container.querySelectorAll('.time-adj-btn').forEach(btn => {
-      btn.addEventListener('click', () => onConfirm(adjustedTime(parseInt(btn.dataset.offset)).toISOString()));
+      btn.addEventListener('click', () => onConfirm(timeFromRoundedNow(parseInt(btn.dataset.offset)).toISOString()));
     });
+    document.getElementById('ts-exact').addEventListener('click', () => onConfirm(new Date().toISOString()));
     document.getElementById('ts-custom').addEventListener('click', () => {
       document.getElementById('ts-custom-group').classList.toggle('hidden');
     });
@@ -544,10 +572,9 @@ async function renderIdleClockPage() {
   const projects = state.projects || [];
   const plannedJobs = state.plannedJobs || [];
 
-  const orgOptions = orgs.map(o => ({ value: String(o.id), label: o.name }));
-  const cliOptions = clis.map(c => ({ value: String(c.id), label: c.name }));
+  const orgOptions = orgComboOpts();
+  const cliOptions = cliComboOpts();
   const rateOpts = rates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
-  const projOpts = projects.filter(p => !p.archived).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
 
   const pendingBanner = (state.pendingTripAssignment || state.pendingTripClockIn || state.pendingTripId) ? `
     <div class="card" style="background:var(--green-bg);border:1px solid var(--green);padding:10px 14px;margin-bottom:4px;border-radius:8px;">
@@ -563,33 +590,43 @@ async function renderIdleClockPage() {
           ${svg('car')} In Route
         </button>
         <button class="btn btn-primary btn-full" id="clock-in-start-btn">
-          ${svg('clock')} Clock In
+          ${svg('plus')} New Work Order
         </button>
       </div>
       ${pendingBanner}
-      ${plannedJobs.length ? (() => {
-        const sortKey = p => `${p.planned_date}T${p.planned_time || '23:59'}`;
-        const dated = plannedJobs.filter(p => p.planned_date).sort((a,b) => sortKey(a).localeCompare(sortKey(b)));
-        const next = dated[0] || plannedJobs[0];
-        const nextWhen = next.planned_date
-          ? plannedDayLabel(next.planned_date) + (next.planned_time ? ' ' + fmtPlannedTime(next.planned_time) : '')
-          : '';
-        const nextLbl = `${nextWhen ? nextWhen + ' — ' : ''}${next.wo_title || next.assignment_id || 'job'}`;
-        return `
-      <div class="card" id="planned-strip" style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer;">
-        <div style="flex:1;min-width:0;">
-          <div style="font-weight:600;font-size:14px;">${svg('bell')} Planned Jobs — ${plannedJobs.length}</div>
-          <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Next: ${escHtml(nextLbl)}</div>
-        </div>
-        ${svg('chevR')}
-      </div>`;
-      })() : ''}
-      <div style="margin-bottom:12px;">
-        <button class="btn btn-ghost btn-sm" id="plan-job-btn">${svg('plus')} Plan a Job</button>
+      <div id="idle-schedule">
+        <div class="section-label">This Week</div>
+        ${(() => {
+          if (!plannedJobs.length) return '<div class="card empty-state" style="padding:20px;">No planned jobs yet — tap "＋ New Work Order" to plan one</div>';
+          const byDay = {};
+          plannedJobs.forEach(pj => { (byDay[pj.planned_date || ''] = byDay[pj.planned_date || ''] || []).push(pj); });
+          const dayKeys = Object.keys(byDay).sort((a, b) => {
+            if (!a) return 1; if (!b) return -1;
+            return a.localeCompare(b);
+          });
+          return dayKeys.map(k => `
+            <div class="day-group" style="margin-left:0;">
+              <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
+              ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => `
+                <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
+                  ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:52px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                      ${pj.revisit_of ? '<span style="color:var(--orange);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
+                    </div>
+                    <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
+                  </div>
+                  <button class="btn btn-primary btn-sm sched-start" data-id="${pj.id}" title="Start this job">${svg('play')}</button>
+                  <button class="btn btn-ghost btn-sm sched-edit" data-id="${pj.id}" title="Edit">${svg('edit')}</button>
+                  <button class="btn btn-ghost btn-sm sched-del" data-id="${pj.id}" style="color:var(--red);" title="Delete">✕</button>
+                </div>`).join('')}
+            </div>`).join('');
+        })()}
       </div>
-      <div class="section-label">New Work Order</div>
-      <div class="card" id="clock-in-form-card">
-        <button class="btn btn-ghost btn-sm" id="start-revisit-btn" style="margin-bottom:10px;color:var(--orange);">${svg('return')} Revisit of an existing WO?</button>
+      <div id="idle-form" class="hidden">
+        <button class="btn btn-ghost btn-sm" id="idle-form-back" style="margin-bottom:8px;">← Back to schedule</button>
+        <div class="section-label">New Work Order</div>
+        <div class="card" id="clock-in-form-card">
         <div class="form-group">
           <label class="form-label">WO Title</label>
           <input type="text" class="form-control" id="wo-title-input" placeholder="Brief description of work...">
@@ -597,10 +634,7 @@ async function renderIdleClockPage() {
         <div class="form-group">
           <label class="form-label">Project <span class="opt-label">optional</span></label>
           <div class="input-row">
-            <select class="form-control" id="project-select" style="flex:1;">
-              <option value="">— No Project —</option>
-              ${projOpts}
-            </select>
+            <div style="flex:1;min-width:0;">${buildCombo('project-select', 'Type to search projects...')}</div>
             <button class="btn btn-ghost btn-icon" id="manage-projects-btn" title="Manage projects">${svg('edit')}</button>
           </div>
         </div>
@@ -650,21 +684,29 @@ async function renderIdleClockPage() {
           </div>
         </div>
         <div id="clockin-time-selector"></div>
+        </div>
       </div>
     </div>`;
 
   wireCombo('company-select', orgOptions);
   wireCombo('customer-select', cliOptions);
-  document.getElementById('start-revisit-btn').addEventListener('click', () => openPickWoForRevisitModal());
+  wireCombo('project-select', projComboOpts());
+
+  // Schedule is the default view; the form appears only once a path is chosen
+  const showForm = () => {
+    document.getElementById('idle-schedule')?.classList.add('hidden');
+    document.getElementById('idle-form')?.classList.remove('hidden');
+  };
+  document.getElementById('idle-form-back').addEventListener('click', () => renderIdleClockPage());
 
   document.getElementById('in-route-btn').addEventListener('click', () => openTripStartModal());
 
   document.getElementById('clock-in-start-btn').addEventListener('click', () => {
-    const formCard = document.getElementById('clock-in-form-card');
-    if (formCard) {
-      formCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      formCard.querySelector('input,select')?.focus();
-    }
+    openNewWoChoiceModal(() => {
+      showForm();
+      document.getElementById('clock-in-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document.getElementById('wo-title-input')?.focus();
+    });
   });
 
   let rateType = 'hourly';
@@ -704,11 +746,11 @@ async function renderIdleClockPage() {
   });
 
   document.getElementById('manage-projects-btn').addEventListener('click', () => openProjectsModal());
-  document.getElementById('plan-job-btn').addEventListener('click', () => openPlanJobChoiceModal());
 
   const applyPlannedJob = (pj) => {
+    showForm();
     if (pj.wo_title)        document.getElementById('wo-title-input').value = pj.wo_title;
-    if (pj.project_id)      document.getElementById('project-select').value = String(pj.project_id);
+    if (pj.project_id)      { document.getElementById('project-select').value = String(pj.project_id); comboSync('project-select', projComboOpts(pj.project_id)); }
     if (pj.organization_id) { document.getElementById('company-select').value = String(pj.organization_id); comboSync('company-select', orgOptions); }
     if (pj.client_id)       { document.getElementById('customer-select').value = String(pj.client_id); comboSync('customer-select', cliOptions); }
     if (pj.address)         document.getElementById('addr-input').value = pj.address;
@@ -716,24 +758,44 @@ async function renderIdleClockPage() {
     if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
     if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
     if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
-    prefillExtras.assignment_id = pj.assignment_id || prefillExtras.assignment_id;
-    prefillExtras.site_id = pj.site_id || prefillExtras.site_id;
-    prefillExtras.revisit_of = pj.revisit_of || prefillExtras.revisit_of;
+    ['assignment_id','site_id','revisit_of','ticket_num','inc_num','mod_name','noc_name','pm_pc_name'].forEach(k => {
+      if (pj[k]) prefillExtras[k] = pj[k];
+    });
     prefillExtras.plannedJobId = pj.id;
     document.getElementById('clock-in-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     showToast('Job pre-filled — pick a clock-in time to start', 'success');
   };
 
-  document.getElementById('planned-strip')?.addEventListener('click', () => {
-    openPlannedScheduleModal(applyPlannedJob);
+  // Week schedule row actions
+  document.querySelectorAll('.sched-start').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (pj) applyPlannedJob(pj);
+    });
+  });
+  document.querySelectorAll('.sched-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (pj) openPlanJobModal(pj);
+    });
+  });
+  document.querySelectorAll('.sched-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this planned job?')) return;
+      try {
+        await api.deletePlannedJob(Number(btn.dataset.id));
+        renderIdleClockPage();
+      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+    });
   });
 
   // Revisit prefill (set by openRevisitModal)
   if (state.pendingRevisit) {
     const rv = state.pendingRevisit;
     state.pendingRevisit = null;
+    showForm();
     if (rv.wo_title)        document.getElementById('wo-title-input').value = rv.wo_title;
-    if (rv.project_id)      document.getElementById('project-select').value = String(rv.project_id);
+    if (rv.project_id)      { document.getElementById('project-select').value = String(rv.project_id); comboSync('project-select', projComboOpts(rv.project_id)); }
     if (rv.organization_id) { document.getElementById('company-select').value = String(rv.organization_id); comboSync('company-select', orgOptions); }
     if (rv.client_id)       { document.getElementById('customer-select').value = String(rv.client_id); comboSync('customer-select', cliOptions); }
     if (rv.address)         document.getElementById('addr-input').value = rv.address;
@@ -782,6 +844,11 @@ async function renderIdleClockPage() {
     : [];
 
   async function doClockIn(clockInISO) {
+    // A pendingTripId is only valid for the clock-in that immediately follows
+    // its trip (pendingTripClockIn set). A fresh clock-in must not inherit a
+    // stale trip link — saving an Assignment ID later would reassign the
+    // wrong trip's files to this WO.
+    if (state.pendingTripId && !state.pendingTripClockIn) state.pendingTripId = null;
     const container = document.getElementById('clockin-time-selector');
     container.innerHTML = '<div class="saving-indicator">Saving...</div>';
     try {
@@ -856,97 +923,62 @@ function plannedDayLabel(iso) {
   return new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 }
 
-function openPlannedScheduleModal(applyPlannedJob) {
-  const jobs = state.plannedJobs || [];
-  const byDay = {};
-  jobs.forEach(pj => {
-    const k = pj.planned_date || '';
-    (byDay[k] = byDay[k] || []).push(pj);
-  });
-  const dayKeys = Object.keys(byDay).sort((a, b) => {
-    if (!a) return 1; if (!b) return -1;   // undated last
-    return a.localeCompare(b);
-  });
-
+/* ── + New Work Order: start now, revisit, or plan for later ─────── */
+function openNewWoChoiceModal(onStartNow) {
   openModal(`
     <div class="modal-header">
-      <h3>${svg('bell')} Planned Jobs</h3>
-      <button class="btn btn-ghost btn-sm" id="ps-x">✕</button>
+      <h3>${svg('plus')} New Work Order</h3>
+      <button class="btn btn-ghost btn-sm" id="nw-x">✕</button>
     </div>
     <div class="modal-body">
-      ${dayKeys.map(k => `
-        <div class="day-group" style="margin-left:0;">
-          <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
-          ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => `
-            <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
-              ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:56px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
-              <div style="flex:1;min-width:0;">
-                <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                  ${pj.revisit_of ? '<span style="color:var(--orange);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
-                </div>
-                <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
-              </div>
-              <button class="btn btn-primary btn-sm ps-start" data-id="${pj.id}">${svg('play')}</button>
-              <button class="btn btn-ghost btn-sm ps-del" data-id="${pj.id}" style="color:var(--red);">✕</button>
-            </div>`).join('')}
-        </div>`).join('') || '<div class="empty-state">No planned jobs</div>'}
+      <button class="btn btn-primary btn-full" id="nw-start" style="margin-bottom:8px;">${svg('play')} Start Now</button>
+      <button class="btn btn-secondary btn-full" id="nw-revisit" style="margin-bottom:8px;">${svg('return')} Revisit of a WO</button>
+      <button class="btn btn-ghost btn-full" id="nw-plan">${svg('bell')} Plan for Later</button>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="ps-close">Close</button>
-      <button class="btn btn-primary" id="ps-add">${svg('plus')} Plan a Job</button>
+      <button class="btn btn-ghost" id="nw-cancel">Cancel</button>
     </div>`);
-
-  document.getElementById('ps-x').addEventListener('click', closeModal);
-  document.getElementById('ps-close').addEventListener('click', closeModal);
-  document.getElementById('ps-add').addEventListener('click', () => { closeModal(); openPlanJobChoiceModal(); });
-
-  document.querySelectorAll('.ps-start').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
-      if (!pj) return;
-      closeModal();
-      if (applyPlannedJob) applyPlannedJob(pj);
-    });
-  });
-  document.querySelectorAll('.ps-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this planned job?')) return;
-      try {
-        await api.deletePlannedJob(Number(btn.dataset.id));
-        closeModal();
-        renderIdleClockPage();
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
-    });
-  });
-}
-
-/* ── Plan a Job: new job or revisit? ─────────────────────────────── */
-function openPlanJobChoiceModal() {
-  openModal(`
-    <div class="modal-header">
-      <h3>${svg('plus')} Plan a Job</h3>
-      <button class="btn btn-ghost btn-sm" id="pc-x">✕</button>
-    </div>
-    <div class="modal-body">
-      <p style="color:var(--text2);margin-bottom:12px;">Is this a brand-new job or a revisit to an existing work order?</p>
-      <button class="btn btn-primary btn-full" id="pc-new" style="margin-bottom:8px;">${svg('plus')} New Job</button>
-      <button class="btn btn-secondary btn-full" id="pc-revisit">${svg('return')} Revisit of a WO</button>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" id="pc-cancel">Cancel</button>
-    </div>`);
-  document.getElementById('pc-x').addEventListener('click', closeModal);
-  document.getElementById('pc-cancel').addEventListener('click', closeModal);
-  document.getElementById('pc-new').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
-  document.getElementById('pc-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
+  document.getElementById('nw-x').addEventListener('click', closeModal);
+  document.getElementById('nw-cancel').addEventListener('click', closeModal);
+  document.getElementById('nw-start').addEventListener('click', () => { closeModal(); if (onStartNow) onStartNow(); });
+  document.getElementById('nw-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
+  document.getElementById('nw-plan').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
 }
 
 /* ── Pick a completed WO to plan a revisit from ──────────────────── */
 async function openPickWoForRevisitModal() {
   let entries = [];
   try {
-    entries = (await api.getEntries()).filter(e => e.clock_out).slice(0, 30);
+    entries = (await api.getEntries()).filter(e => e.clock_out);
   } catch { /* empty list below */ }
+
+  // FAIL / CANCEL / Revisit-Required WOs without a linked revisit yet are the
+  // likeliest candidates — they float to the top
+  const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
+  const needsRevisit = e => (e.status === 'fail' || e.status === 'cancel' || e.revisit_required) && !revisitedIds.has(e.id);
+  const sorted = [...entries].sort((a, b) =>
+    (needsRevisit(a) ? 0 : 1) - (needsRevisit(b) ? 0 : 1) ||
+    new Date(b.clock_in) - new Date(a.clock_in)
+  );
+
+  const rowHtml = e => `
+    <div class="card pw-item" data-id="${e.id}" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</div>
+        <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(fmtDateShort(e.clock_in))}${e.site_id ? ' · ' + escHtml(e.site_id) : ''}${e.org_name ? ' · ' + escHtml(e.org_name) : ''}${e.client_name ? ' · ' + escHtml(e.client_name) : ''}</div>
+      </div>
+      ${needsRevisit(e) && e.revisit_required ? '<span class="rev-badge rev-needed" style="flex-shrink:0;pointer-events:none;">REV REQ</span>' : ''}
+      <span class="status-chip ${e.status || 'pending'}" style="flex-shrink:0;">${(e.status || 'pending').toUpperCase()}</span>
+    </div>`;
+
+  const matches = (e, q) => {
+    if (!q) return true;
+    const hay = [
+      e.wo_title, e.assignment_id, e.site_id, e.org_name, e.client_name,
+      fmtDateShort(e.clock_in), fmtDateFull(e.clock_in), (e.clock_in || '').slice(0, 10),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+  };
 
   openModal(`
     <div class="modal-header">
@@ -954,15 +986,12 @@ async function openPickWoForRevisitModal() {
       <button class="btn btn-ghost btn-sm" id="pw-x">✕</button>
     </div>
     <div class="modal-body">
-      <div class="field-hint" style="margin-bottom:8px;">Pick the original work order:</div>
-      ${entries.length ? entries.map(e => `
-        <div class="card pw-item" data-id="${e.id}" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;cursor:pointer;">
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(e.wo_title || e.assignment_id || 'WO #' + e.id)}</div>
-            <div class="field-hint">${escHtml(fmtDateShort(e.clock_in))}${e.org_name ? ' · ' + escHtml(e.org_name) : ''}${e.client_name ? ' · ' + escHtml(e.client_name) : ''}</div>
-          </div>
-          <span class="status-chip ${e.status || 'pending'}" style="flex-shrink:0;">${(e.status || 'pending').toUpperCase()}</span>
-        </div>`).join('') : '<div class="empty-state">No completed work orders yet</div>'}
+      <div class="form-group">
+        <input type="text" class="form-control" id="pw-search" placeholder="Search: WO title, Assignment, Site ID, date..." autocomplete="off">
+      </div>
+      <div id="pw-list">
+        ${sorted.length ? sorted.slice(0, 25).map(rowHtml).join('') : '<div class="empty-state">No completed work orders yet</div>'}
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pw-cancel">Cancel</button>
@@ -970,35 +999,43 @@ async function openPickWoForRevisitModal() {
 
   document.getElementById('pw-x').addEventListener('click', closeModal);
   document.getElementById('pw-cancel').addEventListener('click', closeModal);
-  document.querySelectorAll('.pw-item').forEach(card => {
-    card.addEventListener('click', () => {
-      const en = entries.find(e => e.id === Number(card.dataset.id));
-      if (!en) return;
-      closeModal();
-      openRevisitModal(en);
+
+  const listEl = document.getElementById('pw-list');
+  const wireRows = () => {
+    listEl.querySelectorAll('.pw-item').forEach(card => {
+      card.addEventListener('click', () => {
+        const en = entries.find(e => e.id === Number(card.dataset.id));
+        if (!en) return;
+        closeModal();
+        openRevisitModal(en);
+      });
     });
+  };
+  wireRows();
+
+  document.getElementById('pw-search').addEventListener('input', e => {
+    const q = e.target.value.trim();
+    const filtered = sorted.filter(en => matches(en, q)).slice(0, 25);
+    listEl.innerHTML = filtered.length ? filtered.map(rowHtml).join('') : '<div class="empty-state">No matches</div>';
+    wireRows();
   });
 }
 
 /* ── Plan a Job modal ────────────────────────────────────────────── */
 function buildJobFieldsHtml(prefix, sym) {
-  const orgOpts  = state.organizations.map(o => `<option value="${o.id}">${escHtml(o.name)}</option>`).join('');
-  const cliOpts  = state.clients.map(c => `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
   const rateOpts = state.payRates.map(r => `<option value="${r.id}">${escHtml(r.name)} — ${sym}${r.rate}/hr</option>`).join('');
   return `
     <div class="form-group">
       <label class="form-label">WO Title</label>
       <input type="text" class="form-control" id="${prefix}-title" placeholder="Brief description...">
     </div>
-    <div class="row-2">
-      <div class="form-group">
-        <label class="form-label">Company</label>
-        <select class="form-control" id="${prefix}-org"><option value="">—</option>${orgOpts}</select>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Customer</label>
-        <select class="form-control" id="${prefix}-client"><option value="">—</option>${cliOpts}</select>
-      </div>
+    <div class="form-group">
+      <label class="form-label">Company</label>
+      ${buildCombo(`${prefix}-org`, 'Type to search companies...')}
+    </div>
+    <div class="form-group">
+      <label class="form-label">Customer</label>
+      ${buildCombo(`${prefix}-client`, 'Type to search customers...')}
     </div>
     <div class="row-2">
       <div class="form-group">
@@ -1037,6 +1074,11 @@ function buildJobFieldsHtml(prefix, sym) {
     </div>`;
 }
 
+function wireJobFieldCombos(prefix) {
+  wireCombo(`${prefix}-org`, orgComboOpts());
+  wireCombo(`${prefix}-client`, cliComboOpts());
+}
+
 function wireJobFieldsPayType(prefix) {
   let t = 'hourly';
   document.getElementById(`${prefix}-paytype`).addEventListener('click', e => {
@@ -1055,8 +1097,8 @@ function applyProjectDefaultsToJobFields(prefix, p) {
   try { d = JSON.parse(p.defaults || '{}') || {}; } catch { d = {}; }
   const g = id => document.getElementById(`${prefix}-${id}`);
   if (d.wo_title)        g('title').value = d.wo_title;
-  if (d.organization_id) g('org').value = String(d.organization_id);
-  if (d.client_id)       g('client').value = String(d.client_id);
+  if (d.organization_id) { g('org').value = String(d.organization_id); comboSync(`${prefix}-org`, orgComboOpts()); }
+  if (d.client_id)       { g('client').value = String(d.client_id); comboSync(`${prefix}-client`, cliComboOpts()); }
   if (d.assignment_id)   g('assign').value = d.assignment_id;
   if (d.site_id)         g('site').value = d.site_id;
   if (d.address)         g('addr').value = d.address;
@@ -1083,45 +1125,64 @@ function readJobFields(prefix, getRateType) {
   };
 }
 
-function openPlanJobModal() {
+function openPlanJobModal(existing = null) {
   const sym = state.settings.currency_symbol || '$';
-  const projOpts = (state.projects || []).filter(p => !p.archived).map(p => `<option value="${p.id}">${escHtml(p.name)}</option>`).join('');
   openModal(`
     <div class="modal-header">
-      <h3>${svg('plus')} Plan a Job</h3>
+      <h3>${existing ? `${svg('edit')} Edit Planned Job` : `${svg('plus')} Plan a Job`}</h3>
       <button class="btn btn-ghost btn-sm" id="pj-x">✕</button>
     </div>
     <div class="modal-body">
       <div class="row-2">
         <div class="form-group">
           <label class="form-label">Planned Date <span class="opt-label">optional</span></label>
-          <input type="date" class="form-control" id="pj-date">
+          <input type="date" class="form-control" id="pj-date" value="${escHtml(existing?.planned_date || '')}">
         </div>
         <div class="form-group">
           <label class="form-label">Time <span class="opt-label">optional</span></label>
-          <input type="time" class="form-control" id="pj-time">
+          <input type="time" class="form-control" id="pj-time" value="${escHtml(existing?.planned_time || '')}">
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">Project <span class="opt-label">optional</span></label>
-        <select class="form-control" id="pj-project"><option value="">— No Project —</option>${projOpts}</select>
+        ${buildCombo('pj-project', 'Type to search projects...')}
       </div>
       ${buildJobFieldsHtml('pj', sym)}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pj-cancel">Cancel</button>
-      <button class="btn btn-primary" id="pj-save">${svg('check')} Save Planned Job</button>
+      <button class="btn btn-primary" id="pj-save">${svg('check')} ${existing ? 'Save Changes' : 'Save Planned Job'}</button>
     </div>`);
 
   document.getElementById('pj-x').addEventListener('click', closeModal);
   document.getElementById('pj-cancel').addEventListener('click', closeModal);
   const getRateType = wireJobFieldsPayType('pj');
+  wireJobFieldCombos('pj');
+  wireCombo('pj-project', projComboOpts(existing?.project_id));
 
-  // Picking a project auto-fills its configured defaults
+  // Picking a project auto-fills its configured defaults (creating only —
+  // when editing, the job's own saved values must win)
   document.getElementById('pj-project').addEventListener('change', e => {
+    if (existing) return;
     const p = (state.projects || []).find(x => x.id === Number(e.target.value));
     if (p) applyProjectDefaultsToJobFields('pj', p);
   });
+
+  if (existing) {
+    const g = id => document.getElementById(`pj-${id}`);
+    if (existing.project_id) { g('project').value = String(existing.project_id); comboSync('pj-project', projComboOpts(existing.project_id)); }
+    if (existing.wo_title)   g('title').value = existing.wo_title;
+    if (existing.organization_id) { g('org').value = String(existing.organization_id); comboSync('pj-org', orgComboOpts()); }
+    if (existing.client_id)  { g('client').value = String(existing.client_id); comboSync('pj-client', cliComboOpts()); }
+    if (existing.assignment_id) g('assign').value = existing.assignment_id;
+    if (existing.site_id)    g('site').value = existing.site_id;
+    if (existing.address)    g('addr').value = existing.address;
+    const rt = existing.rate_type === 'none' ? 'flat' : (existing.rate_type || 'hourly');
+    document.querySelector(`#pj-paytype .toggle-btn[data-type="${rt}"]`)?.click();
+    if (existing.pay_rate_id) g('rate').value = String(existing.pay_rate_id);
+    if (existing.flat_amount != null) g('flat').value = existing.flat_amount;
+    if (existing.travel_reimb != null) g('travel').value = existing.travel_reimb;
+  }
 
   document.getElementById('pj-save').addEventListener('click', async () => {
     const data = readJobFields('pj', getRateType);
@@ -1130,9 +1191,10 @@ function openPlanJobModal() {
     data.planned_date = document.getElementById('pj-date').value || null;
     data.planned_time = document.getElementById('pj-time').value || null;
     try {
-      await api.createPlannedJob(data);
+      if (existing) await api.updatePlannedJob(existing.id, data);
+      else await api.createPlannedJob(data);
       closeModal();
-      showToast('Job planned', 'success');
+      showToast(existing ? 'Planned job updated' : 'Job planned', 'success');
       renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Save failed', 'error'); }
   });
@@ -1189,6 +1251,7 @@ function openProjectsModal() {
   document.getElementById('prj-x').addEventListener('click', closeModal);
   document.getElementById('prj-cancel').addEventListener('click', closeModal);
   const getRateType = wireJobFieldsPayType('prj');
+  wireJobFieldCombos('prj');
 
   document.querySelectorAll('.proj-del').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1445,6 +1508,7 @@ function renderActiveTripPage() {
     try {
       await api.deleteTrip(trip.id);
       state.currentTrip = null;
+      state.pendingPlannedJobId = null; // trip abandoned — don't pre-fill its job later
       clearInterval(state.tripTimerInterval);
       state.tripTimerInterval = null;
       if (state.currentEntry) renderActiveClockPage();
@@ -1672,7 +1736,7 @@ function renderActiveClockPage() {
     </div>` : ''}
 
     <div class="clock-hero">
-      <div class="status-badge ${onBreak ? 'on-break' : 'working'}">
+      <div class="status-badge ${onBreak ? 'on-break' : 'working'}" id="clock-status-badge">
         <span class="dot"></span>${onBreak ? 'ON BREAK' : 'WORKING'}
       </div>
       <div class="elapsed-time" id="elapsed-display">00:00:00</div>
@@ -1705,7 +1769,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Assignment Details -->
-    <div class="section-header collapsible" data-target="sec-assignment">
+    <div class="section-header collapsible open" data-target="sec-assignment">
       <span>Assignment Details</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-assignment" class="card sec-body">
@@ -1751,7 +1815,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- POCs -->
-    <div class="section-header collapsible" data-target="sec-pocs">
+    <div class="section-header collapsible open" data-target="sec-pocs">
       <span>Points of Contact</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-pocs" class="card sec-body">
@@ -1771,7 +1835,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Pictures -->
-    <div class="section-header collapsible" data-target="sec-pictures">
+    <div class="section-header collapsible open" data-target="sec-pictures">
       <span>Pictures</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-pictures" class="card sec-body">
@@ -1879,7 +1943,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Reimbursements -->
-    <div class="section-header collapsible" data-target="sec-reimb">
+    <div class="section-header collapsible open" data-target="sec-reimb">
       <span>Reimbursements</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-reimb" class="card sec-body">
@@ -1961,16 +2025,13 @@ function renderActiveClockPage() {
     }
   });
 
-  // Collapsible sections
+  // Collapsible sections — chevron rotation is pure CSS via the .open class
   document.querySelectorAll('.section-header.collapsible').forEach(hdr => {
     hdr.addEventListener('click', () => {
       const target = document.getElementById(hdr.dataset.target);
       if (!target) return;
       const isOpen = !target.classList.contains('collapsed');
       target.classList.toggle('collapsed', isOpen);
-      hdr.querySelector('.sec-chev').innerHTML = isOpen ? svg('chevR') : svg('chevL').replace('chevL','chevD');
-      hdr.querySelector('.sec-chev').innerHTML = isOpen ? svg('chevR') : svg('chevR');
-      // simpler: just toggle a class
       hdr.classList.toggle('open', !isOpen);
     });
   });
@@ -2289,7 +2350,16 @@ function wireCombo(id, options) {
     hidden.value = item.dataset.v || '';
     search.value = item.dataset.v ? item.textContent : '';
     list.classList.add('hidden');
+    hidden.dispatchEvent(new Event('change')); // let select-style listeners react
   });
+}
+// Options builders shared by every picker
+function orgComboOpts()  { return state.organizations.map(o => ({ value: String(o.id), label: o.name })); }
+function cliComboOpts()  { return state.clients.map(c => ({ value: String(c.id), label: c.name })); }
+function projComboOpts(includeId = null) {
+  return (state.projects || [])
+    .filter(p => !p.archived || String(p.id) === String(includeId))
+    .map(p => ({ value: String(p.id), label: p.name + (p.archived ? ' (archived)' : '') }));
 }
 function comboSync(id, options) {
   const hidden = document.getElementById(id);
@@ -2386,57 +2456,30 @@ async function initiateClockOut(entry) {
   const assignId    = document.getElementById('jd-assignment')?.value.trim()   || entry.assignment_id || '';
   const modName     = (document.getElementById('jd-mods') ? readMultiInputs('jd-mods') : null) || entry.mod_name || '';
 
+  // MOD is intentionally NOT checked here — it is collected at Manager Sign-Off
   const missing = [];
   if (!assignId)    missing.push('Assignment ID');
-  if (!modName)     missing.push('MOD Name');
   if (!workSummary) missing.push('Work Performed / Comments');
 
   if (missing.length) {
-    const otherMissing = missing.filter(f => f !== 'MOD Name');
     openModal(`
       <div class="modal-header">
         <h3>${svg('alert')} Missing Required Fields</h3>
       </div>
       <div class="modal-body">
-        ${!modName ? `
-        <div class="form-group">
-          <label class="form-label">MOD Name</label>
-          ${buildMultiInputs('mf-mods', '', 'Manager on duty')}
-          <button class="btn btn-ghost btn-sm" id="mf-no-mod" style="margin-top:4px;font-size:12px;">No MOD on site</button>
-        </div>` : ''}
-        ${otherMissing.length ? `
-        <p style="color:var(--text2);margin-bottom:8px;">Also empty:</p>
-        ${otherMissing.map(f => `<div class="missing-field-item">${svg('alert')} ${f}</div>`).join('')}
-        <p style="color:var(--text3);font-size:13px;margin-top:10px;">Go back to fill them, or Override to mark as "OVERRIDE!"</p>` : ''}
+        <p style="color:var(--text2);margin-bottom:8px;">Still empty:</p>
+        ${missing.map(f => `<div class="missing-field-item">${svg('alert')} ${f}</div>`).join('')}
+        <p style="color:var(--text3);font-size:13px;margin-top:10px;">Go back to fill them, or Override to mark as "OVERRIDE!"</p>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" id="co-cancel-btn">← Back</button>
-        <button class="btn ${otherMissing.length ? 'btn-danger' : 'btn-primary'}" id="co-continue-btn">
-          ${otherMissing.length ? 'Override & Continue' : `${svg('check')} Continue`}
-        </button>
-      </div>`);
+        <button class="btn btn-danger" id="co-continue-btn">Override & Continue</button>
+      </div>`, { locked: true });
 
-    wireMultiInputs('mf-mods');
-    document.getElementById('mf-no-mod')?.addEventListener('click', async () => {
-      try { state.currentEntry = await api.updateEntry(entry.id, { mod_name: 'NO MOD' }); } catch { /* keep local */ }
-      closeModal();
-      showClockOutTimePicker(state.currentEntry || entry, workSummary, assignId, 'NO MOD', [...otherMissing]);
-    });
     document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
-    document.getElementById('co-continue-btn').addEventListener('click', async () => {
-      const modName2 = modName || (document.getElementById('mf-mods') ? readMultiInputs('mf-mods') : null) || '';
-      if (!modName && !modName2 && !otherMissing.length) {
-        showToast('Enter the MOD name or go back', 'error');
-        return;
-      }
-      // Persist a newly entered MOD name
-      if (!modName && modName2) {
-        try { state.currentEntry = await api.updateEntry(entry.id, { mod_name: modName2 }); } catch { /* keep local */ }
-      }
-      const stillMissing = [...otherMissing];
-      if (!modName2) stillMissing.push('MOD Name');
+    document.getElementById('co-continue-btn').addEventListener('click', () => {
       closeModal();
-      showClockOutTimePicker(state.currentEntry || entry, workSummary, assignId, modName2, stillMissing);
+      showClockOutTimePicker(entry, workSummary, assignId, modName, [...missing]);
     });
     return;
   }
@@ -2444,7 +2487,7 @@ async function initiateClockOut(entry) {
 }
 
 function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides) {
-  const t = off => fmtHHMM(adjustedTime(off));
+  const t = off => fmtHHMM(timeFromRoundedNow(off));
   openModal(`
     <div class="modal-header">
       <h3>${svg('stop')} Clock Out</h3>
@@ -2453,20 +2496,22 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
       <div class="form-group">
         <label class="form-label">When did you finish?</label>
         <div class="time-sel-row">
-          <button class="btn btn-danger flex-1" id="co-ts-now">Clock Out Now</button>
+          <button class="btn btn-danger flex-1" id="co-ts-now">Clock Out · ${t(0)}</button>
           <button class="btn btn-ghost flex-1" id="co-ts-adjust">Early / Later →</button>
         </div>
       </div>
       <div id="co-adjust-panel" class="hidden">
         <div class="form-group" style="margin-top:12px;">
           <label class="form-label">Adjust time</label>
-          <div class="time-sel-grid">
-            <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10 min<span>${t(-10)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5 min<span>${t(-5)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="5">+5 min<span>${t(5)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="10">+10 min<span>${t(10)}</span></button>
+          <div class="time-sel-grid5">
+            <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span>${t(-10)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span>${t(-5)}</span></button>
+            <button class="btn btn-danger time-adj-btn" data-offset="0">0<span>${t(0)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span>${t(5)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span>${t(10)}</span></button>
           </div>
         </div>
+        <button class="btn btn-ghost btn-full" id="co-ts-exact">Exact now · ${fmtHHMM(new Date())}</button>
         <button class="btn btn-ghost btn-full" id="co-ts-manual-toggle">Enter time manually...</button>
         <div id="co-ts-manual-group" class="hidden" style="margin-top:8px;">
           <input type="datetime-local" class="form-control" id="co-ts-manual-input" value="${localISOString()}">
@@ -2476,23 +2521,21 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="co-ts-cancel">Cancel</button>
-    </div>`);
+    </div>`, { locked: true });
 
   document.getElementById('co-ts-cancel').addEventListener('click', closeModal);
 
-  document.getElementById('co-ts-now').addEventListener('click', () =>
-    showClockOutModal(entry, workSummary, assignId, modName, overrides, new Date().toISOString())
-  );
+  const go = iso => showClockOutModal(entry, workSummary, assignId, modName, overrides, iso);
+
+  document.getElementById('co-ts-now').addEventListener('click', () => go(timeFromRoundedNow(0).toISOString()));
+  document.getElementById('co-ts-exact').addEventListener('click', () => go(new Date().toISOString()));
 
   document.getElementById('co-ts-adjust').addEventListener('click', () =>
     document.getElementById('co-adjust-panel').classList.remove('hidden')
   );
 
   document.querySelectorAll('.time-adj-btn').forEach(btn => {
-    btn.addEventListener('click', () =>
-      showClockOutModal(entry, workSummary, assignId, modName, overrides,
-        adjustedTime(parseInt(btn.dataset.offset)).toISOString())
-    );
+    btn.addEventListener('click', () => go(timeFromRoundedNow(parseInt(btn.dataset.offset)).toISOString()));
   });
 
   document.getElementById('co-ts-manual-toggle').addEventListener('click', () =>
@@ -2502,7 +2545,7 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
   document.getElementById('co-ts-manual-confirm').addEventListener('click', () => {
     const val = document.getElementById('co-ts-manual-input').value;
     if (!val) return showToast('Please select a time', 'error');
-    showClockOutModal(entry, workSummary, assignId, modName, overrides, toISOFull(val));
+    go(toISOFull(val));
   });
 }
 
@@ -2545,7 +2588,7 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides, clo
     <div class="modal-footer">
       <button class="btn btn-ghost" id="co-back-btn">← Back</button>
       <button class="btn btn-primary" id="co-review-btn">Final Review →</button>
-    </div>`);
+    </div>`, { locked: true });
 
   let selectedStatus = '';
   let noCode = !!(entry.no_release_code);
@@ -2610,7 +2653,8 @@ function showFinalReview(entry, coData) {
   const labor    = calcLabor(entry, netSec);
   const travel   = parseFloat(entry.travel_reimb) || 0;
   const parking  = parseFloat(entry.parking_tolls) || 0;
-  const total    = labor + travel + parking;
+  const matsSum  = parseMaterials(entry.materials).reduce((s, m) => s + (parseFloat(m.price) || 0), 0);
+  const total    = labor + travel + parking + matsSum;
 
   openModal(`
     <div class="modal-header">
@@ -2622,7 +2666,7 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>Company:</span><span>${escHtml(entry.org_name||'—')}</span></div>
       <div class="review-row"><span>Customer:</span><span>${escHtml(entry.client_name||'—')}</span></div>
       <div class="review-row"><span>Assignment ID:</span><span>${escHtml(coData.assignId)}</span></div>
-      <div class="review-row"><span>MOD Name:</span><span>${escHtml(coData.modName)}</span></div>
+      <div class="review-row"><span>MOD Name:</span><span>${escHtml(coData.modName || '— (asked at sign-off)')}</span></div>
       <div class="review-row"><span>Address:</span><span>${escHtml(entry.address||'—')}</span></div>
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
       <div class="review-row"><span>Clock Out:</span><span>${fmtHHMM(clockOutTime)}</span></div>
@@ -2630,6 +2674,7 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
       ${travel  ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>`  : ''}
       ${parking ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(parking)}</span></div>` : ''}
+      ${matsSum ? `<div class="review-row"><span>Materials:</span><span>${fmtMoney(matsSum)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
@@ -2637,7 +2682,7 @@ function showFinalReview(entry, coData) {
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
       <button class="btn btn-danger" id="fr-confirm-btn">Confirm Clock Out</button>
-    </div>`);
+    </div>`, { locked: true });
 
   document.getElementById('fr-back-btn').addEventListener('click', () =>
     showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
@@ -2651,21 +2696,34 @@ function showFinalReview(entry, coData) {
 
 /* ── Manager sign-off (separate window — no money on screen) ─────── */
 function showSignatureModal(entry, coData) {
+  // MOD is collected HERE when it wasn't filled in earlier
+  const knownMod = (coData.modName || entry.mod_name || '').trim();
+  const modMissing = !knownMod || knownMod === 'OVERRIDE!';
+
   openModal(`
     <div class="modal-header">
       <h3>${svg('edit')} Manager Sign-Off</h3>
     </div>
     <div class="modal-body">
+      ${modMissing ? `
+      <div class="form-group" id="sig-mods-wrap">
+        <label class="form-label">MOD Name <span class="req-star">*</span></label>
+        ${buildMultiInputs('sig-mods', '', 'Manager on duty')}
+      </div>
+      <button class="btn btn-ghost btn-sm" id="sig-no-mod" style="margin-bottom:10px;font-size:12px;">No MOD on site</button>
+      <div id="sig-no-mod-hint" class="field-hint hidden" style="color:var(--orange);margin-bottom:10px;">Will be saved as "NO MOD"</div>
+      ` : ''}
       <div id="fr-sig-area">
+        ${!modMissing ? `
         <div class="form-group" style="margin-top:2px;">
           <div class="input-row">
             <select class="form-control" id="fr-sig-mod" style="flex:1;">
-              ${splitMulti(coData.modName).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+              ${splitMulti(knownMod).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
               <option value="__other__">+ Other person...</option>
             </select>
           </div>
           <input type="text" class="form-control hidden" id="fr-sig-name" placeholder="Signer name" style="margin-top:6px;">
-        </div>
+        </div>` : ''}
         <canvas id="fr-sig-pad" width="560" height="180" style="width:100%;height:140px;border:1.5px dashed var(--border);border-radius:8px;background:#fff;touch-action:none;"></canvas>
       </div>
       <div class="input-row" style="margin-top:4px;">
@@ -2677,7 +2735,18 @@ function showSignatureModal(entry, coData) {
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-sig-back">← Back</button>
       <button class="btn btn-danger" id="fr-sig-done">${svg('check')} Clock Out</button>
-    </div>`);
+    </div>`, { locked: true });
+
+  if (modMissing) wireMultiInputs('sig-mods');
+
+  // "No MOD on site" is a toggle, not an action — the single trigger is Clock Out
+  let noMod = false;
+  document.getElementById('sig-no-mod')?.addEventListener('click', () => {
+    noMod = !noMod;
+    document.getElementById('sig-mods-wrap')?.classList.toggle('hidden', noMod);
+    document.getElementById('sig-no-mod-hint')?.classList.toggle('hidden', !noMod);
+    document.getElementById('sig-no-mod').textContent = noMod ? 'Undo — enter MOD name' : 'No MOD on site';
+  });
 
   // Signature pad
   let sigDrawn = false;
@@ -2702,7 +2771,7 @@ function showSignatureModal(entry, coData) {
     sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
     sigDrawn = false;
   });
-  document.getElementById('fr-sig-mod').addEventListener('change', e => {
+  document.getElementById('fr-sig-mod')?.addEventListener('change', e => {
     document.getElementById('fr-sig-name').classList.toggle('hidden', e.target.value !== '__other__');
   });
   document.getElementById('fr-sig-back').addEventListener('click', () => {
@@ -2710,16 +2779,43 @@ function showSignatureModal(entry, coData) {
     showFinalReview(entry, coData);
   });
 
-  const finishClockOut = async (withSignature) => {
+  // "No Signature" only collapses the pad — it never finishes the clock-out
+  let sigSkipped = false;
+  document.getElementById('fr-sig-none').addEventListener('click', () => {
+    sigSkipped = !sigSkipped;
+    document.getElementById('fr-sig-area').classList.toggle('hidden', sigSkipped);
+    document.getElementById('fr-sig-clear').classList.toggle('hidden', sigSkipped);
+    document.getElementById('fr-sig-hint').textContent = sigSkipped
+      ? 'No signature will be attached'
+      : 'Sign above with finger or mouse';
+    document.getElementById('fr-sig-none').textContent = sigSkipped ? 'Add Signature' : 'No Signature';
+  });
+
+  document.getElementById('fr-sig-done').addEventListener('click', async () => {
+    // Resolve the MOD name first
+    let modNameFinal = modMissing ? '' : knownMod;
+    if (modMissing) {
+      modNameFinal = noMod ? 'NO MOD' : (readMultiInputs('sig-mods') || '');
+      if (!modNameFinal) {
+        showToast('Enter the MOD name or tap "No MOD on site"', 'error');
+        return;
+      }
+    }
+    const btn = document.getElementById('fr-sig-done');
+    btn.disabled = true;
     try {
-      let modNameFinal = coData.modName || entry.mod_name;
-      if (withSignature && sigDrawn) {
-        const modSel = document.getElementById('fr-sig-mod').value;
-        const signer = modSel === '__other__'
-          ? (document.getElementById('fr-sig-name').value.trim() || 'Manager')
-          : (modSel || 'Manager');
-        if (modSel === '__other__' && signer !== 'Manager' && !splitMulti(modNameFinal).includes(signer)) {
-          modNameFinal = splitMulti(modNameFinal).concat(signer).join(', ');
+      if (sigDrawn && !sigSkipped) {
+        let signer;
+        if (modMissing) {
+          signer = noMod ? 'Manager' : (splitMulti(modNameFinal)[0] || 'Manager');
+        } else {
+          const modSel = document.getElementById('fr-sig-mod').value;
+          signer = modSel === '__other__'
+            ? (document.getElementById('fr-sig-name').value.trim() || 'Manager')
+            : (modSel || 'Manager');
+          if (modSel === '__other__' && signer !== 'Manager' && !splitMulti(modNameFinal).includes(signer)) {
+            modNameFinal = splitMulti(modNameFinal).concat(signer).join(', ');
+          }
         }
         try {
           const dataUrl = sigCanvas.toDataURL('image/png');
@@ -2746,11 +2842,11 @@ function showSignatureModal(entry, coData) {
       state.lastCompletedEntry = completed;
       closeModal();
       renderSummaryPage(completed);
-    } catch (e) { showToast(e.message || 'Clock out failed', 'error'); }
-  };
-
-  document.getElementById('fr-sig-none').addEventListener('click', () => finishClockOut(false));
-  document.getElementById('fr-sig-done').addEventListener('click', () => finishClockOut(true));
+    } catch (e) {
+      showToast(e.message || 'Clock out failed', 'error');
+      btn.disabled = false;
+    }
+  });
 }
 
 /* ── Summary page (post clock-out) ──────────────────────────────── */
@@ -2760,7 +2856,8 @@ function renderSummaryPage(entry) {
   const labor = calcLabor(entry, netSec);
   const travel = parseFloat(entry.travel_reimb) || 0;
   const parking = parseFloat(entry.parking_tolls) || 0;
-  const total = labor + travel + parking;
+  const matsSum = parseMaterials(entry.materials).reduce((s, m) => s + (parseFloat(m.price) || 0), 0);
+  const total = labor + travel + parking + matsSum;
 
   document.getElementById('page').innerHTML = `
     <div class="p-16">
@@ -2771,7 +2868,7 @@ function renderSummaryPage(entry) {
         <div class="summary-times">${fmtTime(entry.clock_in)} → ${fmtTime(entry.clock_out)}</div>
         <div class="summary-duration">${fmtDecimalHours(netSec)}</div>
         <div class="summary-earnings">${fmtMoney(total)}</div>
-        ${labor !== total ? `<div class="summary-earn-breakdown">Labor ${fmtMoney(labor)}${travel?` + Travel ${fmtMoney(travel)}`:''}${parking?` + P/T ${fmtMoney(parking)}`:''}</div>` : ''}
+        ${labor !== total ? `<div class="summary-earn-breakdown">Labor ${fmtMoney(labor)}${travel?` + Travel ${fmtMoney(travel)}`:''}${parking?` + P/T ${fmtMoney(parking)}`:''}${matsSum?` + Mat ${fmtMoney(matsSum)}`:''}</div>` : ''}
       </div>
 
       <div class="card" style="margin-top:12px;">
@@ -3366,6 +3463,8 @@ async function renderJournalPage() {
       const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
       const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
 
+      const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
+
       journalBody.innerHTML = `
         <div class="journal-month-totals" style="border-top:1px solid var(--border);">
           <span>${mTotalHrs.toFixed(2)} hrs</span>
@@ -3373,7 +3472,7 @@ async function renderJournalPage() {
           <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
         </div>
         ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
-          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap)).join('')}`;
+          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap, revisitedIds)).join('')}`;
 
       // Entry card click handlers
       journalBody.querySelectorAll('.entry-card').forEach(card => {
@@ -3386,12 +3485,21 @@ async function renderJournalPage() {
       });
 
       // REVISIT badge → jump to the first visit
-      journalBody.querySelectorAll('.rev-badge').forEach(badge => {
+      journalBody.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
         badge.addEventListener('click', e => {
           e.stopPropagation();
           const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
           if (original) openEntryDetail(original);
           else showToast('Original visit not found', 'error');
+        });
+      });
+
+      // REVISIT REQUIRED chip → start the revisit flow for that WO
+      journalBody.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
+        badge.addEventListener('click', e => {
+          e.stopPropagation();
+          const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
+          if (en) openRevisitModal(en);
         });
       });
 
@@ -3434,12 +3542,12 @@ async function renderJournalPage() {
   }
 }
 
-function renderWeekGroup(wg, ws, sym, payMap) {
+function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null) {
   const weekKey   = dateToISODate(wg.start);
   const weekEnd   = dateToISODate(wg.end);
   const payPeriod = (payMap || {})[weekKey];
   const payStatus = payPeriod?.status || 'pending';
-  const PAY_LABELS = { pending: 'PAY PENDING', received: 'PAY RECEIVED', delayed: 'PAY DELAYED', problem: 'PAY PROBLEM' };
+  const PAY_LABELS = { pending: 'PAY PENDING', received: 'PAY RECEIVED' };
 
   const weekLabel = getISOWeekLabel(wg.start);
   const dateRange = `${fmtDateShort(wg.start.toISOString())} – ${fmtDateShort(wg.end.toISOString())}`;
@@ -3484,7 +3592,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
           return `
           <div class="day-group">
             <div class="day-group-header">${label}</div>
-            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id))).join('')}
+            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id), revisitedIds)).join('')}
           </div>`;
         }).join('');
       })()}
@@ -3749,11 +3857,13 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
-function renderEntryCard(entry, linked = false) {
+function renderEntryCard(entry, linked = false, revisitedIds = null) {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
   const statusClass = entry.status || 'pending';
+  // Flagged for revisit and no linked revisit exists yet → actionable chip
+  const needsRev = !!(entry.revisit_required && entry.clock_out && revisitedIds && !revisitedIds.has(entry.id));
 
   return `
     <div class="entry-card${linked ? ' linked-visit' : ''}" data-id="${entry.id}">
@@ -3764,6 +3874,7 @@ function renderEntryCard(entry, linked = false) {
           ${entry.address ? `<div class="entry-addr">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
         </div>
         <div class="entry-card-right">
+          ${needsRev ? `<button class="rev-badge rev-needed" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
           ${entry.revisit_of ? `<button class="rev-badge" data-rev-of="${entry.revisit_of}" title="Open first visit">${svg('return')} REVISIT</button>` : ''}
           <span class="status-chip ${statusClass}">${statusClass.toUpperCase()}</span>
         </div>
@@ -3771,7 +3882,9 @@ function renderEntryCard(entry, linked = false) {
       <div class="entry-card-bottom">
         <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
-        <div class="entry-pay">${fmtMoney(total)}</div>
+        ${entry.rate_type === 'none' && !total
+          ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
+          : `<div class="entry-pay">${fmtMoney(total)}</div>`}
         <div class="entry-card-actions">
           <button class="btn btn-ghost btn-sm entry-edit-btn" data-id="${entry.id}">${svg('edit')}</button>
           <button class="btn btn-ghost btn-sm entry-delete-btn" data-id="${entry.id}" style="color:var(--red);">${svg('trash')}</button>
@@ -3847,15 +3960,12 @@ function openEntryDetail(entry) {
 
 async function openEntryEdit(entry) {
   const sym    = state.settings.currency_symbol || '$';
-  const isFlat = entry.rate_type === 'flat';
+  // Non-billable renders as Flat with an empty amount (flat 0 = NB rule);
+  // without this, opening an NB entry and saving silently converted it to hourly
+  const isFlat = entry.rate_type === 'flat' || entry.rate_type === 'none';
   const mats   = parseMaterials(entry.materials);
 
   try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
-  // Hide archived projects except the one this entry already belongs to
-  const projOpts = (state.projects || [])
-    .filter(p => !p.archived || entry.project_id == p.id)
-    .map(p => `<option value="${p.id}" ${entry.project_id == p.id ? 'selected' : ''}>${escHtml(p.name)}${p.archived ? ' (archived)' : ''}</option>`)
-    .join('');
 
   // Candidates for "Revisit of" — recent completed WOs, excluding this one
   let revOpts = '';
@@ -3885,10 +3995,7 @@ async function openEntryEdit(entry) {
       </div>
       <div class="form-group">
         <label class="form-label">Project</label>
-        <select class="form-control" id="ee-project">
-          <option value="">— No Project —</option>
-          ${projOpts}
-        </select>
+        ${buildCombo('ee-project', 'Type to search projects...')}
       </div>
       <div class="form-group">
         <label class="form-label">Revisit of <span class="opt-label">optional</span></label>
@@ -3899,17 +4006,11 @@ async function openEntryEdit(entry) {
       </div>
       <div class="form-group">
         <label class="form-label">Company</label>
-        <select class="form-control" id="ee-company">
-          <option value="">— None —</option>
-          ${state.organizations.map(o=>`<option value="${o.id}" ${entry.organization_id==o.id?'selected':''}>${escHtml(o.name)}</option>`).join('')}
-        </select>
+        ${buildCombo('ee-company', 'Type to search companies...')}
       </div>
       <div class="form-group">
         <label class="form-label">Customer</label>
-        <select class="form-control" id="ee-customer">
-          <option value="">— None —</option>
-          ${state.clients.map(c=>`<option value="${c.id}" ${entry.client_id==c.id?'selected':''}>${escHtml(c.name)}</option>`).join('')}
-        </select>
+        ${buildCombo('ee-customer', 'Type to search customers...')}
       </div>
       <div class="row-2">
         <div class="form-group">
@@ -4066,6 +4167,17 @@ async function openEntryEdit(entry) {
       <button class="btn btn-primary" id="ee-save-btn">Save Changes</button>
     </div>`);
 
+  // Searchable pickers with current values
+  wireCombo('ee-company', orgComboOpts());
+  wireCombo('ee-customer', cliComboOpts());
+  wireCombo('ee-project', projComboOpts(entry.project_id));
+  document.getElementById('ee-company').value = entry.organization_id ? String(entry.organization_id) : '';
+  comboSync('ee-company', orgComboOpts());
+  document.getElementById('ee-customer').value = entry.client_id ? String(entry.client_id) : '';
+  comboSync('ee-customer', cliComboOpts());
+  document.getElementById('ee-project').value = entry.project_id ? String(entry.project_id) : '';
+  comboSync('ee-project', projComboOpts(entry.project_id));
+
   // Pay type toggle
   let eeRateType = isFlat ? 'flat' : 'hourly';
   document.getElementById('ee-pay-type-toggle').addEventListener('click', e => {
@@ -4134,7 +4246,7 @@ async function openEntryEdit(entry) {
         mod_name:        document.getElementById('ee-mod').value.trim() || null,
         noc_name:        document.getElementById('ee-noc').value.trim() || null,
         pm_pc_name:      document.getElementById('ee-pmpc').value.trim() || null,
-        rate_type:       eeRateType,
+        rate_type:       (eeRateType === 'flat' && !(parseFloat(document.getElementById('ee-flat-amount').value) || 0)) ? 'none' : eeRateType,
         pay_rate_id:     (eeRateType === 'hourly' && document.getElementById('ee-rate-select').value)
                            ? Number(document.getElementById('ee-rate-select').value) : null,
         flat_amount:     eeRateType === 'flat' ? (parseFloat(document.getElementById('ee-flat-amount').value) || null) : null,
@@ -4241,15 +4353,13 @@ async function renderOverviewPage() {
     const maxBar = Math.max(...weekBars.map(w => w.earned), 1);
 
     // Pay period summary (all-time)
+    // Pay states are pending/received only — anything else (legacy rows) counts as pending
     const payStat = {
-      pending:  { list:[], expected:0 },
-      delayed:  { list:[], expected:0 },
-      problem:  { list:[], expected:0, received:0 },
+      pending:  { list:[], expected:0, received:0 },
       received: { list:[], expected:0, received:0 },
     };
     for (const pp of allPayPeriods) {
-      const st = pp.status || 'pending';
-      if (!payStat[st]) continue;
+      const st = pp.status === 'received' ? 'received' : 'pending';
       const wsD = new Date(pp.week_start + 'T00:00:00');
       const weD = new Date(pp.week_end   + 'T23:59:59');
       const exp = all.filter(e => e.clock_out && new Date(e.clock_in) >= wsD && new Date(e.clock_in) <= weD)
@@ -4258,7 +4368,7 @@ async function renderOverviewPage() {
       payStat[st].expected += exp;
       if (pp.received_amount != null) payStat[st].received += pp.received_amount;
     }
-    const outstanding = payStat.pending.expected + payStat.delayed.expected + Math.max(0, payStat.problem.expected - payStat.problem.received);
+    const outstanding = payStat.pending.expected;
     const hasPayData  = allPayPeriods.length > 0;
 
     // Mileage stats
@@ -4361,8 +4471,6 @@ async function renderOverviewPage() {
         <div class="card" style="padding:4px 16px;">
           ${!hasPayData ? '<div class="empty-state-sm" style="padding:12px 0;">No pay periods tracked yet — mark pay in the Journal tab</div>' : `
           ${payStat.pending.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip pending">PAY PENDING</span><div class="pay-week-tags">${payStat.pending.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.pending.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.delayed.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip delayed">PAY DELAYED</span><div class="pay-week-tags">${payStat.delayed.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.delayed.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.problem.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip problem">PAY PROBLEM</span><div class="pay-week-tags">${payStat.problem.list.map(fmtMMMWk).join(' · ')}</div></div><div style="text-align:right;"><b>${sym}${payStat.problem.expected.toFixed(2)}</b><div style="font-size:11px;color:var(--red);">rcvd ${sym}${payStat.problem.received.toFixed(2)} · Δ −${sym}${(payStat.problem.expected-payStat.problem.received).toFixed(2)}</div></div></div>` : ''}
           ${payStat.received.list.length ? `<div class="pay-summary-row"><div><span class="pay-status-chip received">PAY RECEIVED</span><div class="pay-week-tags">${payStat.received.list.map(fmtMMMWk).join(' · ')}</div></div><b style="color:var(--green)">${sym}${payStat.received.received.toFixed(2)}</b></div>` : ''}
           ${outstanding > 0 ? `<div class="pay-summary-outstanding"><span>Outstanding</span><span style="color:var(--red);">−${sym}${outstanding.toFixed(2)}</span></div>` : ''}`}
         </div>
@@ -4547,7 +4655,6 @@ async function renderSettingsPage() {
         paid_breaks:            paid    ? '1' : '0',
         break_frequency_minutes: reminder ? freq : '0',
         break_length_minutes:   len,
-        break_reminder_minutes: reminder ? freq : '0',
       });
       showToast('Saved', 'success');
     } catch (e) { showToast(e.message, 'error'); }
@@ -4602,52 +4709,6 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-}
-
-function refreshTripCatList() {
-  const card = document.getElementById('trip-cat-card');
-  if (!card) return;
-  // Re-render list items before the form group
-  const formGroup = card.querySelector('.form-group');
-  // Remove existing list items
-  card.querySelectorAll('.list-item').forEach(el => el.remove());
-  card.querySelectorAll('.empty-state-sm').forEach(el => el.remove());
-  // Insert new list
-  const tmp = document.createElement('div');
-  tmp.innerHTML = renderTripCategoriesList();
-  while (tmp.firstChild) {
-    card.insertBefore(tmp.firstChild, formGroup || null);
-  }
-  rewireTripCatDeleteBtns();
-}
-
-function rewireTripCatDeleteBtns() {
-  document.querySelectorAll('.trip-cat-del-btn').forEach(btn => {
-    // Remove existing listeners by cloning
-    const newBtn = btn.cloneNode(true);
-    btn.parentNode.replaceChild(newBtn, btn);
-    newBtn.addEventListener('click', async () => {
-      const id = parseInt(newBtn.dataset.id);
-      const cat = state.tripCategories.find(c => c.id === id);
-      if (!confirm(`Delete category "${cat?.name || id}"?`)) return;
-      try {
-        await api.deleteTripCategory(id);
-        state.tripCategories = state.tripCategories.filter(c => c.id !== id);
-        refreshTripCatList();
-      } catch (e) { showToast(e.message, 'error'); }
-    });
-  });
-}
-
-function renderTripCategoriesList() {
-  if (!state.tripCategories.length) return '<div class="empty-state-sm">No trip categories yet</div>';
-  return state.tripCategories.map(c => `
-    <div class="list-item">
-      <div class="list-item-info"><div class="list-item-name">${escHtml(c.name)}</div></div>
-      <div class="list-item-actions">
-        <button class="btn btn-ghost btn-sm trip-cat-del-btn" data-id="${c.id}" style="color:var(--red);">${svg('trash')}</button>
-      </div>
-    </div>`).join('');
 }
 
 function renderRatesList() {

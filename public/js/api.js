@@ -58,6 +58,7 @@ const api = (() => {
     // Planned jobs
     getPlannedJobs:     ()       => req('GET',    '/api/planned-jobs'),
     createPlannedJob:   (d)      => req('POST',   '/api/planned-jobs', d),
+    updatePlannedJob:   (id, d)  => req('PUT',    `/api/planned-jobs/${id}`, d),
     deletePlannedJob:   (id)     => req('DELETE', `/api/planned-jobs/${id}`),
 
     // Settings
@@ -65,7 +66,6 @@ const api = (() => {
     saveSettings:       (d)      => req('PUT',    '/api/settings', d),
 
     // Reports
-    getWeekReport:      (date)   => req('GET',    '/api/reports/week' + (date ? `?date=${date}` : '')),
     getExportUrl:       (from, to) => `/api/reports/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${new Date().getTimezoneOffset()}`,
 
     // Pay Periods
@@ -89,8 +89,6 @@ const api = (() => {
 
     // Trip categories
     getTripCategories:   ()       => req('GET',    '/api/trip-categories'),
-    createTripCategory:  (d)      => req('POST',   '/api/trip-categories', d),
-    deleteTripCategory:  (id)     => req('DELETE', `/api/trip-categories/${id}`),
 
     getMileageExportUrl: (from, to) => `/api/reports/mileage/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${new Date().getTimezoneOffset()}`,
   };
