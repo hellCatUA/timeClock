@@ -1719,6 +1719,28 @@ def h_create_planned_job(req, _groups):
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     return 201, row
 
+PLANNED_JOB_FIELDS = [
+    "wo_title", "organization_id", "client_id", "project_id", "assignment_id",
+    "site_id", "address", "rate_type", "pay_rate_id", "flat_amount",
+    "travel_reimb", "notes", "planned_date", "planned_time", "revisit_of",
+    "ticket_num", "inc_num", "mod_name", "noc_name", "pm_pc_name",
+]
+
+def h_update_planned_job(req, groups):
+    pid = groups[0]
+    data = req.get("body", {})
+    with get_db() as db:
+        ex = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (pid,)).fetchone())
+        if not ex:
+            return 404, {"error": "Not found"}
+        vals = [data.get(f, ex.get(f)) for f in PLANNED_JOB_FIELDS]
+        db.execute(
+            f"UPDATE planned_jobs SET {', '.join(f + '=?' for f in PLANNED_JOB_FIELDS)} WHERE id=?",
+            (*vals, pid)
+        )
+        row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (pid,)).fetchone())
+    return 200, row
+
 def h_delete_planned_job(req, groups):
     with get_db() as db:
         cur = db.execute("DELETE FROM planned_jobs WHERE id=?", (groups[0],))
@@ -1862,6 +1884,7 @@ ROUTES = [
     (r"/api/projects/(\d+)",            ["DELETE"], h_delete_project),
     (r"/api/planned-jobs",              ["GET"],    h_get_planned_jobs),
     (r"/api/planned-jobs",              ["POST"],   h_create_planned_job),
+    (r"/api/planned-jobs/(\d+)",        ["PUT"],    h_update_planned_job),
     (r"/api/planned-jobs/(\d+)",        ["DELETE"], h_delete_planned_job),
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),

@@ -266,6 +266,8 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .time-sel-row { display: flex; gap: 8px; }
 .time-sel-row .flex-1 { flex: 1; }
 .time-sel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.time-sel-grid5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 8px; }
+.time-sel-grid5 .time-adj-btn { padding: 8px 2px; font-size: 12px; }
 .time-adj-btn { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px; font-size: 13px; }
 .time-adj-btn span { font-size: 11px; color: var(--text3); font-weight: 400; }
 .btn-full { width: 100%; margin-top: 4px; }
@@ -494,6 +496,7 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
   padding: 5px 10px; min-height: 28px; cursor: pointer;
 }
 .rev-badge svg { width: 12px; height: 12px; }
+.rev-badge.rev-needed { background: var(--orange); color: #1a1a1a; }
 .entry-card.linked-visit { border-left: 3px solid var(--orange); }
 
 /* ===== Pay modal entry rows ===== */

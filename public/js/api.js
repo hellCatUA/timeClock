@@ -58,6 +58,7 @@ const api = (() => {
     // Planned jobs
     getPlannedJobs:     ()       => req('GET',    '/api/planned-jobs'),
     createPlannedJob:   (d)      => req('POST',   '/api/planned-jobs', d),
+    updatePlannedJob:   (id, d)  => req('PUT',    `/api/planned-jobs/${id}`, d),
     deletePlannedJob:   (id)     => req('DELETE', `/api/planned-jobs/${id}`),
 
     // Settings
