@@ -609,20 +609,22 @@ async function renderIdleClockPage() {
               <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
               ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => {
                 const soon = isPlannedSoon(pj);
+                const meta = [pj.org_name, pj.client_name].filter(Boolean).map(escHtml).join(' · ')
+                  + (pj.site_id ? `${(pj.org_name || pj.client_name) ? ' · ' : ''}#${escHtml(pj.site_id)}` : '');
                 return `
                 <div class="card sched-card${soon ? ' sched-soon' : ''}" data-id="${pj.id}">
-                  <div class="sched-card-head">
+                  <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+                  ${pj.project_name ? `<div class="sched-project">${escHtml(pj.project_name)}</div>` : ''}
+                  <div class="sched-time-row">
                     <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
                     ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
                     ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
-                    <span style="flex:1;"></span>
-                    <button class="btn btn-ghost btn-sm sched-menu" data-id="${pj.id}" title="Actions">⋯</button>
                   </div>
-                  <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
-                  ${pj.project_name ? `<div class="sched-line" style="color:var(--blue);">${svg('org')} ${escHtml(pj.project_name)}</div>` : ''}
-                  ${(pj.org_name || pj.client_name) ? `<div class="sched-line">${[pj.org_name, pj.client_name].filter(Boolean).map(escHtml).join(' · ')}</div>` : ''}
-                  ${pj.site_id ? `<div class="sched-line">Site: ${escHtml(pj.site_id)}</div>` : ''}
-                  ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:8px;">${svg('play')} Start This Job</button>` : ''}
+                  <div class="sched-meta-row">
+                    <div class="sched-line">${meta || '&nbsp;'}</div>
+                    <button class="btn btn-ghost sched-menu" data-id="${pj.id}" title="Actions">⋯</button>
+                  </div>
+                  ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:6px;">${svg('play')} Start This Job</button>` : ''}
                 </div>`;
               }).join('')}
             </div>`).join('');
