@@ -213,6 +213,11 @@ def init_db():
             planned_date TEXT,
             planned_time TEXT,
             revisit_of INTEGER,
+            ticket_num TEXT,
+            inc_num TEXT,
+            mod_name TEXT,
+            noc_name TEXT,
+            pm_pc_name TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
         INSERT OR IGNORE INTO settings (key, value) VALUES
@@ -297,6 +302,11 @@ def migrate_db():
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
+        "ALTER TABLE planned_jobs ADD COLUMN ticket_num TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN inc_num TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN mod_name TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN noc_name TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN pm_pc_name TEXT",
         "ALTER TABLE projects ADD COLUMN archived INTEGER DEFAULT 0",
         """CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -746,7 +756,7 @@ def h_clockout(req, groups):
             mod_name=?, noc_name=?, pm_pc_name=?, parking_tolls=?,
             is_replacement=?, old_serial=?, new_serial=?, return_track=?, no_return_track=?,
             additional_info=?, materials=?, wo_title=?, travel_reimb=?,
-            revisit_required=?, received_pay=?
+            revisit_required=?
             WHERE id=?""",
             (clock_out, data.get("comment", entry["comment"]), total_break,
              data.get("status", entry["status"] or "pending"),
@@ -770,7 +780,6 @@ def h_clockout(req, groups):
              data.get("wo_title", entry.get("wo_title")),
              data.get("travel_reimb", entry.get("travel_reimb")),
              1 if data.get("revisit_required", entry.get("revisit_required", 0)) else 0,
-             data.get("received_pay", entry.get("received_pay")),
              eid))
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone()
         result = row_to_dict(row)
@@ -895,8 +904,8 @@ def _photo_folder(entry_row, eid):
 CAT_SHORTCUTS = {
     "In Route to WO":        "WO",
     "Returning Home":        "HOME",
-    "OffClock Tools/Supplies": "ONT",
-    "OnClock Tools/Supplies":  "OFFT",
+    "OffClock Tools/Supplies": "OFFT",
+    "OnClock Tools/Supplies":  "ONT",
     "Other":                  "OTH",
 }
 
@@ -1080,107 +1089,6 @@ def h_put_settings(req, _groups):
 
 
 # ── Reports ────────────────────────────────────────────────────────────────────
-
-def h_week_report(req, _groups):
-    params = req.get("query", {})
-    date_str = params.get("date", [None])[0]
-
-    with get_db() as db:
-        week_start_setting = db.execute("SELECT value FROM settings WHERE key='week_start'").fetchone()
-        week_start_day = int((week_start_setting["value"] if week_start_setting else "1"))
-
-    try:
-        ref = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc) if date_str else datetime.now(timezone.utc)
-    except Exception:
-        ref = datetime.now(timezone.utc)
-
-    ref = ref.replace(hour=0, minute=0, second=0, microsecond=0)
-    current_weekday = ref.weekday()
-    start_weekday = (week_start_day - 1) % 7
-    diff = (current_weekday - start_weekday) % 7
-    from datetime import timedelta
-    week_start = ref - timedelta(days=diff)
-    week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59)
-
-    ws_iso = week_start.isoformat()
-    we_iso = week_end.isoformat()
-
-    with get_db() as db:
-        rows = rows_to_list(db.execute(
-            ENTRY_SELECT + " WHERE e.clock_in >= ? AND e.clock_in <= ? ORDER BY e.clock_in ASC",
-            (ws_iso, we_iso)
-        ).fetchall())
-        entries = [attach_breaks(db, r) for r in rows]
-
-    total_net = 0
-    total_earn = 0
-    for e in entries:
-        if e["clock_out"]:
-            gross = dt_diff_seconds(e["clock_in"], e["clock_out"])
-            net = max(0, gross - (e["total_break_seconds"] or 0))
-        else:
-            net = None
-        e["gross_seconds"] = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else None
-        e["net_seconds"] = net
-        earn = (net / 3600 * e["hourly_rate"]) if (net is not None and e["hourly_rate"]) else None
-        e["earnings"] = earn
-        if net is not None:
-            total_net += net
-        if earn is not None:
-            total_earn += earn
-
-    return 200, {
-        "week_start": ws_iso,
-        "week_end": we_iso,
-        "entries": entries,
-        "total_net_seconds": total_net,
-        "total_earnings": total_earn,
-    }
-
-
-def h_month_report(req, _groups):
-    params = req.get("query", {})
-    date_str = params.get("date", [None])[0]
-    from datetime import timedelta
-
-    try:
-        ref = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc) if date_str else datetime.now(timezone.utc)
-    except Exception:
-        ref = datetime.now(timezone.utc)
-
-    month_start = ref.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    if month_start.month == 12:
-        month_end = month_start.replace(year=month_start.year + 1, month=1) - timedelta(seconds=1)
-    else:
-        month_end = month_start.replace(month=month_start.month + 1) - timedelta(seconds=1)
-
-    with get_db() as db:
-        week_start_setting = db.execute("SELECT value FROM settings WHERE key='week_start'").fetchone()
-        week_start_day = int((week_start_setting["value"] if week_start_setting else "1"))
-        rows = rows_to_list(db.execute(
-            ENTRY_SELECT + " WHERE e.clock_in >= ? AND e.clock_in <= ? ORDER BY e.clock_in ASC",
-            (month_start.isoformat(), month_end.isoformat())
-        ).fetchall())
-        entries = [attach_breaks(db, r) for r in rows]
-
-    for e in entries:
-        if e["clock_out"]:
-            gross = dt_diff_seconds(e["clock_in"], e["clock_out"])
-            net = max(0, gross - (e["total_break_seconds"] or 0))
-        else:
-            net = None
-        e["gross_seconds"] = dt_diff_seconds(e["clock_in"], e["clock_out"]) if e["clock_out"] else None
-        e["net_seconds"] = net
-        earn = (net / 3600 * e["hourly_rate"]) if (net is not None and e["hourly_rate"] and e.get("rate_type") != "flat") else (e.get("flat_amount") if e.get("rate_type") == "flat" else None)
-        e["earnings"] = earn
-
-    return 200, {
-        "month_start": month_start.isoformat(),
-        "month_end": month_end.isoformat(),
-        "week_start_day": week_start_day,
-        "entries": entries,
-    }
-
 
 def h_export_csv(req, _groups):
     from datetime import timedelta
@@ -1797,13 +1705,16 @@ def h_create_planned_job(req, _groups):
             """INSERT INTO planned_jobs
             (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
-             planned_date, planned_time, revisit_of)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             planned_date, planned_time, revisit_of,
+             ticket_num, inc_num, mod_name, noc_name, pm_pc_name)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
              data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"),
-             data.get("planned_date"), data.get("planned_time"), data.get("revisit_of"))
+             data.get("planned_date"), data.get("planned_time"), data.get("revisit_of"),
+             data.get("ticket_num"), data.get("inc_num"), data.get("mod_name"),
+             data.get("noc_name"), data.get("pm_pc_name"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     return 201, row
@@ -1954,8 +1865,6 @@ ROUTES = [
     (r"/api/planned-jobs/(\d+)",        ["DELETE"], h_delete_planned_job),
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),
-    (r"/api/reports/week",              ["GET"],    h_week_report),
-    (r"/api/reports/month",             ["GET"],    h_month_report),
     (r"/api/reports/export/csv",        ["GET"],    h_export_csv),
 ]
 

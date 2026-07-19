@@ -315,16 +315,19 @@ function setupPictureSectionEvents(picSection, entryId) {
 }
 
 /* ── Modal ──────────────────────────────────────────────────────── */
-function openModal(html) {
+let modalLocked = false; // critical flows (clock-out chain) must not close on overlay tap
+function openModal(html, { locked = false } = {}) {
+  modalLocked = locked;
   document.getElementById('modal-body').innerHTML = html;
   document.getElementById('modal-overlay').classList.remove('hidden');
 }
 function closeModal() {
+  modalLocked = false;
   document.getElementById('modal-overlay').classList.add('hidden');
   document.getElementById('modal-body').innerHTML = '';
 }
 document.getElementById('modal-overlay').addEventListener('click', e => {
-  if (e.target === e.currentTarget) closeModal();
+  if (e.target === e.currentTarget && !modalLocked) closeModal();
 });
 
 /* ── Navigation ─────────────────────────────────────────────────── */
@@ -563,7 +566,7 @@ async function renderIdleClockPage() {
           ${svg('car')} In Route
         </button>
         <button class="btn btn-primary btn-full" id="clock-in-start-btn">
-          ${svg('clock')} Clock In
+          ${svg('plus')} New Work Order
         </button>
       </div>
       ${pendingBanner}
@@ -716,9 +719,9 @@ async function renderIdleClockPage() {
     if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
     if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
     if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
-    prefillExtras.assignment_id = pj.assignment_id || prefillExtras.assignment_id;
-    prefillExtras.site_id = pj.site_id || prefillExtras.site_id;
-    prefillExtras.revisit_of = pj.revisit_of || prefillExtras.revisit_of;
+    ['assignment_id','site_id','revisit_of','ticket_num','inc_num','mod_name','noc_name','pm_pc_name'].forEach(k => {
+      if (pj[k]) prefillExtras[k] = pj[k];
+    });
     prefillExtras.plannedJobId = pj.id;
     document.getElementById('clock-in-form-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     showToast('Job pre-filled — pick a clock-in time to start', 'success');
@@ -782,6 +785,11 @@ async function renderIdleClockPage() {
     : [];
 
   async function doClockIn(clockInISO) {
+    // A pendingTripId is only valid for the clock-in that immediately follows
+    // its trip (pendingTripClockIn set). A fresh clock-in must not inherit a
+    // stale trip link — saving an Assignment ID later would reassign the
+    // wrong trip's files to this WO.
+    if (state.pendingTripId && !state.pendingTripClockIn) state.pendingTripId = null;
     const container = document.getElementById('clockin-time-selector');
     container.innerHTML = '<div class="saving-indicator">Saving...</div>';
     try {
@@ -1445,6 +1453,7 @@ function renderActiveTripPage() {
     try {
       await api.deleteTrip(trip.id);
       state.currentTrip = null;
+      state.pendingPlannedJobId = null; // trip abandoned — don't pre-fill its job later
       clearInterval(state.tripTimerInterval);
       state.tripTimerInterval = null;
       if (state.currentEntry) renderActiveClockPage();
@@ -1705,7 +1714,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Assignment Details -->
-    <div class="section-header collapsible" data-target="sec-assignment">
+    <div class="section-header collapsible open" data-target="sec-assignment">
       <span>Assignment Details</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-assignment" class="card sec-body">
@@ -1751,7 +1760,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- POCs -->
-    <div class="section-header collapsible" data-target="sec-pocs">
+    <div class="section-header collapsible open" data-target="sec-pocs">
       <span>Points of Contact</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-pocs" class="card sec-body">
@@ -1771,7 +1780,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Pictures -->
-    <div class="section-header collapsible" data-target="sec-pictures">
+    <div class="section-header collapsible open" data-target="sec-pictures">
       <span>Pictures</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-pictures" class="card sec-body">
@@ -1879,7 +1888,7 @@ function renderActiveClockPage() {
     </div>
 
     <!-- Reimbursements -->
-    <div class="section-header collapsible" data-target="sec-reimb">
+    <div class="section-header collapsible open" data-target="sec-reimb">
       <span>Reimbursements</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-reimb" class="card sec-body">
@@ -1961,16 +1970,13 @@ function renderActiveClockPage() {
     }
   });
 
-  // Collapsible sections
+  // Collapsible sections — chevron rotation is pure CSS via the .open class
   document.querySelectorAll('.section-header.collapsible').forEach(hdr => {
     hdr.addEventListener('click', () => {
       const target = document.getElementById(hdr.dataset.target);
       if (!target) return;
       const isOpen = !target.classList.contains('collapsed');
       target.classList.toggle('collapsed', isOpen);
-      hdr.querySelector('.sec-chev').innerHTML = isOpen ? svg('chevR') : svg('chevL').replace('chevL','chevD');
-      hdr.querySelector('.sec-chev').innerHTML = isOpen ? svg('chevR') : svg('chevR');
-      // simpler: just toggle a class
       hdr.classList.toggle('open', !isOpen);
     });
   });
@@ -2414,7 +2420,7 @@ async function initiateClockOut(entry) {
         <button class="btn ${otherMissing.length ? 'btn-danger' : 'btn-primary'}" id="co-continue-btn">
           ${otherMissing.length ? 'Override & Continue' : `${svg('check')} Continue`}
         </button>
-      </div>`);
+      </div>`, { locked: true });
 
     wireMultiInputs('mf-mods');
     document.getElementById('mf-no-mod')?.addEventListener('click', async () => {
@@ -2476,7 +2482,7 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="co-ts-cancel">Cancel</button>
-    </div>`);
+    </div>`, { locked: true });
 
   document.getElementById('co-ts-cancel').addEventListener('click', closeModal);
 
@@ -2545,7 +2551,7 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides, clo
     <div class="modal-footer">
       <button class="btn btn-ghost" id="co-back-btn">← Back</button>
       <button class="btn btn-primary" id="co-review-btn">Final Review →</button>
-    </div>`);
+    </div>`, { locked: true });
 
   let selectedStatus = '';
   let noCode = !!(entry.no_release_code);
@@ -2610,7 +2616,8 @@ function showFinalReview(entry, coData) {
   const labor    = calcLabor(entry, netSec);
   const travel   = parseFloat(entry.travel_reimb) || 0;
   const parking  = parseFloat(entry.parking_tolls) || 0;
-  const total    = labor + travel + parking;
+  const matsSum  = parseMaterials(entry.materials).reduce((s, m) => s + (parseFloat(m.price) || 0), 0);
+  const total    = labor + travel + parking + matsSum;
 
   openModal(`
     <div class="modal-header">
@@ -2630,6 +2637,7 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
       ${travel  ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>`  : ''}
       ${parking ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(parking)}</span></div>` : ''}
+      ${matsSum ? `<div class="review-row"><span>Materials:</span><span>${fmtMoney(matsSum)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
       <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
@@ -2637,7 +2645,7 @@ function showFinalReview(entry, coData) {
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
       <button class="btn btn-danger" id="fr-confirm-btn">Confirm Clock Out</button>
-    </div>`);
+    </div>`, { locked: true });
 
   document.getElementById('fr-back-btn').addEventListener('click', () =>
     showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
@@ -2677,7 +2685,7 @@ function showSignatureModal(entry, coData) {
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-sig-back">← Back</button>
       <button class="btn btn-danger" id="fr-sig-done">${svg('check')} Clock Out</button>
-    </div>`);
+    </div>`, { locked: true });
 
   // Signature pad
   let sigDrawn = false;
@@ -2760,7 +2768,8 @@ function renderSummaryPage(entry) {
   const labor = calcLabor(entry, netSec);
   const travel = parseFloat(entry.travel_reimb) || 0;
   const parking = parseFloat(entry.parking_tolls) || 0;
-  const total = labor + travel + parking;
+  const matsSum = parseMaterials(entry.materials).reduce((s, m) => s + (parseFloat(m.price) || 0), 0);
+  const total = labor + travel + parking + matsSum;
 
   document.getElementById('page').innerHTML = `
     <div class="p-16">
@@ -2771,7 +2780,7 @@ function renderSummaryPage(entry) {
         <div class="summary-times">${fmtTime(entry.clock_in)} → ${fmtTime(entry.clock_out)}</div>
         <div class="summary-duration">${fmtDecimalHours(netSec)}</div>
         <div class="summary-earnings">${fmtMoney(total)}</div>
-        ${labor !== total ? `<div class="summary-earn-breakdown">Labor ${fmtMoney(labor)}${travel?` + Travel ${fmtMoney(travel)}`:''}${parking?` + P/T ${fmtMoney(parking)}`:''}</div>` : ''}
+        ${labor !== total ? `<div class="summary-earn-breakdown">Labor ${fmtMoney(labor)}${travel?` + Travel ${fmtMoney(travel)}`:''}${parking?` + P/T ${fmtMoney(parking)}`:''}${matsSum?` + Mat ${fmtMoney(matsSum)}`:''}</div>` : ''}
       </div>
 
       <div class="card" style="margin-top:12px;">
@@ -3439,7 +3448,7 @@ function renderWeekGroup(wg, ws, sym, payMap) {
   const weekEnd   = dateToISODate(wg.end);
   const payPeriod = (payMap || {})[weekKey];
   const payStatus = payPeriod?.status || 'pending';
-  const PAY_LABELS = { pending: 'PAY PENDING', received: 'PAY RECEIVED', delayed: 'PAY DELAYED', problem: 'PAY PROBLEM' };
+  const PAY_LABELS = { pending: 'PAY PENDING', received: 'PAY RECEIVED' };
 
   const weekLabel = getISOWeekLabel(wg.start);
   const dateRange = `${fmtDateShort(wg.start.toISOString())} – ${fmtDateShort(wg.end.toISOString())}`;
@@ -3771,7 +3780,9 @@ function renderEntryCard(entry, linked = false) {
       <div class="entry-card-bottom">
         <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
-        <div class="entry-pay">${fmtMoney(total)}</div>
+        ${entry.rate_type === 'none' && !total
+          ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
+          : `<div class="entry-pay">${fmtMoney(total)}</div>`}
         <div class="entry-card-actions">
           <button class="btn btn-ghost btn-sm entry-edit-btn" data-id="${entry.id}">${svg('edit')}</button>
           <button class="btn btn-ghost btn-sm entry-delete-btn" data-id="${entry.id}" style="color:var(--red);">${svg('trash')}</button>
@@ -3847,7 +3858,9 @@ function openEntryDetail(entry) {
 
 async function openEntryEdit(entry) {
   const sym    = state.settings.currency_symbol || '$';
-  const isFlat = entry.rate_type === 'flat';
+  // Non-billable renders as Flat with an empty amount (flat 0 = NB rule);
+  // without this, opening an NB entry and saving silently converted it to hourly
+  const isFlat = entry.rate_type === 'flat' || entry.rate_type === 'none';
   const mats   = parseMaterials(entry.materials);
 
   try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
@@ -4134,7 +4147,7 @@ async function openEntryEdit(entry) {
         mod_name:        document.getElementById('ee-mod').value.trim() || null,
         noc_name:        document.getElementById('ee-noc').value.trim() || null,
         pm_pc_name:      document.getElementById('ee-pmpc').value.trim() || null,
-        rate_type:       eeRateType,
+        rate_type:       (eeRateType === 'flat' && !(parseFloat(document.getElementById('ee-flat-amount').value) || 0)) ? 'none' : eeRateType,
         pay_rate_id:     (eeRateType === 'hourly' && document.getElementById('ee-rate-select').value)
                            ? Number(document.getElementById('ee-rate-select').value) : null,
         flat_amount:     eeRateType === 'flat' ? (parseFloat(document.getElementById('ee-flat-amount').value) || null) : null,
@@ -4241,15 +4254,13 @@ async function renderOverviewPage() {
     const maxBar = Math.max(...weekBars.map(w => w.earned), 1);
 
     // Pay period summary (all-time)
+    // Pay states are pending/received only — anything else (legacy rows) counts as pending
     const payStat = {
-      pending:  { list:[], expected:0 },
-      delayed:  { list:[], expected:0 },
-      problem:  { list:[], expected:0, received:0 },
+      pending:  { list:[], expected:0, received:0 },
       received: { list:[], expected:0, received:0 },
     };
     for (const pp of allPayPeriods) {
-      const st = pp.status || 'pending';
-      if (!payStat[st]) continue;
+      const st = pp.status === 'received' ? 'received' : 'pending';
       const wsD = new Date(pp.week_start + 'T00:00:00');
       const weD = new Date(pp.week_end   + 'T23:59:59');
       const exp = all.filter(e => e.clock_out && new Date(e.clock_in) >= wsD && new Date(e.clock_in) <= weD)
@@ -4258,7 +4269,7 @@ async function renderOverviewPage() {
       payStat[st].expected += exp;
       if (pp.received_amount != null) payStat[st].received += pp.received_amount;
     }
-    const outstanding = payStat.pending.expected + payStat.delayed.expected + Math.max(0, payStat.problem.expected - payStat.problem.received);
+    const outstanding = payStat.pending.expected;
     const hasPayData  = allPayPeriods.length > 0;
 
     // Mileage stats
@@ -4361,8 +4372,6 @@ async function renderOverviewPage() {
         <div class="card" style="padding:4px 16px;">
           ${!hasPayData ? '<div class="empty-state-sm" style="padding:12px 0;">No pay periods tracked yet — mark pay in the Journal tab</div>' : `
           ${payStat.pending.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip pending">PAY PENDING</span><div class="pay-week-tags">${payStat.pending.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.pending.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.delayed.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip delayed">PAY DELAYED</span><div class="pay-week-tags">${payStat.delayed.list.map(fmtMMMWk).join(' · ')}</div></div><b>${sym}${payStat.delayed.expected.toFixed(2)}</b></div>` : ''}
-          ${payStat.problem.list.length  ? `<div class="pay-summary-row"><div><span class="pay-status-chip problem">PAY PROBLEM</span><div class="pay-week-tags">${payStat.problem.list.map(fmtMMMWk).join(' · ')}</div></div><div style="text-align:right;"><b>${sym}${payStat.problem.expected.toFixed(2)}</b><div style="font-size:11px;color:var(--red);">rcvd ${sym}${payStat.problem.received.toFixed(2)} · Δ −${sym}${(payStat.problem.expected-payStat.problem.received).toFixed(2)}</div></div></div>` : ''}
           ${payStat.received.list.length ? `<div class="pay-summary-row"><div><span class="pay-status-chip received">PAY RECEIVED</span><div class="pay-week-tags">${payStat.received.list.map(fmtMMMWk).join(' · ')}</div></div><b style="color:var(--green)">${sym}${payStat.received.received.toFixed(2)}</b></div>` : ''}
           ${outstanding > 0 ? `<div class="pay-summary-outstanding"><span>Outstanding</span><span style="color:var(--red);">−${sym}${outstanding.toFixed(2)}</span></div>` : ''}`}
         </div>
@@ -4547,7 +4556,6 @@ async function renderSettingsPage() {
         paid_breaks:            paid    ? '1' : '0',
         break_frequency_minutes: reminder ? freq : '0',
         break_length_minutes:   len,
-        break_reminder_minutes: reminder ? freq : '0',
       });
       showToast('Saved', 'success');
     } catch (e) { showToast(e.message, 'error'); }
@@ -4602,52 +4610,6 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-}
-
-function refreshTripCatList() {
-  const card = document.getElementById('trip-cat-card');
-  if (!card) return;
-  // Re-render list items before the form group
-  const formGroup = card.querySelector('.form-group');
-  // Remove existing list items
-  card.querySelectorAll('.list-item').forEach(el => el.remove());
-  card.querySelectorAll('.empty-state-sm').forEach(el => el.remove());
-  // Insert new list
-  const tmp = document.createElement('div');
-  tmp.innerHTML = renderTripCategoriesList();
-  while (tmp.firstChild) {
-    card.insertBefore(tmp.firstChild, formGroup || null);
-  }
-  rewireTripCatDeleteBtns();
-}
-
-function rewireTripCatDeleteBtns() {
-  document.querySelectorAll('.trip-cat-del-btn').forEach(btn => {
-    // Remove existing listeners by cloning
-    const newBtn = btn.cloneNode(true);
-    btn.parentNode.replaceChild(newBtn, btn);
-    newBtn.addEventListener('click', async () => {
-      const id = parseInt(newBtn.dataset.id);
-      const cat = state.tripCategories.find(c => c.id === id);
-      if (!confirm(`Delete category "${cat?.name || id}"?`)) return;
-      try {
-        await api.deleteTripCategory(id);
-        state.tripCategories = state.tripCategories.filter(c => c.id !== id);
-        refreshTripCatList();
-      } catch (e) { showToast(e.message, 'error'); }
-    });
-  });
-}
-
-function renderTripCategoriesList() {
-  if (!state.tripCategories.length) return '<div class="empty-state-sm">No trip categories yet</div>';
-  return state.tripCategories.map(c => `
-    <div class="list-item">
-      <div class="list-item-info"><div class="list-item-name">${escHtml(c.name)}</div></div>
-      <div class="list-item-actions">
-        <button class="btn btn-ghost btn-sm trip-cat-del-btn" data-id="${c.id}" style="color:var(--red);">${svg('trash')}</button>
-      </div>
-    </div>`).join('');
 }
 
 function renderRatesList() {
