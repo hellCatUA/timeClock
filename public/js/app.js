@@ -3541,7 +3541,7 @@ async function renderJournalPage() {
         });
       });
     } else {
-      // Work tab — existing behavior
+      // Work tab
       const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
       const payMap = {};
       payPeriods.forEach(p => { payMap[p.week_start] = p; });
@@ -3553,22 +3553,8 @@ async function renderJournalPage() {
         return wStart.getFullYear() === monthStart.getFullYear() && wStart.getMonth() === monthStart.getMonth();
       });
 
-      const weekGroups = {};
-      for (const e of monthEntries) {
-        const ci = new Date(e.clock_in);
-        const { start, end } = getWeekBounds(ci, ws);
-        const key = start.toISOString();
-        if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
-        weekGroups[key].entries.push(e);
-      }
-
-      const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
-      const weekGroupsByDate = {};
-      for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
-
       const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
       const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
-
       const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
 
       journalBody.innerHTML = `
@@ -3577,69 +3563,81 @@ async function renderJournalPage() {
           <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
           <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
         </div>
-        ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
-          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap, revisitedIds)).join('')}`;
+        <div style="padding:10px 16px 0;">
+          <input type="text" class="form-control" id="journal-search" placeholder="Search: title, assignment, site, company, date..." autocomplete="off" value="${escHtml(state.journalQuery || '')}">
+        </div>
+        <div id="journal-list"></div>`;
 
-      // Entry card click handlers
-      journalBody.querySelectorAll('.entry-card').forEach(card => {
-        card.addEventListener('click', e => {
-          if (e.target.closest('button')) return;
-          const eid = parseInt(card.dataset.id);
-          const entry = entries.find(en => en.id === eid);
-          if (entry) openEntryDetail(entry);
-        });
-      });
+      const renderList = () => {
+        const q = (state.journalQuery || '').trim();
+        // With a query, search across ALL months; otherwise show the month view
+        const source = q ? entries.filter(e => matchesEntry(e, q)) : monthEntries;
 
-      // REVISIT badge → jump to the first visit
-      journalBody.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
-        badge.addEventListener('click', e => {
-          e.stopPropagation();
-          const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
-          if (original) openEntryDetail(original);
-          else showToast('Original visit not found', 'error');
-        });
-      });
+        const weekGroups = {};
+        for (const e of source) {
+          const ci = new Date(e.clock_in);
+          const { start, end } = getWeekBounds(ci, ws);
+          const key = start.toISOString();
+          if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
+          weekGroups[key].entries.push(e);
+        }
+        const sortedWeeks = Object.values(weekGroups).sort((a,b) => q ? b.start - a.start : a.start - b.start);
+        const weekGroupsByDate = {};
+        for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
 
-      // REVISIT REQUIRED chip → start the revisit flow for that WO
-      journalBody.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
-        badge.addEventListener('click', e => {
-          e.stopPropagation();
-          const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
-          if (en) openRevisitModal(en);
-        });
-      });
+        document.getElementById('journal-list').innerHTML = `
+          ${q ? `<div class="field-hint" style="padding:8px 16px 0;">${source.length} match${source.length === 1 ? '' : 'es'} across all months</div>` : ''}
+          ${sortedWeeks.length === 0
+            ? `<div class="empty-state">${q ? 'No matches' : 'No work orders this month'}</div>`
+            : sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap, revisitedIds, q)).join('')}`;
 
-      journalBody.querySelectorAll('.entry-edit-btn').forEach(btn => {
-        btn.addEventListener('click', e => {
-          e.stopPropagation();
-          const eid = parseInt(btn.dataset.id);
-          const entry = entries.find(en => en.id === eid);
-          if (entry) openEntryEdit(entry);
-        });
-      });
+        const listEl = document.getElementById('journal-list');
 
-      journalBody.querySelectorAll('.entry-delete-btn').forEach(btn => {
-        btn.addEventListener('click', async e => {
-          e.stopPropagation();
-          if (!confirm('Delete this work order?')) return;
-          try {
-            await api.deleteEntry(parseInt(btn.dataset.id));
-            renderJournalPage();
-          } catch (err) { showToast(err.message, 'error'); }
+        listEl.querySelectorAll('.entry-card').forEach(card => {
+          card.addEventListener('click', e => {
+            if (e.target.closest('button') || e.target.closest('a')) return;
+            const entry = entries.find(en => en.id === parseInt(card.dataset.id));
+            if (entry) openEntryDetail(entry);
+          });
         });
-      });
 
-      journalBody.querySelectorAll('.pay-btn').forEach(btn => {
-        btn.addEventListener('click', e => {
-          e.stopPropagation();
-          const weekStart = btn.dataset.weekStart;
-          const weekEnd   = btn.dataset.weekEnd;
-          const wg = weekGroupsByDate[weekStart];
-          if (!wg) return;
-          const completed = wg.entries.filter(e => e.clock_out);
-          const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
-          openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage, completed);
+        // REVISIT badge → jump to the first visit
+        listEl.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
+          badge.addEventListener('click', e => {
+            e.stopPropagation();
+            const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
+            if (original) openEntryDetail(original);
+            else showToast('Original visit not found', 'error');
+          });
         });
+
+        // REVISIT REQUIRED chip → start the revisit flow for that WO
+        listEl.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
+          badge.addEventListener('click', e => {
+            e.stopPropagation();
+            const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
+            if (en) openRevisitModal(en);
+          });
+        });
+
+        listEl.querySelectorAll('.pay-btn').forEach(btn => {
+          btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const weekStart = btn.dataset.weekStart;
+            const weekEnd   = btn.dataset.weekEnd;
+            const wg = weekGroupsByDate[weekStart];
+            if (!wg) return;
+            const completed = wg.entries.filter(e => e.clock_out);
+            const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
+            openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage, completed);
+          });
+        });
+      };
+
+      renderList();
+      document.getElementById('journal-search').addEventListener('input', e => {
+        state.journalQuery = e.target.value;
+        renderList();
       });
     }
 
@@ -3648,7 +3646,30 @@ async function renderJournalPage() {
   }
 }
 
-function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null) {
+/* ── Journal search helpers ──────────────────────────────────────── */
+function matchesEntry(e, q) {
+  if (!q) return true;
+  const hay = [
+    e.wo_title, e.assignment_id, e.site_id, e.org_name, e.client_name,
+    e.project_name, e.address, e.ticket_num, e.inc_num, e.mod_name,
+    fmtDateShort(e.clock_in), fmtDateFull(e.clock_in), (e.clock_in || '').slice(0, 10),
+  ].filter(Boolean).join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+}
+
+// Escapes, then wraps every query word in <mark> so the card shows WHY it matched
+function hlText(text, q) {
+  const escaped = escHtml(String(text ?? ''));
+  if (!q) return escaped;
+  const words = q.trim().split(/\s+/).filter(Boolean)
+    .map(w => escHtml(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return escaped;
+  try {
+    return escaped.replace(new RegExp(`(${words.join('|')})`, 'gi'), '<mark class="hl">$1</mark>');
+  } catch { return escaped; }
+}
+
+function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null, q = '') {
   const weekKey   = dateToISODate(wg.start);
   const weekEnd   = dateToISODate(wg.end);
   const payPeriod = (payMap || {})[weekKey];
@@ -3698,7 +3719,7 @@ function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null) {
           return `
           <div class="day-group">
             <div class="day-group-header">${label}</div>
-            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id), revisitedIds)).join('')}
+            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id), revisitedIds, q)).join('')}
           </div>`;
         }).join('');
       })()}
@@ -3963,7 +3984,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
-function renderEntryCard(entry, linked = false, revisitedIds = null) {
+function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
@@ -3971,16 +3992,19 @@ function renderEntryCard(entry, linked = false, revisitedIds = null) {
   // Flagged for revisit and no linked revisit exists yet → actionable chip
   const needsRev = !!(entry.revisit_required && entry.clock_out && revisitedIds && !revisitedIds.has(entry.id));
 
+  const meta = [entry.org_name, entry.client_name].filter(Boolean).map(v => hlText(v, q)).join(' · ')
+    + (entry.site_id ? `${(entry.org_name || entry.client_name) ? ' · ' : ''}#${hlText(entry.site_id, q)}` : '');
+
   return `
     <div class="entry-card${linked ? ' linked-visit' : ''}" data-id="${entry.id}">
       <div class="entry-card-top">
         <div class="entry-card-left">
-          <div class="entry-title">${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</div>
-          <div class="entry-meta">${escHtml(entry.org_name||'')}${entry.client_name?' / '+escHtml(entry.client_name):''}${entry.project_name?` · <span style="color:var(--blue);">${escHtml(entry.project_name)}</span>`:''}</div>
-          ${entry.address ? `<div class="entry-addr">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
+          <div class="entry-title">${hlText(entry.wo_title || entry.assignment_id || 'Work Order', q)}</div>
+          ${entry.project_name ? `<div class="entry-project">${hlText(entry.project_name, q)}</div>` : ''}
+          ${meta ? `<div class="entry-meta">${meta}</div>` : ''}
+          ${entry.address ? `<div class="entry-addr">${svg('location')} ${hlText(entry.address, q)}</div>` : ''}
         </div>
         <div class="entry-card-right">
-          ${needsRev ? `<button class="rev-badge rev-needed" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
           ${entry.revisit_of ? `<button class="rev-badge" data-rev-of="${entry.revisit_of}" title="Open first visit">${svg('return')} REVISIT</button>` : ''}
           <span class="status-chip ${statusClass}">${statusClass.toUpperCase()}</span>
         </div>
@@ -3991,10 +4015,7 @@ function renderEntryCard(entry, linked = false, revisitedIds = null) {
         ${entry.rate_type === 'none' && !total
           ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
           : `<div class="entry-pay">${fmtMoney(total)}</div>`}
-        <div class="entry-card-actions">
-          <button class="btn btn-ghost btn-sm entry-edit-btn" data-id="${entry.id}">${svg('edit')}</button>
-          <button class="btn btn-ghost btn-sm entry-delete-btn" data-id="${entry.id}" style="color:var(--red);">${svg('trash')}</button>
-        </div>
+        ${needsRev ? `<button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
       </div>
     </div>`;
 }
@@ -4045,6 +4066,7 @@ function openEntryDetail(entry) {
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
       <a class="btn btn-ghost btn-sm" href="${api.getEntryZipUrl(entry.id)}" download>${svg('download')} Export ZIP</a>
       ${entry.clock_out ? `<button class="btn btn-secondary btn-sm" id="det-revisit-btn">${svg('return')} Revisit</button>` : ''}
+      <button class="btn btn-ghost btn-sm" id="det-delete-btn" style="color:var(--red);">${svg('trash')} Delete</button>
       <button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>
     </div>`);
 
@@ -4054,6 +4076,15 @@ function openEntryDetail(entry) {
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
   document.getElementById('det-revisit-btn')?.addEventListener('click', () => openRevisitModal(entry));
+  document.getElementById('det-delete-btn').addEventListener('click', async () => {
+    if (!confirm('Delete this work order? Photos will be removed as well.')) return;
+    try {
+      await api.deleteEntry(entry.id);
+      closeModal();
+      showToast('Work order deleted', 'success');
+      renderJournalPage();
+    } catch (e) { showToast(e.message || 'Delete failed', 'error'); }
+  });
 
   (async () => {
     const photosDiv = document.getElementById('det-photos');
