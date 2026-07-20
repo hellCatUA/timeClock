@@ -1,6 +1,10 @@
 /* ===== Reset & Variables ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* iOS Safari inflates fonts after an orientation change without this,
+   which is what made the whole layout drift on rotate */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 :root {
   --bg:         #0f0f0f;
   --bg2:        #1a1a1a;
@@ -467,6 +471,31 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .day-group { border-left: 2px solid var(--border); margin: 8px 0 8px 4px; padding-left: 8px; }
 .day-group-header { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 4px; }
 
+/* ===== Week schedule cards ===== */
+.sched-card { padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }
+.sched-title { font-size: 14px; font-weight: 700; line-height: 1.3; margin-bottom: 1px; overflow-wrap: anywhere; }
+.sched-project { font-size: 12px; font-weight: 600; color: var(--blue); margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-time-row { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.sched-time { font-size: 12px; font-weight: 700; color: var(--blue); }
+.sched-meta-row { display: flex; align-items: flex-end; gap: 8px; }
+.sched-meta-row .sched-line { flex: 1; min-width: 0; }
+.sched-line { font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sched-menu {
+  flex-shrink: 0; min-width: 34px; min-height: 28px;
+  padding: 0 10px; font-size: 16px; font-weight: 700; letter-spacing: 1px;
+  color: var(--text3);
+}
+.sched-card.sched-soon { border: 1px solid var(--green); background: var(--green-bg); }
+.sched-soon-chip {
+  font-size: 10px; font-weight: 800; letter-spacing: .05em;
+  color: #0f2417; background: var(--green);
+  border-radius: 10px; padding: 2px 7px;
+}
+
+/* ===== Address → maps link ===== */
+.addr-link { display: inline-flex; align-items: center; gap: 4px; color: var(--blue); text-decoration: underline; text-underline-offset: 2px; min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.addr-link svg { width: 13px; height: 13px; flex-shrink: 0; }
+
 /* ===== Mobile tap targets ===== */
 /* Small buttons across the app sat at 32-38px; lift the floor toward 40px */
 .btn-sm { min-height: 38px; }
@@ -497,6 +526,12 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 .rev-badge svg { width: 12px; height: 12px; }
 .rev-badge.rev-needed { background: var(--orange); color: #1a1a1a; }
+/* corner variant sits bottom-left on journal cards — a notch smaller */
+.rev-badge.rev-corner { font-size: 10px; padding: 4px 8px; min-height: 24px; }
+.rev-badge.rev-corner svg { width: 11px; height: 11px; }
+
+/* search-match highlight — shows exactly what the query hit */
+mark.hl { background: var(--orange); color: #1a1a1a; border-radius: 3px; padding: 0 1px; }
 .entry-card.linked-visit { border-left: 3px solid var(--orange); }
 
 /* ===== Pay modal entry rows ===== */
@@ -724,6 +759,7 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .entry-card-left { flex: 1; min-width: 0; }
 .entry-title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .entry-meta  { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.entry-project { font-size: 12px; font-weight: 600; color: var(--blue); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .entry-addr  { font-size: 12px; color: var(--text3); margin-top: 2px; display: flex; align-items: center; gap: 4px; }
 .entry-addr svg { width: 11px; height: 11px; flex-shrink: 0; }
 .entry-card-bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

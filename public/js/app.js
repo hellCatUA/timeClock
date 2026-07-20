@@ -607,19 +607,26 @@ async function renderIdleClockPage() {
           return dayKeys.map(k => `
             <div class="day-group" style="margin-left:0;">
               <div class="day-group-header">${k ? plannedDayLabel(k) : 'Unscheduled'}</div>
-              ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => `
-                <div class="card" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:6px;">
-                  ${pj.planned_time ? `<div style="flex-shrink:0;font-size:12px;font-weight:700;color:var(--blue);min-width:52px;">${fmtPlannedTime(pj.planned_time)}</div>` : ''}
-                  <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-                      ${pj.revisit_of ? '<span style="color:var(--orange);font-size:11px;font-weight:700;">REV</span> ' : ''}${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}
-                    </div>
-                    <div class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${[pj.org_name, pj.client_name, pj.project_name].filter(Boolean).map(escHtml).join(' · ') || '&nbsp;'}</div>
+              ${[...byDay[k]].sort((a,b) => (a.planned_time || '99:99').localeCompare(b.planned_time || '99:99')).map(pj => {
+                const soon = isPlannedSoon(pj);
+                const meta = [pj.org_name, pj.client_name].filter(Boolean).map(escHtml).join(' · ')
+                  + (pj.site_id ? `${(pj.org_name || pj.client_name) ? ' · ' : ''}#${escHtml(pj.site_id)}` : '');
+                return `
+                <div class="card sched-card${soon ? ' sched-soon' : ''}" data-id="${pj.id}">
+                  <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+                  ${pj.project_name ? `<div class="sched-project">${escHtml(pj.project_name)}</div>` : ''}
+                  <div class="sched-time-row">
+                    <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
+                    ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
+                    ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
                   </div>
-                  <button class="btn btn-primary btn-sm sched-start" data-id="${pj.id}" title="Start this job">${svg('play')}</button>
-                  <button class="btn btn-ghost btn-sm sched-edit" data-id="${pj.id}" title="Edit">${svg('edit')}</button>
-                  <button class="btn btn-ghost btn-sm sched-del" data-id="${pj.id}" style="color:var(--red);" title="Delete">✕</button>
-                </div>`).join('')}
+                  <div class="sched-meta-row">
+                    <div class="sched-line">${meta || '&nbsp;'}</div>
+                    <button class="btn btn-ghost sched-menu" data-id="${pj.id}" title="Actions">⋯</button>
+                  </div>
+                  ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:6px;">${svg('play')} Start This Job</button>` : ''}
+                </div>`;
+              }).join('')}
             </div>`).join('');
         })()}
       </div>
@@ -766,26 +773,26 @@ async function renderIdleClockPage() {
     showToast('Job pre-filled — pick a clock-in time to start', 'success');
   };
 
-  // Week schedule row actions
-  document.querySelectorAll('.sched-start').forEach(btn => {
-    btn.addEventListener('click', () => {
+  // Week schedule: card → read-only details, ⋯ → actions, soon-strip → start
+  document.querySelectorAll('.sched-card').forEach(card => {
+    card.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(card.dataset.id));
+      if (pj) openPlannedJobDetail(pj, applyPlannedJob);
+    });
+  });
+  document.querySelectorAll('.sched-menu').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
+      if (pj) openPlannedJobMenu(pj, applyPlannedJob);
+    });
+  });
+  document.querySelectorAll('.sched-soon-start').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
       const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
       if (pj) applyPlannedJob(pj);
-    });
-  });
-  document.querySelectorAll('.sched-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
-      if (pj) openPlanJobModal(pj);
-    });
-  });
-  document.querySelectorAll('.sched-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this planned job?')) return;
-      try {
-        await api.deletePlannedJob(Number(btn.dataset.id));
-        renderIdleClockPage();
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
     });
   });
 
@@ -923,7 +930,106 @@ function plannedDayLabel(iso) {
   return new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 }
 
-/* ── + New Work Order: start now, revisit, or plan for later ─────── */
+// A timed job for today whose start is within 2 hours (or already due)
+function isPlannedSoon(pj) {
+  if (!pj.planned_date || !pj.planned_time) return false;
+  if (pj.planned_date !== new Date().toLocaleDateString('en-CA')) return false;
+  const [h, m] = pj.planned_time.split(':').map(Number);
+  const start = new Date(); start.setHours(h, m || 0, 0, 0);
+  return start.getTime() - Date.now() <= 2 * 3600 * 1000;
+}
+
+/* ── Planned job: read-only details ──────────────────────────────── */
+function openPlannedJobDetail(pj, onStart) {
+  const sym = state.settings.currency_symbol || '$';
+  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + fmtPlannedTime(pj.planned_time) : ''}`;
+  const rate = pj.rate_type === 'flat'
+    ? (pj.flat_amount ? `${sym}${parseFloat(pj.flat_amount).toFixed(2)} flat` : 'Non-Billable')
+    : pj.rate_type === 'none'
+      ? 'Non-Billable'
+      : (() => { const r = state.payRates.find(x => x.id === pj.pay_rate_id); return r ? `${escHtml(r.name)} — ${sym}${r.rate}/hr` : 'Hourly'; })();
+  const row = (label, val) => val ? `<div class="review-row"><span>${label}:</span><span>${val}</span></div>` : '';
+
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('bell')} Planned Job</h3>
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-ghost btn-sm" id="pjd-menu" title="Actions">⋯</button>
+        <button class="btn btn-ghost btn-sm" id="pjd-x">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="font-size:15px;font-weight:700;color:var(--blue);">${escHtml(when)}</span>
+        ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
+        ${isPlannedSoon(pj) ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
+      </div>
+      <div style="font-size:16px;font-weight:700;margin-bottom:10px;">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
+      ${row('Project', pj.project_name ? escHtml(pj.project_name) : '')}
+      ${row('Company', pj.org_name ? escHtml(pj.org_name) : '')}
+      ${row('Customer', pj.client_name ? escHtml(pj.client_name) : '')}
+      ${row('Site ID', pj.site_id ? escHtml(pj.site_id) : '')}
+      ${row('Assignment ID', pj.assignment_id ? escHtml(pj.assignment_id) : '')}
+      ${pj.address ? `<div class="review-row"><span>Address:</span><a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(pj.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(pj.address)}</a></div>` : ''}
+      ${row('Pay', rate)}
+      ${pj.travel_reimb ? row('Travel Reimb', `${sym}${parseFloat(pj.travel_reimb).toFixed(2)}`) : ''}
+      ${row('Ticket #', pj.ticket_num ? escHtml(pj.ticket_num) : '')}
+      ${row('INC #', pj.inc_num ? escHtml(pj.inc_num) : '')}
+      ${row('MOD', pj.mod_name ? escHtml(pj.mod_name) : '')}
+      ${row('NOC', pj.noc_name ? escHtml(pj.noc_name) : '')}
+      ${row('PM/PC', pj.pm_pc_name ? escHtml(pj.pm_pc_name) : '')}
+      ${pj.notes ? `<div class="review-row" style="align-items:flex-start;"><span>Notes:</span><span style="white-space:pre-wrap;">${escHtml(pj.notes)}</span></div>` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pjd-close">Close</button>
+      <button class="btn btn-primary" id="pjd-start">${svg('play')} Start This Job</button>
+    </div>`);
+
+  document.getElementById('pjd-x').addEventListener('click', closeModal);
+  document.getElementById('pjd-close').addEventListener('click', closeModal);
+  document.getElementById('pjd-menu').addEventListener('click', () => openPlannedJobMenu(pj, onStart));
+  document.getElementById('pjd-start').addEventListener('click', () => {
+    closeModal();
+    if (onStart) onStart(pj);
+  });
+}
+
+/* ── Planned job: ⋯ actions menu ─────────────────────────────────── */
+function openPlannedJobMenu(pj, onStart) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('bell')} ${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</h3>
+      <button class="btn btn-ghost btn-sm" id="pjm-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="btn btn-secondary btn-full" id="pjm-details" style="margin-bottom:8px;">${svg('clock')} View Details</button>
+      <button class="btn btn-ghost btn-full" id="pjm-edit" style="margin-bottom:8px;">${svg('edit')} Edit</button>
+      <button class="btn btn-ghost btn-full" id="pjm-del" style="color:var(--red);">${svg('trash')} Delete</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pjm-cancel">Cancel</button>
+    </div>`);
+  document.getElementById('pjm-x').addEventListener('click', closeModal);
+  document.getElementById('pjm-cancel').addEventListener('click', closeModal);
+  document.getElementById('pjm-details').addEventListener('click', () => {
+    closeModal();
+    openPlannedJobDetail(pj, onStart);
+  });
+  document.getElementById('pjm-edit').addEventListener('click', () => {
+    closeModal();
+    openPlanJobModal(pj);
+  });
+  document.getElementById('pjm-del').addEventListener('click', async () => {
+    if (!confirm('Delete this planned job?')) return;
+    try {
+      await api.deletePlannedJob(pj.id);
+      closeModal();
+      renderIdleClockPage();
+    } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
+  });
+}
+
+/* ── + New Work Order: WHEN first (now / later), THEN what (new / revisit) ── */
 function openNewWoChoiceModal(onStartNow) {
   openModal(`
     <div class="modal-header">
@@ -931,22 +1037,48 @@ function openNewWoChoiceModal(onStartNow) {
       <button class="btn btn-ghost btn-sm" id="nw-x">✕</button>
     </div>
     <div class="modal-body">
-      <button class="btn btn-primary btn-full" id="nw-start" style="margin-bottom:8px;">${svg('play')} Start Now</button>
-      <button class="btn btn-secondary btn-full" id="nw-revisit" style="margin-bottom:8px;">${svg('return')} Revisit of a WO</button>
-      <button class="btn btn-ghost btn-full" id="nw-plan">${svg('bell')} Plan for Later</button>
+      <p style="color:var(--text2);margin-bottom:12px;">When is this job happening?</p>
+      <button class="btn btn-primary btn-full" id="nw-now" style="margin-bottom:8px;">${svg('play')} Start Now</button>
+      <button class="btn btn-secondary btn-full" id="nw-later">${svg('bell')} Plan for Later</button>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="nw-cancel">Cancel</button>
     </div>`);
   document.getElementById('nw-x').addEventListener('click', closeModal);
   document.getElementById('nw-cancel').addEventListener('click', closeModal);
-  document.getElementById('nw-start').addEventListener('click', () => { closeModal(); if (onStartNow) onStartNow(); });
-  document.getElementById('nw-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
-  document.getElementById('nw-plan').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
+  document.getElementById('nw-now').addEventListener('click', () => { closeModal(); openNewWoTypeModal('now', onStartNow); });
+  document.getElementById('nw-later').addEventListener('click', () => { closeModal(); openNewWoTypeModal('plan', onStartNow); });
+}
+
+function openNewWoTypeModal(intent, onStartNow) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${intent === 'plan' ? `${svg('bell')} Plan for Later` : `${svg('play')} Start Now`}</h3>
+      <button class="btn btn-ghost btn-sm" id="nt-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text2);margin-bottom:12px;">Is this a brand-new job or a revisit to an existing work order?</p>
+      <button class="btn btn-primary btn-full" id="nt-new" style="margin-bottom:8px;">${svg('plus')} New Job</button>
+      <button class="btn btn-secondary btn-full" id="nt-revisit">${svg('return')} Revisit of a WO</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="nt-back">← Back</button>
+    </div>`);
+  document.getElementById('nt-x').addEventListener('click', closeModal);
+  document.getElementById('nt-back').addEventListener('click', () => { closeModal(); openNewWoChoiceModal(onStartNow); });
+  document.getElementById('nt-new').addEventListener('click', () => {
+    closeModal();
+    if (intent === 'plan') openPlanJobModal();
+    else if (onStartNow) onStartNow();
+  });
+  document.getElementById('nt-revisit').addEventListener('click', () => {
+    closeModal();
+    openPickWoForRevisitModal(intent);
+  });
 }
 
 /* ── Pick a completed WO to plan a revisit from ──────────────────── */
-async function openPickWoForRevisitModal() {
+async function openPickWoForRevisitModal(intent = 'now') {
   let entries = [];
   try {
     entries = (await api.getEntries()).filter(e => e.clock_out);
@@ -1007,7 +1139,7 @@ async function openPickWoForRevisitModal() {
         const en = entries.find(e => e.id === Number(card.dataset.id));
         if (!en) return;
         closeModal();
-        openRevisitModal(en);
+        openRevisitModal(en, intent);
       });
     });
   };
@@ -1296,7 +1428,7 @@ function openProjectsModal() {
 }
 
 /* ── Revisit modal ───────────────────────────────────────────────── */
-function openRevisitModal(entry) {
+function openRevisitModal(entry, intent = 'now') {
   // Address / Company / Customer / Project / Site ID / WO Title (REV | ...)
   // are carried automatically; extra fields are behind "Import more".
   const EXTRA = [
@@ -1342,7 +1474,7 @@ function openRevisitModal(entry) {
         </label>` : ''}
         <input type="text" class="form-control ${hasAssign ? 'hidden' : ''}" id="rv-assign-input" placeholder="e.g. 171624976">
       </div>
-      <div class="form-group hidden" id="rv-date-group">
+      <div class="form-group ${intent === 'plan' ? '' : 'hidden'}" id="rv-date-group">
         <div class="row-2">
           <div>
             <label class="form-label">Planned date</label>
@@ -1357,8 +1489,8 @@ function openRevisitModal(entry) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="rv-cancel">Cancel</button>
-      <button class="btn btn-secondary" id="rv-plan">${svg('plus')} Plan for Later</button>
-      <button class="btn btn-primary" id="rv-go">${svg('clock')} Clock In Now</button>
+      <button class="btn ${intent === 'plan' ? 'btn-primary' : 'btn-secondary'}" id="rv-plan">${svg('plus')} Plan for Later</button>
+      <button class="btn ${intent === 'plan' ? 'btn-secondary' : 'btn-primary'}" id="rv-go">${svg('clock')} Clock In Now</button>
     </div>`);
 
   document.getElementById('rv-x').addEventListener('click', closeModal);
@@ -2079,9 +2211,8 @@ function renderActiveClockPage() {
 
   // Custom pictures toggle — first activation with no fields asks for a name
   document.getElementById('jd-custom-pics-toggle')?.addEventListener('change', e => {
-    state.customPicsOpen = e.target.checked;
     document.getElementById('custom-pics-wrap')?.classList.toggle('hidden', !e.target.checked);
-    if (e.target.checked && getCustomPhotoFields().length === 0) {
+    if (e.target.checked && getEntryCustomFields(state.currentEntry || entry).length === 0) {
       document.getElementById('add-custom-photo-field')?.click();
     }
   });
@@ -2100,14 +2231,22 @@ function renderActiveClockPage() {
   // Custom picture fields
   document.getElementById('add-custom-photo-field')?.addEventListener('click', async () => {
     const name = (prompt('Picture field name:') || '').trim();
-    if (!name) return;
-    const fields = getCustomPhotoFields();
+    if (!name) {
+      // Toggle was flipped on but no name given — flip it back off
+      const t = document.getElementById('jd-custom-pics-toggle');
+      if (t && getEntryCustomFields(state.currentEntry || entry).length === 0) {
+        t.checked = false;
+        document.getElementById('custom-pics-wrap')?.classList.add('hidden');
+      }
+      return;
+    }
+    const cur = state.currentEntry || entry;
+    const fields = getEntryCustomFields(cur);
     if (fields.some(f => f.toLowerCase() === name.toLowerCase())) { showToast('Field already exists', 'error'); return; }
     fields.push(name);
     try {
-      await api.saveSettings({ custom_photo_fields: JSON.stringify(fields) });
-      state.settings.custom_photo_fields = JSON.stringify(fields);
       await autoSaveActiveForm();
+      await saveSection(cur, { custom_photo_fields: JSON.stringify(fields) });
       renderActiveClockPage();
     } catch (err) { showToast(err.message || 'Failed to add field', 'error'); }
   });
@@ -2150,16 +2289,23 @@ function renderActiveClockPage() {
         buildPhotoSection('equipment_left', 'Equipment Left', grouped.equipment_left);
       document.getElementById('photos-new-serial').innerHTML =
         buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
-      // User-defined custom picture fields (stored in settings)
-      const customFields = getCustomPhotoFields();
+      // Custom picture fields belong to THIS entry only; legacy photos whose
+      // slug isn't in the entry's list still render (derived from the slug)
+      const customFields = getEntryCustomFields(state.currentEntry || entry);
+      const knownSlugs = new Set(customFields.map(cfSlug));
+      const legacySlugs = Object.keys(grouped).filter(k => k.startsWith('cf_') && grouped[k].length && !knownSlugs.has(k));
       const customBox = document.getElementById('custom-photo-sections');
       if (customBox) {
-        customBox.innerHTML = customFields.map(name => `
-          <div class="subsection-label" style="margin-top:8px;">${escHtml(name)}</div>
-          <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
-        ).join('');
-        const hasCfPhotos = Object.keys(grouped).some(k => k.startsWith('cf_') && grouped[k].length);
-        if (hasCfPhotos || state.customPicsOpen) {
+        customBox.innerHTML =
+          customFields.map(name => `
+            <div class="subsection-label" style="margin-top:8px;">${escHtml(name)}</div>
+            <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
+          ).join('')
+          + legacySlugs.map(slug => `
+            <div class="subsection-label" style="margin-top:8px;">${escHtml(cfLabel(slug))}</div>
+            <div class="photo-sections-group">${buildPhotoSection(slug, cfLabel(slug), grouped[slug])}</div>`
+          ).join('');
+        if (customFields.length || legacySlugs.length) {
           const t = document.getElementById('jd-custom-pics-toggle');
           if (t) t.checked = true;
           document.getElementById('custom-pics-wrap')?.classList.remove('hidden');
@@ -2298,9 +2444,11 @@ function setupMaterialsUI(existing, photoEntryId = null) {
   });
 }
 
-function getCustomPhotoFields() {
+// Custom picture fields are PER ENTRY (stored on the work order itself) —
+// they must not leak from one job to the next
+function getEntryCustomFields(entry) {
   try {
-    const arr = JSON.parse(state.settings.custom_photo_fields || '[]');
+    const arr = JSON.parse((entry && entry.custom_photo_fields) || '[]');
     return Array.isArray(arr) ? arr.filter(n => typeof n === 'string' && n.trim()) : [];
   } catch { return []; }
 }
@@ -2310,8 +2458,7 @@ function cfSlug(name) {
   return 'cf_' + String(name).trim().replace(/[^\w-]+/g, '_');
 }
 function cfLabel(type) {
-  const match = getCustomPhotoFields().find(f => cfSlug(f) === type);
-  return match || type.slice(3).replace(/_/g, ' ');
+  return type.slice(3).replace(/_/g, ' ');
 }
 
 /* ── Searchable combo (Company / Customer pickers) ───────────────── */
@@ -3435,7 +3582,7 @@ async function renderJournalPage() {
         });
       });
     } else {
-      // Work tab — existing behavior
+      // Work tab
       const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
       const payMap = {};
       payPeriods.forEach(p => { payMap[p.week_start] = p; });
@@ -3447,22 +3594,8 @@ async function renderJournalPage() {
         return wStart.getFullYear() === monthStart.getFullYear() && wStart.getMonth() === monthStart.getMonth();
       });
 
-      const weekGroups = {};
-      for (const e of monthEntries) {
-        const ci = new Date(e.clock_in);
-        const { start, end } = getWeekBounds(ci, ws);
-        const key = start.toISOString();
-        if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
-        weekGroups[key].entries.push(e);
-      }
-
-      const sortedWeeks = Object.values(weekGroups).sort((a,b) => a.start - b.start);
-      const weekGroupsByDate = {};
-      for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
-
       const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
       const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
-
       const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
 
       journalBody.innerHTML = `
@@ -3471,69 +3604,81 @@ async function renderJournalPage() {
           <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
           <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
         </div>
-        ${sortedWeeks.length === 0 ? '<div class="empty-state">No work orders this month</div>' :
-          sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap, revisitedIds)).join('')}`;
+        <div style="padding:10px 16px 0;">
+          <input type="text" class="form-control" id="journal-search" placeholder="Search: title, assignment, site, company, date..." autocomplete="off" value="${escHtml(state.journalQuery || '')}">
+        </div>
+        <div id="journal-list"></div>`;
 
-      // Entry card click handlers
-      journalBody.querySelectorAll('.entry-card').forEach(card => {
-        card.addEventListener('click', e => {
-          if (e.target.closest('button')) return;
-          const eid = parseInt(card.dataset.id);
-          const entry = entries.find(en => en.id === eid);
-          if (entry) openEntryDetail(entry);
-        });
-      });
+      const renderList = () => {
+        const q = (state.journalQuery || '').trim();
+        // With a query, search across ALL months; otherwise show the month view
+        const source = q ? entries.filter(e => matchesEntry(e, q)) : monthEntries;
 
-      // REVISIT badge → jump to the first visit
-      journalBody.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
-        badge.addEventListener('click', e => {
-          e.stopPropagation();
-          const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
-          if (original) openEntryDetail(original);
-          else showToast('Original visit not found', 'error');
-        });
-      });
+        const weekGroups = {};
+        for (const e of source) {
+          const ci = new Date(e.clock_in);
+          const { start, end } = getWeekBounds(ci, ws);
+          const key = start.toISOString();
+          if (!weekGroups[key]) weekGroups[key] = { start, end, entries: [] };
+          weekGroups[key].entries.push(e);
+        }
+        const sortedWeeks = Object.values(weekGroups).sort((a,b) => q ? b.start - a.start : a.start - b.start);
+        const weekGroupsByDate = {};
+        for (const wg of sortedWeeks) weekGroupsByDate[dateToISODate(wg.start)] = wg;
 
-      // REVISIT REQUIRED chip → start the revisit flow for that WO
-      journalBody.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
-        badge.addEventListener('click', e => {
-          e.stopPropagation();
-          const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
-          if (en) openRevisitModal(en);
-        });
-      });
+        document.getElementById('journal-list').innerHTML = `
+          ${q ? `<div class="field-hint" style="padding:8px 16px 0;">${source.length} match${source.length === 1 ? '' : 'es'} across all months</div>` : ''}
+          ${sortedWeeks.length === 0
+            ? `<div class="empty-state">${q ? 'No matches' : 'No work orders this month'}</div>`
+            : sortedWeeks.map(wg => renderWeekGroup(wg, ws, sym, payMap, revisitedIds, q)).join('')}`;
 
-      journalBody.querySelectorAll('.entry-edit-btn').forEach(btn => {
-        btn.addEventListener('click', e => {
-          e.stopPropagation();
-          const eid = parseInt(btn.dataset.id);
-          const entry = entries.find(en => en.id === eid);
-          if (entry) openEntryEdit(entry);
-        });
-      });
+        const listEl = document.getElementById('journal-list');
 
-      journalBody.querySelectorAll('.entry-delete-btn').forEach(btn => {
-        btn.addEventListener('click', async e => {
-          e.stopPropagation();
-          if (!confirm('Delete this work order?')) return;
-          try {
-            await api.deleteEntry(parseInt(btn.dataset.id));
-            renderJournalPage();
-          } catch (err) { showToast(err.message, 'error'); }
+        listEl.querySelectorAll('.entry-card').forEach(card => {
+          card.addEventListener('click', e => {
+            if (e.target.closest('button') || e.target.closest('a')) return;
+            const entry = entries.find(en => en.id === parseInt(card.dataset.id));
+            if (entry) openEntryDetail(entry);
+          });
         });
-      });
 
-      journalBody.querySelectorAll('.pay-btn').forEach(btn => {
-        btn.addEventListener('click', e => {
-          e.stopPropagation();
-          const weekStart = btn.dataset.weekStart;
-          const weekEnd   = btn.dataset.weekEnd;
-          const wg = weekGroupsByDate[weekStart];
-          if (!wg) return;
-          const completed = wg.entries.filter(e => e.clock_out);
-          const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
-          openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage, completed);
+        // REVISIT badge → jump to the first visit
+        listEl.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
+          badge.addEventListener('click', e => {
+            e.stopPropagation();
+            const original = entries.find(en => en.id === parseInt(badge.dataset.revOf));
+            if (original) openEntryDetail(original);
+            else showToast('Original visit not found', 'error');
+          });
         });
+
+        // REVISIT REQUIRED chip → start the revisit flow for that WO
+        listEl.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
+          badge.addEventListener('click', e => {
+            e.stopPropagation();
+            const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
+            if (en) openRevisitModal(en);
+          });
+        });
+
+        listEl.querySelectorAll('.pay-btn').forEach(btn => {
+          btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const weekStart = btn.dataset.weekStart;
+            const weekEnd   = btn.dataset.weekEnd;
+            const wg = weekGroupsByDate[weekStart];
+            if (!wg) return;
+            const completed = wg.entries.filter(e => e.clock_out);
+            const wExp = completed.reduce((s,e) => s + calcTotalExpected(e), 0);
+            openPayModal(weekStart, weekEnd, wExp, payMap[weekStart] || null, sym, renderJournalPage, completed);
+          });
+        });
+      };
+
+      renderList();
+      document.getElementById('journal-search').addEventListener('input', e => {
+        state.journalQuery = e.target.value;
+        renderList();
       });
     }
 
@@ -3542,7 +3687,30 @@ async function renderJournalPage() {
   }
 }
 
-function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null) {
+/* ── Journal search helpers ──────────────────────────────────────── */
+function matchesEntry(e, q) {
+  if (!q) return true;
+  const hay = [
+    e.wo_title, e.assignment_id, e.site_id, e.org_name, e.client_name,
+    e.project_name, e.address, e.ticket_num, e.inc_num, e.mod_name,
+    fmtDateShort(e.clock_in), fmtDateFull(e.clock_in), (e.clock_in || '').slice(0, 10),
+  ].filter(Boolean).join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+}
+
+// Escapes, then wraps every query word in <mark> so the card shows WHY it matched
+function hlText(text, q) {
+  const escaped = escHtml(String(text ?? ''));
+  if (!q) return escaped;
+  const words = q.trim().split(/\s+/).filter(Boolean)
+    .map(w => escHtml(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!words.length) return escaped;
+  try {
+    return escaped.replace(new RegExp(`(${words.join('|')})`, 'gi'), '<mark class="hl">$1</mark>');
+  } catch { return escaped; }
+}
+
+function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null, q = '') {
   const weekKey   = dateToISODate(wg.start);
   const weekEnd   = dateToISODate(wg.end);
   const payPeriod = (payMap || {})[weekKey];
@@ -3592,7 +3760,7 @@ function renderWeekGroup(wg, ws, sym, payMap, revisitedIds = null) {
           return `
           <div class="day-group">
             <div class="day-group-header">${label}</div>
-            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id), revisitedIds)).join('')}
+            ${days[k].map(e => renderEntryCard(e, revLinked.has(e.id), revisitedIds, q)).join('')}
           </div>`;
         }).join('');
       })()}
@@ -3857,7 +4025,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
-function renderEntryCard(entry, linked = false, revisitedIds = null) {
+function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
@@ -3865,30 +4033,30 @@ function renderEntryCard(entry, linked = false, revisitedIds = null) {
   // Flagged for revisit and no linked revisit exists yet → actionable chip
   const needsRev = !!(entry.revisit_required && entry.clock_out && revisitedIds && !revisitedIds.has(entry.id));
 
+  const meta = [entry.org_name, entry.client_name].filter(Boolean).map(v => hlText(v, q)).join(' · ')
+    + (entry.site_id ? `${(entry.org_name || entry.client_name) ? ' · ' : ''}#${hlText(entry.site_id, q)}` : '');
+
   return `
     <div class="entry-card${linked ? ' linked-visit' : ''}" data-id="${entry.id}">
       <div class="entry-card-top">
         <div class="entry-card-left">
-          <div class="entry-title">${escHtml(entry.wo_title || entry.assignment_id || 'Work Order')}</div>
-          <div class="entry-meta">${escHtml(entry.org_name||'')}${entry.client_name?' / '+escHtml(entry.client_name):''}${entry.project_name?` · <span style="color:var(--blue);">${escHtml(entry.project_name)}</span>`:''}</div>
-          ${entry.address ? `<div class="entry-addr">${svg('location')} ${escHtml(entry.address)}</div>` : ''}
+          <div class="entry-title">${hlText(entry.wo_title || entry.assignment_id || 'Work Order', q)}</div>
+          ${entry.project_name ? `<div class="entry-project">${hlText(entry.project_name, q)}</div>` : ''}
+          ${meta ? `<div class="entry-meta">${meta}</div>` : ''}
+          ${entry.address ? `<div class="entry-addr">${svg('location')} ${hlText(entry.address, q)}</div>` : ''}
         </div>
         <div class="entry-card-right">
-          ${needsRev ? `<button class="rev-badge rev-needed" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
           ${entry.revisit_of ? `<button class="rev-badge" data-rev-of="${entry.revisit_of}" title="Open first visit">${svg('return')} REVISIT</button>` : ''}
           <span class="status-chip ${statusClass}">${statusClass.toUpperCase()}</span>
         </div>
       </div>
       <div class="entry-card-bottom">
+        ${needsRev ? `<button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
         <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
         ${entry.rate_type === 'none' && !total
           ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
           : `<div class="entry-pay">${fmtMoney(total)}</div>`}
-        <div class="entry-card-actions">
-          <button class="btn btn-ghost btn-sm entry-edit-btn" data-id="${entry.id}">${svg('edit')}</button>
-          <button class="btn btn-ghost btn-sm entry-delete-btn" data-id="${entry.id}" style="color:var(--red);">${svg('trash')}</button>
-        </div>
       </div>
     </div>`;
 }
@@ -3912,7 +4080,9 @@ function openEntryDetail(entry) {
       <div class="review-row"><span>Customer:</span><span>${escHtml(entry.client_name||'—')}</span></div>
       <div class="review-row"><span>Assignment ID:</span><span>${escHtml(entry.assignment_id||'—')}</span></div>
       <div class="review-row"><span>Site ID:</span><span>${escHtml(entry.site_id||'—')}</span></div>
-      <div class="review-row"><span>Address:</span><span>${escHtml(entry.address||'—')}</span></div>
+      <div class="review-row"><span>Address:</span>${entry.address
+        ? `<a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(entry.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(entry.address)}</a>`
+        : '<span>—</span>'}</div>
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
       <div class="review-row"><span>Clock Out:</span><span>${fmtTime(entry.clock_out)}</span></div>
       <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
@@ -3937,6 +4107,7 @@ function openEntryDetail(entry) {
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
       <a class="btn btn-ghost btn-sm" href="${api.getEntryZipUrl(entry.id)}" download>${svg('download')} Export ZIP</a>
       ${entry.clock_out ? `<button class="btn btn-secondary btn-sm" id="det-revisit-btn">${svg('return')} Revisit</button>` : ''}
+      <button class="btn btn-ghost btn-sm" id="det-delete-btn" style="color:var(--red);">${svg('trash')} Delete</button>
       <button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>
     </div>`);
 
@@ -3946,6 +4117,15 @@ function openEntryDetail(entry) {
   });
   document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
   document.getElementById('det-revisit-btn')?.addEventListener('click', () => openRevisitModal(entry));
+  document.getElementById('det-delete-btn').addEventListener('click', async () => {
+    if (!confirm('Delete this work order? Photos will be removed as well.')) return;
+    try {
+      await api.deleteEntry(entry.id);
+      closeModal();
+      showToast('Work order deleted', 'success');
+      renderJournalPage();
+    } catch (e) { showToast(e.message || 'Delete failed', 'error'); }
+  });
 
   (async () => {
     const photosDiv = document.getElementById('det-photos');
