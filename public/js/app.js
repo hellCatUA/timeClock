@@ -1029,7 +1029,7 @@ function openPlannedJobMenu(pj, onStart) {
   });
 }
 
-/* ── + New Work Order: start now, revisit, or plan for later ─────── */
+/* ── + New Work Order: WHEN first (now / later), THEN what (new / revisit) ── */
 function openNewWoChoiceModal(onStartNow) {
   openModal(`
     <div class="modal-header">
@@ -1037,22 +1037,48 @@ function openNewWoChoiceModal(onStartNow) {
       <button class="btn btn-ghost btn-sm" id="nw-x">✕</button>
     </div>
     <div class="modal-body">
-      <button class="btn btn-primary btn-full" id="nw-start" style="margin-bottom:8px;">${svg('play')} Start Now</button>
-      <button class="btn btn-secondary btn-full" id="nw-revisit" style="margin-bottom:8px;">${svg('return')} Revisit of a WO</button>
-      <button class="btn btn-ghost btn-full" id="nw-plan">${svg('bell')} Plan for Later</button>
+      <p style="color:var(--text2);margin-bottom:12px;">When is this job happening?</p>
+      <button class="btn btn-primary btn-full" id="nw-now" style="margin-bottom:8px;">${svg('play')} Start Now</button>
+      <button class="btn btn-secondary btn-full" id="nw-later">${svg('bell')} Plan for Later</button>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="nw-cancel">Cancel</button>
     </div>`);
   document.getElementById('nw-x').addEventListener('click', closeModal);
   document.getElementById('nw-cancel').addEventListener('click', closeModal);
-  document.getElementById('nw-start').addEventListener('click', () => { closeModal(); if (onStartNow) onStartNow(); });
-  document.getElementById('nw-revisit').addEventListener('click', () => { closeModal(); openPickWoForRevisitModal(); });
-  document.getElementById('nw-plan').addEventListener('click', () => { closeModal(); openPlanJobModal(); });
+  document.getElementById('nw-now').addEventListener('click', () => { closeModal(); openNewWoTypeModal('now', onStartNow); });
+  document.getElementById('nw-later').addEventListener('click', () => { closeModal(); openNewWoTypeModal('plan', onStartNow); });
+}
+
+function openNewWoTypeModal(intent, onStartNow) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${intent === 'plan' ? `${svg('bell')} Plan for Later` : `${svg('play')} Start Now`}</h3>
+      <button class="btn btn-ghost btn-sm" id="nt-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text2);margin-bottom:12px;">Is this a brand-new job or a revisit to an existing work order?</p>
+      <button class="btn btn-primary btn-full" id="nt-new" style="margin-bottom:8px;">${svg('plus')} New Job</button>
+      <button class="btn btn-secondary btn-full" id="nt-revisit">${svg('return')} Revisit of a WO</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="nt-back">← Back</button>
+    </div>`);
+  document.getElementById('nt-x').addEventListener('click', closeModal);
+  document.getElementById('nt-back').addEventListener('click', () => { closeModal(); openNewWoChoiceModal(onStartNow); });
+  document.getElementById('nt-new').addEventListener('click', () => {
+    closeModal();
+    if (intent === 'plan') openPlanJobModal();
+    else if (onStartNow) onStartNow();
+  });
+  document.getElementById('nt-revisit').addEventListener('click', () => {
+    closeModal();
+    openPickWoForRevisitModal(intent);
+  });
 }
 
 /* ── Pick a completed WO to plan a revisit from ──────────────────── */
-async function openPickWoForRevisitModal() {
+async function openPickWoForRevisitModal(intent = 'now') {
   let entries = [];
   try {
     entries = (await api.getEntries()).filter(e => e.clock_out);
@@ -1113,7 +1139,7 @@ async function openPickWoForRevisitModal() {
         const en = entries.find(e => e.id === Number(card.dataset.id));
         if (!en) return;
         closeModal();
-        openRevisitModal(en);
+        openRevisitModal(en, intent);
       });
     });
   };
@@ -1402,7 +1428,7 @@ function openProjectsModal() {
 }
 
 /* ── Revisit modal ───────────────────────────────────────────────── */
-function openRevisitModal(entry) {
+function openRevisitModal(entry, intent = 'now') {
   // Address / Company / Customer / Project / Site ID / WO Title (REV | ...)
   // are carried automatically; extra fields are behind "Import more".
   const EXTRA = [
@@ -1448,7 +1474,7 @@ function openRevisitModal(entry) {
         </label>` : ''}
         <input type="text" class="form-control ${hasAssign ? 'hidden' : ''}" id="rv-assign-input" placeholder="e.g. 171624976">
       </div>
-      <div class="form-group hidden" id="rv-date-group">
+      <div class="form-group ${intent === 'plan' ? '' : 'hidden'}" id="rv-date-group">
         <div class="row-2">
           <div>
             <label class="form-label">Planned date</label>
@@ -1463,8 +1489,8 @@ function openRevisitModal(entry) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="rv-cancel">Cancel</button>
-      <button class="btn btn-secondary" id="rv-plan">${svg('plus')} Plan for Later</button>
-      <button class="btn btn-primary" id="rv-go">${svg('clock')} Clock In Now</button>
+      <button class="btn ${intent === 'plan' ? 'btn-primary' : 'btn-secondary'}" id="rv-plan">${svg('plus')} Plan for Later</button>
+      <button class="btn ${intent === 'plan' ? 'btn-secondary' : 'btn-primary'}" id="rv-go">${svg('clock')} Clock In Now</button>
     </div>`);
 
   document.getElementById('rv-x').addEventListener('click', closeModal);
@@ -2185,9 +2211,8 @@ function renderActiveClockPage() {
 
   // Custom pictures toggle — first activation with no fields asks for a name
   document.getElementById('jd-custom-pics-toggle')?.addEventListener('change', e => {
-    state.customPicsOpen = e.target.checked;
     document.getElementById('custom-pics-wrap')?.classList.toggle('hidden', !e.target.checked);
-    if (e.target.checked && getCustomPhotoFields().length === 0) {
+    if (e.target.checked && getEntryCustomFields(state.currentEntry || entry).length === 0) {
       document.getElementById('add-custom-photo-field')?.click();
     }
   });
@@ -2206,14 +2231,22 @@ function renderActiveClockPage() {
   // Custom picture fields
   document.getElementById('add-custom-photo-field')?.addEventListener('click', async () => {
     const name = (prompt('Picture field name:') || '').trim();
-    if (!name) return;
-    const fields = getCustomPhotoFields();
+    if (!name) {
+      // Toggle was flipped on but no name given — flip it back off
+      const t = document.getElementById('jd-custom-pics-toggle');
+      if (t && getEntryCustomFields(state.currentEntry || entry).length === 0) {
+        t.checked = false;
+        document.getElementById('custom-pics-wrap')?.classList.add('hidden');
+      }
+      return;
+    }
+    const cur = state.currentEntry || entry;
+    const fields = getEntryCustomFields(cur);
     if (fields.some(f => f.toLowerCase() === name.toLowerCase())) { showToast('Field already exists', 'error'); return; }
     fields.push(name);
     try {
-      await api.saveSettings({ custom_photo_fields: JSON.stringify(fields) });
-      state.settings.custom_photo_fields = JSON.stringify(fields);
       await autoSaveActiveForm();
+      await saveSection(cur, { custom_photo_fields: JSON.stringify(fields) });
       renderActiveClockPage();
     } catch (err) { showToast(err.message || 'Failed to add field', 'error'); }
   });
@@ -2256,16 +2289,23 @@ function renderActiveClockPage() {
         buildPhotoSection('equipment_left', 'Equipment Left', grouped.equipment_left);
       document.getElementById('photos-new-serial').innerHTML =
         buildPhotoSection('new_serial', 'New Serial Numbers', grouped.new_serial);
-      // User-defined custom picture fields (stored in settings)
-      const customFields = getCustomPhotoFields();
+      // Custom picture fields belong to THIS entry only; legacy photos whose
+      // slug isn't in the entry's list still render (derived from the slug)
+      const customFields = getEntryCustomFields(state.currentEntry || entry);
+      const knownSlugs = new Set(customFields.map(cfSlug));
+      const legacySlugs = Object.keys(grouped).filter(k => k.startsWith('cf_') && grouped[k].length && !knownSlugs.has(k));
       const customBox = document.getElementById('custom-photo-sections');
       if (customBox) {
-        customBox.innerHTML = customFields.map(name => `
-          <div class="subsection-label" style="margin-top:8px;">${escHtml(name)}</div>
-          <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
-        ).join('');
-        const hasCfPhotos = Object.keys(grouped).some(k => k.startsWith('cf_') && grouped[k].length);
-        if (hasCfPhotos || state.customPicsOpen) {
+        customBox.innerHTML =
+          customFields.map(name => `
+            <div class="subsection-label" style="margin-top:8px;">${escHtml(name)}</div>
+            <div class="photo-sections-group">${buildPhotoSection(cfSlug(name), name, grouped[cfSlug(name)] || [])}</div>`
+          ).join('')
+          + legacySlugs.map(slug => `
+            <div class="subsection-label" style="margin-top:8px;">${escHtml(cfLabel(slug))}</div>
+            <div class="photo-sections-group">${buildPhotoSection(slug, cfLabel(slug), grouped[slug])}</div>`
+          ).join('');
+        if (customFields.length || legacySlugs.length) {
           const t = document.getElementById('jd-custom-pics-toggle');
           if (t) t.checked = true;
           document.getElementById('custom-pics-wrap')?.classList.remove('hidden');
@@ -2404,9 +2444,11 @@ function setupMaterialsUI(existing, photoEntryId = null) {
   });
 }
 
-function getCustomPhotoFields() {
+// Custom picture fields are PER ENTRY (stored on the work order itself) —
+// they must not leak from one job to the next
+function getEntryCustomFields(entry) {
   try {
-    const arr = JSON.parse(state.settings.custom_photo_fields || '[]');
+    const arr = JSON.parse((entry && entry.custom_photo_fields) || '[]');
     return Array.isArray(arr) ? arr.filter(n => typeof n === 'string' && n.trim()) : [];
   } catch { return []; }
 }
@@ -2416,8 +2458,7 @@ function cfSlug(name) {
   return 'cf_' + String(name).trim().replace(/[^\w-]+/g, '_');
 }
 function cfLabel(type) {
-  const match = getCustomPhotoFields().find(f => cfSlug(f) === type);
-  return match || type.slice(3).replace(/_/g, ' ');
+  return type.slice(3).replace(/_/g, ' ');
 }
 
 /* ── Searchable combo (Company / Customer pickers) ───────────────── */
@@ -4010,12 +4051,12 @@ function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
         </div>
       </div>
       <div class="entry-card-bottom">
+        ${needsRev ? `<button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
         <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
         ${entry.rate_type === 'none' && !total
           ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
           : `<div class="entry-pay">${fmtMoney(total)}</div>`}
-        ${needsRev ? `<button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
       </div>
     </div>`;
 }

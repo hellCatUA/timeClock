@@ -1,6 +1,10 @@
 /* ===== Reset & Variables ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* iOS Safari inflates fonts after an orientation change without this,
+   which is what made the whole layout drift on rotate */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
 :root {
   --bg:         #0f0f0f;
   --bg2:        #1a1a1a;
@@ -522,8 +526,8 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 .rev-badge svg { width: 12px; height: 12px; }
 .rev-badge.rev-needed { background: var(--orange); color: #1a1a1a; }
-/* corner variant lives on the bottom row of journal cards — a notch smaller */
-.rev-badge.rev-corner { margin-left: auto; font-size: 10px; padding: 4px 8px; min-height: 24px; }
+/* corner variant sits bottom-left on journal cards — a notch smaller */
+.rev-badge.rev-corner { font-size: 10px; padding: 4px 8px; min-height: 24px; }
 .rev-badge.rev-corner svg { width: 11px; height: 11px; }
 
 /* search-match highlight — shows exactly what the query hit */

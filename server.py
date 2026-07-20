@@ -106,6 +106,7 @@ def init_db():
             received_date TEXT,
             project_id INTEGER,
             revisit_of INTEGER,
+            custom_photo_fields TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -299,6 +300,7 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN received_date TEXT",
         "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
         "ALTER TABLE time_entries ADD COLUMN revisit_of INTEGER",
+        "ALTER TABLE time_entries ADD COLUMN custom_photo_fields TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
@@ -666,7 +668,7 @@ def h_put_entry(req, groups):
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?,
                 pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?,
-                revisit_of=?
+                revisit_of=?, custom_photo_fields=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -708,6 +710,7 @@ def h_put_entry(req, groups):
             data.get("received_date", ex.get("received_date")),
             data.get("project_id", ex.get("project_id")),
             data.get("revisit_of", ex.get("revisit_of")),
+            data.get("custom_photo_fields", ex.get("custom_photo_fields")),
             eid
         ))
         new_folder = _photo_folder({
