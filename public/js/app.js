@@ -2127,18 +2127,15 @@ function renderActiveClockPage() {
     </div>
 
     ${preDraft ? `
-    <div class="card" style="background:var(--green-bg);border:1px solid var(--green);margin:0 16px 6px;padding:12px 14px;">
-      <div style="font-size:13.5px;font-weight:800;color:var(--green);display:flex;align-items:center;gap:7px;">
-        ${svg('check')} Clock-out ready
-      </div>
-      <div style="font-size:13px;color:var(--text2);margin-top:5px;line-height:1.5;">
-        Filled at ${fmtTime(preDraft.filled_at)}. The time is stamped when you actually finish.
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
-        <span class="chip-ok">${escHtml((preDraft.status || 'completed').toUpperCase())}</span>
+    <div class="card predraft-card">
+      <div class="predraft-head">${svg('check')} Clock-out ready</div>
+      <div class="predraft-sub">Filled at ${fmtTime(preDraft.filled_at)} — the time is stamped when you actually finish.</div>
+      <div class="predraft-chips">
+        <span class="chip-ok">Status: ${escHtml((preDraft.status || 'completed').toUpperCase())}</span>
         ${preDraft.noCode ? '<span class="chip-ok">No release code</span>' : preDraft.releaseCode ? `<span class="chip-ok">Release ${escHtml(preDraft.releaseCode)}</span>` : ''}
         ${preDraft.signed ? `<span class="chip-ok">Signed · ${escHtml(preDraft.signed)}</span>` : ''}
         ${preDraft.workSummary ? '<span class="chip-ok">Summary ✓</span>' : ''}
+        ${preDraft.revisit ? '<span class="chip-warn">Revisit required</span>' : ''}
       </div>
     </div>` : ''}
 

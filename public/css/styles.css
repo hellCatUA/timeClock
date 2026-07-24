@@ -471,6 +471,30 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .day-group { border-left: 2px solid var(--border); margin: 8px 0 8px 4px; padding-left: 8px; }
 .day-group-header { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 4px; }
 
+/* Safety net: icons are sized per-component, but a bare svg with no matching
+   rule used to stretch to fill its flex parent (the giant checkmark bug) */
+svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+/* ===== Pre-Clock Out draft banner ===== */
+.predraft-card {
+  background: var(--green-bg);
+  border: 1px solid var(--green);
+  margin: 0 16px 8px;
+  padding: 12px 14px;
+}
+.predraft-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 14px; font-weight: 800; color: var(--green);
+}
+.predraft-head svg { width: 17px; height: 17px; }
+.predraft-sub { font-size: 13px; color: var(--text2); margin-top: 5px; line-height: 1.5; }
+.predraft-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+.chip-warn {
+  font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  padding: 4px 9px; border-radius: 999px;
+  background: var(--orange-bg); color: var(--orange); border: 1px solid var(--orange);
+}
+
 /* ===== Project page ===== */
 .proj-head {
   display: flex; align-items: center; gap: 8px;
