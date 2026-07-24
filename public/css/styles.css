@@ -475,6 +475,14 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
    rule used to stretch to fill its flex parent (the giant checkmark bug) */
 svg { width: 16px; height: 16px; flex-shrink: 0; }
 
+/* ===== Small ⋯ actions button (top-left under Clock Out) ===== */
+.more-actions-row { display: flex; justify-content: flex-start; padding: 0 16px 8px; }
+.more-actions-btn {
+  min-width: 54px; min-height: 32px;
+  padding: 2px 12px;
+  font-size: 17px; font-weight: 700; letter-spacing: 2px; line-height: 1;
+}
+
 /* ===== Pre-Clock Out draft banner ===== */
 .predraft-card {
   background: var(--green-bg);
