@@ -476,7 +476,7 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 svg { width: 16px; height: 16px; flex-shrink: 0; }
 
 /* ===== Small ⋯ actions button (top-left under Clock Out) ===== */
-.more-actions-row { display: flex; justify-content: flex-start; padding: 0 16px 8px; }
+.more-actions-row { display: flex; justify-content: flex-end; padding: 0 16px 8px; }
 .more-actions-btn {
   min-width: 54px; min-height: 32px;
   padding: 2px 12px;
