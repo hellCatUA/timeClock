@@ -89,7 +89,7 @@ function escHtml(str) {
 const RICH_TAGS = {
   a: ['href'], b: [], strong: [], i: [], em: [], u: [], s: [], del: [], ins: [], mark: [],
   p: [], br: [], hr: [], ul: [], ol: ['start'], li: [], code: [], pre: [], blockquote: [],
-  h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], span: [], div: [], small: [], sup: [], sub: [],
+  h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], span: ['data-cb', 'class'], div: [], small: [], sup: [], sub: [],
   table: [], thead: [], tbody: [], tr: [], th: [], td: [],
 };
 const RICH_DROP = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'form', 'input', 'button']);
@@ -108,6 +108,8 @@ function sanitizeRich(html) {
       [...el.attributes].forEach(attr => {
         if (!RICH_TAGS[tag].includes(attr.name.toLowerCase())) el.removeAttribute(attr.name);
       });
+      // only our own checkbox class survives, never arbitrary styling hooks
+      if (el.hasAttribute('class') && el.getAttribute('class') !== 'md-box') el.removeAttribute('class');
       if (tag === 'a') {
         const href = (el.getAttribute('href') || '').trim();
         if (!/^(https?:|mailto:|tel:|#)/i.test(href)) el.removeAttribute('href');
@@ -138,6 +140,7 @@ function mdToHtml(src) {
   const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
   const out = [];
   let para = [];
+  let cbIndex = -1;   // document-order index, matched by toggleMdCheckbox
   const flushPara = () => {
     if (para.length) { out.push(`<p>${para.map(mdInline).join('<br>')}</p>`); para = []; }
   };
@@ -178,9 +181,13 @@ function mdToHtml(src) {
         if (/^\d+[.)]\s+/.test(lt) !== ordered) break;
         let item = lt.replace(/^([-*+]|\d+[.)])\s+/, '');
         const box = item.match(/^\[([ xX])\]\s*(.*)$/);
-        item = box
-          ? `<span class="md-box">${box[1].toLowerCase() === 'x' ? '☑' : '☐'}</span> ${mdInline(box[2])}`
-          : mdInline(item);
+        if (box) {
+          cbIndex++;
+          const done = box[1].toLowerCase() === 'x';
+          item = `<span class="md-box" data-cb="${cbIndex}">${done ? '☑' : '☐'}</span> ${mdInline(box[2])}`;
+        } else {
+          item = mdInline(item);
+        }
         items.push(`<li>${item}</li>`);
         i++;
       }
@@ -199,6 +206,53 @@ function renderRichText(src) {
   const s = String(src ?? '').trim();
   if (!s) return '';
   return sanitizeRich(mdToHtml(s));
+}
+
+// Flips the n-th "- [ ]" / "- [x]" in the raw source; the numbering matches
+// the data-cb index mdToHtml assigns, since both walk the text in order.
+function toggleMdCheckbox(src, index) {
+  let n = -1;
+  return String(src ?? '').replace(
+    /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+\[)([ xX])(\])/gm,
+    (m, pre, mark, post) => {
+      n++;
+      if (n !== index) return m;
+      return pre + (mark.toLowerCase() === 'x' ? ' ' : 'x') + post;
+    }
+  );
+}
+
+// Makes the checkboxes inside a rendered scope tappable: flips the box,
+// saves the new source, and re-renders just that container
+function wireScopeCheckboxes(containerId, entry, onSaved) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  box.classList.add('scope-interactive');
+  box.addEventListener('click', async e => {
+    const cb = e.target.closest('.md-box[data-cb]');
+    if (!cb) return;
+    e.preventDefault();
+    const idx = Number(cb.dataset.cb);
+    const current = (state.currentEntry && state.currentEntry.id === entry.id)
+      ? state.currentEntry.scope_of_work
+      : entry.scope_of_work;
+    const updated = toggleMdCheckbox(current, idx);
+    if (updated === current) return;
+    cb.textContent = cb.textContent === '☑' ? '☐' : '☑';   // instant feedback
+    // keep the (hidden) raw editor in sync, otherwise autoSaveActiveForm would
+    // write its stale text back over the ticks on the next navigation
+    const rawEditor = document.getElementById('jd-scope');
+    if (rawEditor) rawEditor.value = updated;
+    try {
+      const saved = await api.updateEntry(entry.id, { scope_of_work: updated });
+      if (state.currentEntry && state.currentEntry.id === entry.id) state.currentEntry = saved;
+      entry.scope_of_work = updated;
+      onSaved?.(saved);
+    } catch (err) {
+      cb.textContent = cb.textContent === '☑' ? '☐' : '☑';  // put it back
+      showToast(err.message || 'Could not save', 'error');
+    }
+  });
 }
 
 function parseMaterials(raw) {
@@ -2574,6 +2628,10 @@ function renderActiveClockPage() {
     state.editSections = {};
     renderActiveClockPage();
   };
+
+  // Scope checkboxes are tappable while the job is active — ticking one
+  // rewrites "- [ ]" to "- [x]" in the stored source
+  wireScopeCheckboxes('sc-view', entry);
 
   wireDispatchEditor('jd-dispatch');
   document.getElementById('save-dispatch-btn')?.addEventListener('click', async () => {
