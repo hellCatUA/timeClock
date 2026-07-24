@@ -119,6 +119,20 @@ function getWeekBounds(date, weekStartDay) {
   const end = new Date(start); end.setDate(start.getDate() + 6); end.setHours(23,59,59,999);
   return { start, end };
 }
+// A week belongs to the month it STARTS in. This returns the exact span the
+// month's weeks cover, so the journal view and the CSV export agree: a week
+// that began last month is excluded, and a week that began this month is
+// included whole even where it spills into the next one.
+function monthWeekRange(monthStart, monthEnd, weekStartDay) {
+  let first = getWeekBounds(monthStart, weekStartDay).start;
+  if (first < monthStart) {
+    // that week started in the previous month → it belongs there
+    first = new Date(first.getTime() + 7 * 86400000);
+    first.setHours(0, 0, 0, 0);
+  }
+  const last = getWeekBounds(monthEnd, weekStartDay).end;
+  return { from: first, to: last };
+}
 function getISOWeekLabel(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
   const dow = d.getUTCDay() || 7;
@@ -4109,12 +4123,14 @@ async function renderJournalPage() {
       const mTotalExpected = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + calcTotalExpected(e), 0);
       const mTotalHrs = monthEntries.filter(e=>e.clock_out).reduce((s,e) => s + getNetSeconds(e)/3600, 0);
       const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
+      // Export the same span the view shows: whole weeks that START this month
+      const exportRange = monthWeekRange(monthStart, monthEnd, ws);
 
       journalBody.innerHTML = `
         <div class="journal-month-totals" style="border-top:1px solid var(--border);">
           <span>${mTotalHrs.toFixed(2)} hrs</span>
           <span>${sym}${mTotalExpected.toFixed(2)} expected</span>
-          <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(monthStart.toISOString(), monthEnd.toISOString())}">${svg('download')} Export CSV</a>
+          <a class="btn btn-ghost btn-sm" href="${api.getExportUrl(exportRange.from.toISOString(), exportRange.to.toISOString())}">${svg('download')} Export CSV</a>
         </div>
         <div style="padding:10px 16px 0;">
           <input type="text" class="form-control" id="journal-search" placeholder="Search: title, assignment, site, company, date..." autocomplete="off" value="${escHtml(state.journalQuery || '')}">
