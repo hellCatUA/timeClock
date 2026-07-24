@@ -2122,8 +2122,8 @@ function renderActiveClockPage() {
           : ''}
       <button class="btn btn-danger btn-lg" id="clockout-btn">${svg('stop')} Clock Out</button>
     </div>
-    <div class="clock-actions" style="padding-top:0;">
-      <button class="btn btn-secondary btn-lg" id="more-actions-btn" title="More actions">⋯</button>
+    <div class="more-actions-row">
+      <button class="btn btn-secondary more-actions-btn" id="more-actions-btn" title="More actions">⋯</button>
     </div>
 
     ${preDraft ? `
@@ -2154,7 +2154,6 @@ function renderActiveClockPage() {
         ${roRow('Assignment ID', entry.assignment_id, { required: true })}
         ${roRow('Ticket #', entry.ticket_num)}
         ${roRow('INC #', entry.inc_num)}
-        <button class="btn btn-ghost btn-sm btn-full" id="ad-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
       </div>
       <div id="ad-form" class="${assignEdit ? '' : 'hidden'}">
       <div class="form-group">
@@ -2206,7 +2205,6 @@ function renderActiveClockPage() {
     <div id="sec-dispatch" class="card sec-body">
       <div id="dp-view" class="${dispatchEdit ? 'hidden' : ''}">
         ${buildDispatchView(dispatch)}
-        <button class="btn btn-ghost btn-sm btn-full" id="dp-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
       </div>
       <div id="dp-form" class="${dispatchEdit ? '' : 'hidden'}">
         ${buildDispatchEditor('jd-dispatch', dispatch)}
@@ -2223,7 +2221,6 @@ function renderActiveClockPage() {
         ${entry.scope_of_work
           ? `<div class="scope-prose">${escHtml(entry.scope_of_work)}</div>`
           : '<div class="empty-state-sm">No scope of work yet</div>'}
-        <button class="btn btn-ghost btn-sm btn-full" id="sc-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
       </div>
       <div id="sc-form" class="${scopeEdit ? '' : 'hidden'}">
         <textarea class="form-control" id="jd-scope" rows="5" placeholder="What has to be done on site...">${escHtml(entry.scope_of_work || '')}</textarea>
@@ -2436,25 +2433,23 @@ function renderActiveClockPage() {
 
   document.getElementById('more-actions-btn').addEventListener('click', () => openActiveJobMenu(entry, preDraft));
 
-  // Read-only ↔ edit switches (also reachable from the ⋯ menu)
-  const showEdit = (viewId, formId) => {
-    document.getElementById(viewId)?.classList.add('hidden');
-    const form = document.getElementById(formId);
-    form?.classList.remove('hidden');
-    form?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Back to read-only: flip the classes right away so the switch is instant
+  // even if the re-render below is delayed, then redraw with fresh values
+  const finishEdit = (viewId, formId) => {
+    document.getElementById(formId)?.classList.add('hidden');
+    document.getElementById(viewId)?.classList.remove('hidden');
+    state.editSections = {};
+    renderActiveClockPage();
   };
-  document.getElementById('ad-edit-btn')?.addEventListener('click', () => showEdit('ad-view', 'ad-form'));
-  document.getElementById('dp-edit-btn')?.addEventListener('click', () => showEdit('dp-view', 'dp-form'));
-  document.getElementById('sc-edit-btn')?.addEventListener('click', () => showEdit('sc-view', 'sc-form'));
 
   wireDispatchEditor('jd-dispatch');
   document.getElementById('save-dispatch-btn')?.addEventListener('click', async () => {
     await saveSection(entry, { dispatch_contacts: readDispatchEditor('jd-dispatch') });
-    renderActiveClockPage();
+    finishEdit('dp-view', 'dp-form');
   });
   document.getElementById('save-scope-btn')?.addEventListener('click', async () => {
     await saveSection(entry, { scope_of_work: document.getElementById('jd-scope').value.trim() || null });
-    renderActiveClockPage();
+    finishEdit('sc-view', 'sc-form');
   });
 
   // Collapsible sections — chevron rotation is pure CSS via the .open class
@@ -2487,7 +2482,7 @@ function renderActiveClockPage() {
         showToast('Trip linked to WO', 'success');
       } catch { /* non-critical */ }
     }
-    renderActiveClockPage();   // back to the read-only card with fresh values
+    finishEdit('ad-view', 'ad-form');   // back to the read-only card
   });
 
   // POCs save
