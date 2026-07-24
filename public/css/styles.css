@@ -544,6 +544,46 @@ svg { width: 16px; height: 16px; flex-shrink: 0; }
 }
 .scope-prose { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* Rendered Markdown / HTML (Scope of Work) */
+.scope-rich { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.scope-rich > *:first-child { margin-top: 0; }
+.scope-rich > *:last-child  { margin-bottom: 0; }
+.scope-rich p { margin: 8px 0; }
+.scope-rich h1, .scope-rich h2, .scope-rich h3,
+.scope-rich h4, .scope-rich h5, .scope-rich h6 {
+  margin: 14px 0 6px; font-weight: 700; line-height: 1.3;
+}
+.scope-rich h1 { font-size: 18px; }
+.scope-rich h2 { font-size: 16px; }
+.scope-rich h3 { font-size: 15px; }
+.scope-rich h4, .scope-rich h5, .scope-rich h6 { font-size: 14px; color: var(--text2); }
+.scope-rich ul, .scope-rich ol { margin: 8px 0; padding-left: 22px; }
+.scope-rich li { margin: 3px 0; }
+.scope-rich ul { list-style: disc; }
+.scope-rich ol { list-style: decimal; }
+.scope-rich .md-box { color: var(--green); font-size: 15px; margin-right: 2px; }
+.scope-rich a { color: var(--blue); text-decoration: underline; text-underline-offset: 2px; }
+.scope-rich code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; background: var(--bg3);
+  border-radius: 4px; padding: 1px 5px;
+}
+.scope-rich pre {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+  margin: 8px 0; overflow-x: auto;
+}
+.scope-rich pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.5; }
+.scope-rich blockquote {
+  margin: 8px 0; padding: 4px 0 4px 12px;
+  border-left: 3px solid var(--border); color: var(--text2);
+}
+.scope-rich hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.scope-rich table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; display: block; overflow-x: auto; }
+.scope-rich th, .scope-rich td { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }
+.scope-rich th { background: var(--bg3); font-weight: 600; }
+.scope-rich mark { background: var(--orange); color: #1a1a1a; border-radius: 3px; padding: 0 3px; }
+
 .contact { padding: 10px 0; border-bottom: 1px solid var(--bg3); }
 .contact:last-child { border-bottom: none; }
 .contact-top { display: flex; align-items: center; gap: 8px; }

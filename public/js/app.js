@@ -84,6 +84,123 @@ function escHtml(str) {
   return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+/* ── Rich text (Markdown + inline HTML) ──────────────────────────── */
+// Tags kept when rendering; everything else is unwrapped to plain text.
+const RICH_TAGS = {
+  a: ['href'], b: [], strong: [], i: [], em: [], u: [], s: [], del: [], ins: [], mark: [],
+  p: [], br: [], hr: [], ul: [], ol: ['start'], li: [], code: [], pre: [], blockquote: [],
+  h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], span: [], div: [], small: [], sup: [], sub: [],
+  table: [], thead: [], tbody: [], tr: [], th: [], td: [],
+};
+const RICH_DROP = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'form', 'input', 'button']);
+
+function sanitizeRich(html) {
+  const doc = new DOMParser().parseFromString(`<div id="rt-root">${html}</div>`, 'text/html');
+  const root = doc.getElementById('rt-root');
+  const walk = node => {
+    [...node.children].forEach(el => {
+      const tag = el.tagName.toLowerCase();
+      if (RICH_DROP.has(tag)) { el.remove(); return; }
+      if (!Object.prototype.hasOwnProperty.call(RICH_TAGS, tag)) {
+        el.replaceWith(doc.createTextNode(el.textContent));   // keep text, drop tag
+        return;
+      }
+      [...el.attributes].forEach(attr => {
+        if (!RICH_TAGS[tag].includes(attr.name.toLowerCase())) el.removeAttribute(attr.name);
+      });
+      if (tag === 'a') {
+        const href = (el.getAttribute('href') || '').trim();
+        if (!/^(https?:|mailto:|tel:|#)/i.test(href)) el.removeAttribute('href');
+        el.setAttribute('target', '_blank');
+        el.setAttribute('rel', 'noopener noreferrer');
+      }
+      walk(el);
+    });
+  };
+  walk(root);
+  return root.innerHTML;
+}
+
+function mdInline(s) {
+  return s
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c.replace(/</g, '&lt;')}</code>`)
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/(^|[^_\w])_([^_\n]+)_/g, '$1<em>$2</em>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>');
+}
+
+// Markdown → HTML. Raw HTML in the source is passed through untouched and
+// then filtered by sanitizeRich, so both syntaxes work in the same field.
+function mdToHtml(src) {
+  const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let para = [];
+  const flushPara = () => {
+    if (para.length) { out.push(`<p>${para.map(mdInline).join('<br>')}</p>`); para = []; }
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+
+    if (/^```/.test(t)) {                                  // fenced code
+      flushPara();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) buf.push(lines[i++]);
+      out.push(`<pre><code>${buf.join('\n').replace(/</g, '&lt;')}</code></pre>`);
+      continue;
+    }
+    if (!t) { flushPara(); continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { flushPara(); out.push('<hr>'); continue; }
+
+    const h = t.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flushPara(); out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`); continue; }
+
+    if (/^>\s?/.test(t)) {                                 // blockquote
+      flushPara();
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      i--;
+      out.push(`<blockquote>${buf.map(mdInline).join('<br>')}</blockquote>`);
+      continue;
+    }
+
+    if (/^([-*+]|\d+[.)])\s+/.test(t)) {                    // lists (incl. checkboxes)
+      flushPara();
+      const ordered = /^\d+[.)]\s+/.test(t);
+      const items = [];
+      while (i < lines.length) {
+        const lt = lines[i].trim();
+        if (!/^([-*+]|\d+[.)])\s+/.test(lt)) break;
+        if (/^\d+[.)]\s+/.test(lt) !== ordered) break;
+        let item = lt.replace(/^([-*+]|\d+[.)])\s+/, '');
+        const box = item.match(/^\[([ xX])\]\s*(.*)$/);
+        item = box
+          ? `<span class="md-box">${box[1].toLowerCase() === 'x' ? '☑' : '☐'}</span> ${mdInline(box[2])}`
+          : mdInline(item);
+        items.push(`<li>${item}</li>`);
+        i++;
+      }
+      i--;
+      out.push(`<${ordered ? 'ol' : 'ul'}>${items.join('')}</${ordered ? 'ol' : 'ul'}>`);
+      continue;
+    }
+
+    para.push(line);
+  }
+  flushPara();
+  return out.join('\n');
+}
+
+function renderRichText(src) {
+  const s = String(src ?? '').trim();
+  if (!s) return '';
+  return sanitizeRich(mdToHtml(s));
+}
+
 function parseMaterials(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw;
@@ -1027,7 +1144,7 @@ function openPlannedJobDetail(pj, onStart) {
         const dc = parseDispatch(pj.dispatch_contacts);
         return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
       })()}
-      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-prose">${escHtml(pj.scope_of_work)}</div>` : ''}
+      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-rich">${renderRichText(pj.scope_of_work)}</div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pjd-close">Close</button>
@@ -1257,7 +1374,8 @@ function buildJobFieldsHtml(prefix, sym) {
     </div>
     <div class="form-group">
       <label class="form-label">Scope of Work <span class="opt-label">optional</span></label>
-      <textarea class="form-control" id="${prefix}-scope" rows="3" placeholder="What has to be done on site..."></textarea>
+      <textarea class="form-control" id="${prefix}-scope" rows="4" placeholder="What has to be done on site..."></textarea>
+      <div class="field-hint">Markdown and HTML supported</div>
     </div>
     <div class="form-group">
       <label class="form-label">Dispatch <span class="opt-label">optional</span></label>
@@ -2233,11 +2351,12 @@ function renderActiveClockPage() {
     <div id="sec-scope" class="card sec-body">
       <div id="sc-view" class="${scopeEdit ? 'hidden' : ''}">
         ${entry.scope_of_work
-          ? `<div class="scope-prose">${escHtml(entry.scope_of_work)}</div>`
+          ? `<div class="scope-rich">${renderRichText(entry.scope_of_work)}</div>`
           : '<div class="empty-state-sm">No scope of work yet</div>'}
       </div>
       <div id="sc-form" class="${scopeEdit ? '' : 'hidden'}">
-        <textarea class="form-control" id="jd-scope" rows="5" placeholder="What has to be done on site...">${escHtml(entry.scope_of_work || '')}</textarea>
+        <textarea class="form-control" id="jd-scope" rows="6" placeholder="What has to be done on site...">${escHtml(entry.scope_of_work || '')}</textarea>
+        <div class="field-hint">Markdown and HTML supported — **bold**, # heading, - list, - [ ] checkbox, [link](url)</div>
         <button class="btn btn-ghost btn-sm btn-full" id="save-scope-btn" style="margin-top:8px;">${svg('check')} Save</button>
       </div>
     </div>
@@ -4667,7 +4786,7 @@ async function openEntryDetail(entry) {
         const dc = parseDispatch(entry.dispatch_contacts);
         return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
       })()}
-      ${entry.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-prose">${escHtml(entry.scope_of_work)}</div>` : ''}
+      ${entry.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-rich">${renderRichText(entry.scope_of_work)}</div>` : ''}
       <div id="det-photos"></div>
     </div>
     <div class="modal-footer">
