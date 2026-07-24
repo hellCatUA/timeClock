@@ -107,6 +107,9 @@ def init_db():
             project_id INTEGER,
             revisit_of INTEGER,
             custom_photo_fields TEXT,
+            scope_of_work TEXT,
+            dispatch_contacts TEXT,
+            pre_clockout TEXT,
             comment TEXT,
             total_break_seconds INTEGER NOT NULL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
@@ -214,6 +217,8 @@ def init_db():
             planned_date TEXT,
             planned_time TEXT,
             revisit_of INTEGER,
+            scope_of_work TEXT,
+            dispatch_contacts TEXT,
             ticket_num TEXT,
             inc_num TEXT,
             mod_name TEXT,
@@ -301,6 +306,11 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN project_id INTEGER",
         "ALTER TABLE time_entries ADD COLUMN revisit_of INTEGER",
         "ALTER TABLE time_entries ADD COLUMN custom_photo_fields TEXT",
+        "ALTER TABLE time_entries ADD COLUMN scope_of_work TEXT",
+        "ALTER TABLE time_entries ADD COLUMN dispatch_contacts TEXT",
+        "ALTER TABLE time_entries ADD COLUMN pre_clockout TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN scope_of_work TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN revisit_of INTEGER",
@@ -622,8 +632,9 @@ def h_post_entry(req, _groups):
              assignment_id, ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
-             status, release_code, no_release_code, materials, project_id, revisit_of)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             status, release_code, no_release_code, materials, project_id, revisit_of,
+             scope_of_work, dispatch_contacts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -637,7 +648,8 @@ def h_post_entry(req, _groups):
              data.get("wo_title"), data.get("travel_reimb"),
              data.get("status", "pending"), data.get("release_code"),
              1 if data.get("no_release_code") else 0, materials_str,
-             data.get("project_id"), data.get("revisit_of"))
+             data.get("project_id"), data.get("revisit_of"),
+             data.get("scope_of_work"), data.get("dispatch_contacts"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -668,7 +680,8 @@ def h_put_entry(req, groups):
                 wo_title=?, travel_reimb=?, revisit_required=?, received_pay=?,
                 status=?, release_code=?, no_release_code=?, materials=?,
                 pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?,
-                revisit_of=?, custom_photo_fields=?
+                revisit_of=?, custom_photo_fields=?,
+                scope_of_work=?, dispatch_contacts=?, pre_clockout=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -711,6 +724,9 @@ def h_put_entry(req, groups):
             data.get("project_id", ex.get("project_id")),
             data.get("revisit_of", ex.get("revisit_of")),
             data.get("custom_photo_fields", ex.get("custom_photo_fields")),
+            data.get("scope_of_work", ex.get("scope_of_work")),
+            data.get("dispatch_contacts", ex.get("dispatch_contacts")),
+            data.get("pre_clockout", ex.get("pre_clockout")),
             eid
         ))
         new_folder = _photo_folder({
@@ -1709,15 +1725,17 @@ def h_create_planned_job(req, _groups):
             (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
              planned_date, planned_time, revisit_of,
-             ticket_num, inc_num, mod_name, noc_name, pm_pc_name)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
+             scope_of_work, dispatch_contacts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
              data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"),
              data.get("planned_date"), data.get("planned_time"), data.get("revisit_of"),
              data.get("ticket_num"), data.get("inc_num"), data.get("mod_name"),
-             data.get("noc_name"), data.get("pm_pc_name"))
+             data.get("noc_name"), data.get("pm_pc_name"),
+             data.get("scope_of_work"), data.get("dispatch_contacts"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     return 201, row
@@ -1727,6 +1745,7 @@ PLANNED_JOB_FIELDS = [
     "site_id", "address", "rate_type", "pay_rate_id", "flat_amount",
     "travel_reimb", "notes", "planned_date", "planned_time", "revisit_of",
     "ticket_num", "inc_num", "mod_name", "noc_name", "pm_pc_name",
+    "scope_of_work", "dispatch_contacts",
 ]
 
 def h_update_planned_job(req, groups):

@@ -173,6 +173,8 @@ const ICONS = {
   car:      '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="9" y1="11" x2="2.5" y2="7.5"/><line x1="15" y1="11" x2="21.5" y2="7.5"/>',
   pause:    '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
   file:     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+  phone:    '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  mail:     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -777,6 +779,8 @@ async function renderIdleClockPage() {
     if (d.travel_reimb != null && d.travel_reimb !== '') document.getElementById('travel-reimb-input').value = d.travel_reimb;
     if (d.site_id)           prefillExtras.site_id = d.site_id;
     if (d.assignment_id)     prefillExtras.assignment_id = d.assignment_id;
+    if (d.scope_of_work)     prefillExtras.scope_of_work = d.scope_of_work;
+    if (d.dispatch_contacts) prefillExtras.dispatch_contacts = d.dispatch_contacts;
   };
 
   document.getElementById('project-select').addEventListener('change', e => {
@@ -797,7 +801,7 @@ async function renderIdleClockPage() {
     if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
     if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
     if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
-    ['assignment_id','site_id','revisit_of','ticket_num','inc_num','mod_name','noc_name','pm_pc_name'].forEach(k => {
+    ['assignment_id','site_id','revisit_of','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','scope_of_work','dispatch_contacts'].forEach(k => {
       if (pj[k]) prefillExtras[k] = pj[k];
     });
     prefillExtras.plannedJobId = pj.id;
@@ -835,7 +839,7 @@ async function renderIdleClockPage() {
     if (rv.pay_rate_id)     document.getElementById('rate-select').value = String(rv.pay_rate_id);
     if (rv.flat_amount != null && rv.flat_amount !== '') document.getElementById('flat-amount-input').value = rv.flat_amount;
     if (rv.travel_reimb != null && rv.travel_reimb !== '') document.getElementById('travel-reimb-input').value = rv.travel_reimb;
-    ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','revisit_of'].forEach(k => {
+    ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','revisit_of','scope_of_work','dispatch_contacts'].forEach(k => {
       if (rv[k]) prefillExtras[k] = rv[k];
     });
     setTimeout(() => {
@@ -916,6 +920,8 @@ async function renderIdleClockPage() {
         pm_pc_name:      prefillExtras.pm_pc_name || null,
         project_id:      projectSel ? Number(projectSel) : null,
         revisit_of:      prefillExtras.revisit_of || null,
+        scope_of_work:   prefillExtras.scope_of_work || null,
+        dispatch_contacts: prefillExtras.dispatch_contacts || null,
         status:          'pending',
       });
       if (prefillExtras.plannedJobId) {
@@ -1004,6 +1010,11 @@ function openPlannedJobDetail(pj, onStart) {
       ${row('NOC', pj.noc_name ? escHtml(pj.noc_name) : '')}
       ${row('PM/PC', pj.pm_pc_name ? escHtml(pj.pm_pc_name) : '')}
       ${pj.notes ? `<div class="review-row" style="align-items:flex-start;"><span>Notes:</span><span style="white-space:pre-wrap;">${escHtml(pj.notes)}</span></div>` : ''}
+      ${(() => {
+        const dc = parseDispatch(pj.dispatch_contacts);
+        return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
+      })()}
+      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-prose">${escHtml(pj.scope_of_work)}</div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pjd-close">Close</button>
@@ -1226,12 +1237,32 @@ function buildJobFieldsHtml(prefix, sym) {
       <label class="form-label">Travel Reimbursement</label>
       <div class="money-wrap"><span class="money-sym">${sym}</span>
         <input type="number" class="form-control" id="${prefix}-travel" min="0" step="0.01"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Scope of Work <span class="opt-label">optional</span></label>
+      <textarea class="form-control" id="${prefix}-scope" rows="3" placeholder="What has to be done on site..."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Dispatch <span class="opt-label">optional</span></label>
+      ${buildDispatchEditor(`${prefix}-dispatch`, [])}
     </div>`;
 }
 
 function wireJobFieldCombos(prefix) {
   wireCombo(`${prefix}-org`, orgComboOpts());
   wireCombo(`${prefix}-client`, cliComboOpts());
+  wireDispatchEditor(`${prefix}-dispatch`);
+}
+// Fills the shared job-field block's scope + dispatch from a saved record
+function fillJobFieldExtras(prefix, src) {
+  if (!src) return;
+  const scope = document.getElementById(`${prefix}-scope`);
+  if (scope && src.scope_of_work) scope.value = src.scope_of_work;
+  const list = document.getElementById(`${prefix}-dispatch-list`);
+  const contacts = parseDispatch(src.dispatch_contacts);
+  if (list && contacts.length) {
+    list.innerHTML = contacts.map(c => dispatchRowHtml(c)).join('');
+  }
 }
 
 function wireJobFieldsPayType(prefix) {
@@ -1261,6 +1292,7 @@ function applyProjectDefaultsToJobFields(prefix, p) {
   if (d.pay_rate_id)     g('rate').value = String(d.pay_rate_id);
   if (d.flat_amount != null && d.flat_amount !== '') g('flat').value = d.flat_amount;
   if (d.travel_reimb != null && d.travel_reimb !== '') g('travel').value = d.travel_reimb;
+  fillJobFieldExtras(prefix, d);
 }
 
 function readJobFields(prefix, getRateType) {
@@ -1277,6 +1309,8 @@ function readJobFields(prefix, getRateType) {
     pay_rate_id:     (rt === 'hourly' && g('rate').value) ? Number(g('rate').value) : null,
     flat_amount:     rt === 'flat' ? (parseFloat(g('flat').value) || null) : null,
     travel_reimb:    parseFloat(g('travel').value) || null,
+    scope_of_work:   g('scope')?.value.trim() || null,
+    dispatch_contacts: readDispatchEditor(`${prefix}-dispatch`),
   };
 }
 
@@ -1337,6 +1371,7 @@ function openPlanJobModal(existing = null) {
     if (existing.pay_rate_id) g('rate').value = String(existing.pay_rate_id);
     if (existing.flat_amount != null) g('flat').value = existing.flat_amount;
     if (existing.travel_reimb != null) g('travel').value = existing.travel_reimb;
+    fillJobFieldExtras('pj', existing);
   }
 
   document.getElementById('pj-save').addEventListener('click', async () => {
@@ -1863,6 +1898,66 @@ function openTripClockInModal(trip) {
   });
 }
 
+/* ── Pre-Clock Out draft ─────────────────────────────────────────── */
+function parsePreClockout(entry) {
+  try {
+    const d = JSON.parse((entry && entry.pre_clockout) || 'null');
+    return d && typeof d === 'object' ? d : null;
+  } catch { return null; }
+}
+
+/* ── ⋯ menu on the active job ────────────────────────────────────── */
+function openActiveJobMenu(entry, preDraft) {
+  openModal(`
+    <div class="modal-header">
+      <h3>⋯ More</h3>
+      <button class="btn btn-ghost btn-sm" id="mm-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="btn btn-secondary btn-full" id="mm-trip" style="margin-bottom:8px;">${svg('car')} ${state.currentTrip ? 'Back to Trip' : 'Start Trip'}</button>
+      ${preDraft
+        ? `<button class="btn btn-primary btn-full" id="mm-pre" style="margin-bottom:8px;">${svg('edit')} Edit Pre-Filled Clock Out</button>
+           <button class="btn btn-ghost btn-full" id="mm-pre-discard" style="margin-bottom:8px;color:var(--red);">${svg('trash')} Discard Draft</button>`
+        : `<button class="btn btn-primary btn-full" id="mm-pre" style="margin-bottom:8px;">${svg('check')} Pre-Fill Clock Out</button>`}
+      <div class="divider" style="margin:10px 0;"></div>
+      <button class="btn btn-ghost btn-full" id="mm-ad" style="margin-bottom:8px;">${svg('edit')} Edit Assignment Details</button>
+      <button class="btn btn-ghost btn-full" id="mm-dp" style="margin-bottom:8px;">${svg('edit')} Edit Dispatch</button>
+      <button class="btn btn-ghost btn-full" id="mm-sc">${svg('edit')} Edit Scope of Work</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="mm-cancel">Cancel</button>
+    </div>`);
+
+  document.getElementById('mm-x').addEventListener('click', closeModal);
+  document.getElementById('mm-cancel').addEventListener('click', closeModal);
+  document.getElementById('mm-trip').addEventListener('click', () => {
+    closeModal();
+    if (state.currentTrip) renderActiveTripPage();
+    else openTripStartModal();
+  });
+  document.getElementById('mm-pre').addEventListener('click', async () => {
+    closeModal();
+    await autoSaveActiveForm();
+    initiateClockOut(state.currentEntry || entry, { prefill: true });
+  });
+  document.getElementById('mm-pre-discard')?.addEventListener('click', async () => {
+    if (!confirm('Discard the pre-filled clock-out?')) return;
+    closeModal();
+    await saveSection(state.currentEntry || entry, { pre_clockout: null });
+    renderActiveClockPage();
+  });
+
+  const editSection = key => async () => {
+    closeModal();
+    await autoSaveActiveForm();
+    state.editSections = { [key]: true };
+    renderActiveClockPage();
+  };
+  document.getElementById('mm-ad').addEventListener('click', editSection('assignment'));
+  document.getElementById('mm-dp').addEventListener('click', editSection('dispatch'));
+  document.getElementById('mm-sc').addEventListener('click', editSection('scope'));
+}
+
 /* ── Active clock page ───────────────────────────────────────────── */
 function renderActiveClockPage() {
   const entry = state.currentEntry;
@@ -1875,6 +1970,13 @@ function renderActiveClockPage() {
   const parkAmt  = parseFloat(entry.parking_tolls) || 0;
   const hasPark  = !!(entry.parking_tolls !== null && entry.parking_tolls !== undefined && entry.parking_tolls !== '');
   const hasMats  = mats.length > 0;
+  const dispatch = parseDispatch(entry.dispatch_contacts);
+  const preDraft = parsePreClockout(entry);
+  // Sections render read-only unless the ⋯ menu put them in edit mode
+  const assignEdit   = !!state.editSections?.assignment;
+  const dispatchEdit = !!state.editSections?.dispatch;
+  const scopeEdit    = !!state.editSections?.scope;
+  state.editSections = {};
 
   document.getElementById('page').innerHTML = `
     ${state.showReminderBanner ? `
@@ -1919,15 +2021,44 @@ function renderActiveClockPage() {
           : ''}
       <button class="btn btn-danger btn-lg" id="clockout-btn">${svg('stop')} Clock Out</button>
     </div>
-    <div style="display:flex;justify-content:flex-end;padding:0 16px 4px;">
-      <button class="btn btn-secondary btn-sm" id="onclock-trip-btn">${svg('car')} Trip</button>
+    <div class="clock-actions" style="padding-top:0;">
+      <button class="btn btn-secondary btn-lg" id="more-actions-btn" title="More actions">⋯</button>
     </div>
+
+    ${preDraft ? `
+    <div class="card" style="background:var(--green-bg);border:1px solid var(--green);margin:0 16px 6px;padding:12px 14px;">
+      <div style="font-size:13.5px;font-weight:800;color:var(--green);display:flex;align-items:center;gap:7px;">
+        ${svg('check')} Clock-out ready
+      </div>
+      <div style="font-size:13px;color:var(--text2);margin-top:5px;line-height:1.5;">
+        Filled at ${fmtTime(preDraft.filled_at)}. The time is stamped when you actually finish.
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+        <span class="chip-ok">${escHtml((preDraft.status || 'completed').toUpperCase())}</span>
+        ${preDraft.noCode ? '<span class="chip-ok">No release code</span>' : preDraft.releaseCode ? `<span class="chip-ok">Release ${escHtml(preDraft.releaseCode)}</span>` : ''}
+        ${preDraft.signed ? `<span class="chip-ok">Signed · ${escHtml(preDraft.signed)}</span>` : ''}
+        ${preDraft.workSummary ? '<span class="chip-ok">Summary ✓</span>' : ''}
+      </div>
+    </div>` : ''}
 
     <!-- Assignment Details -->
     <div class="section-header collapsible open" data-target="sec-assignment">
       <span>Assignment Details</span><span class="sec-chev">${svg('chevR')}</span>
     </div>
     <div id="sec-assignment" class="card sec-body">
+      <div id="ad-view" class="${assignEdit ? 'hidden' : ''}">
+        ${roBlock('WO Title', entry.wo_title)}
+        ${roRow('Project', entry.project_name, { blue: true })}
+        ${roRow('Company', entry.org_name)}
+        ${roRow('Customer', entry.client_name)}
+        ${entry.address ? `<div class="review-row"><span>Address</span><a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(entry.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(entry.address)}</a></div>` : ''}
+        ${roRow('Site ID', entry.site_id ? '#' + entry.site_id : '')}
+        ${roRow('Assignment ID', entry.assignment_id, { required: true })}
+        ${roRow('Ticket #', entry.ticket_num)}
+        ${roRow('INC #', entry.inc_num)}
+        <button class="btn btn-ghost btn-sm btn-full" id="ad-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
+      </div>
+      <div id="ad-form" class="${assignEdit ? '' : 'hidden'}">
       <div class="form-group">
         <label class="form-label">WO Title</label>
         <input type="text" class="form-control" id="jd-wo-title" value="${escHtml(entry.wo_title||'')}" placeholder="Work order title...">
@@ -1967,6 +2098,39 @@ function renderActiveClockPage() {
         <input type="text" class="form-control" id="jd-inc" value="${escHtml(entry.inc_num||'')}">
       </div>
       <button class="btn btn-ghost btn-sm btn-full" id="save-assignment-btn" style="margin-top:4px;">${svg('check')} Save</button>
+      </div>
+    </div>
+
+    <!-- Dispatch -->
+    <div class="section-header collapsible open" data-target="sec-dispatch">
+      <span>Dispatch</span><span class="sec-chev">${svg('chevR')}</span>
+    </div>
+    <div id="sec-dispatch" class="card sec-body">
+      <div id="dp-view" class="${dispatchEdit ? 'hidden' : ''}">
+        ${buildDispatchView(dispatch)}
+        <button class="btn btn-ghost btn-sm btn-full" id="dp-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
+      </div>
+      <div id="dp-form" class="${dispatchEdit ? '' : 'hidden'}">
+        ${buildDispatchEditor('jd-dispatch', dispatch)}
+        <button class="btn btn-ghost btn-sm btn-full" id="save-dispatch-btn" style="margin-top:8px;">${svg('check')} Save</button>
+      </div>
+    </div>
+
+    <!-- Scope of Work -->
+    <div class="section-header collapsible open" data-target="sec-scope">
+      <span>Scope of Work</span><span class="sec-chev">${svg('chevR')}</span>
+    </div>
+    <div id="sec-scope" class="card sec-body">
+      <div id="sc-view" class="${scopeEdit ? 'hidden' : ''}">
+        ${entry.scope_of_work
+          ? `<div class="scope-prose">${escHtml(entry.scope_of_work)}</div>`
+          : '<div class="empty-state-sm">No scope of work yet</div>'}
+        <button class="btn btn-ghost btn-sm btn-full" id="sc-edit-btn" style="margin-top:8px;">${svg('edit')} Edit</button>
+      </div>
+      <div id="sc-form" class="${scopeEdit ? '' : 'hidden'}">
+        <textarea class="form-control" id="jd-scope" rows="5" placeholder="What has to be done on site...">${escHtml(entry.scope_of_work || '')}</textarea>
+        <button class="btn btn-ghost btn-sm btn-full" id="save-scope-btn" style="margin-top:8px;">${svg('check')} Save</button>
+      </div>
     </div>
 
     <!-- POCs -->
@@ -2172,12 +2336,27 @@ function renderActiveClockPage() {
     initiateClockOut(entry);
   });
 
-  document.getElementById('onclock-trip-btn').addEventListener('click', async () => {
-    if (state.currentTrip) {
-      renderActiveTripPage();
-    } else {
-      openTripStartModal();
-    }
+  document.getElementById('more-actions-btn').addEventListener('click', () => openActiveJobMenu(entry, preDraft));
+
+  // Read-only ↔ edit switches (also reachable from the ⋯ menu)
+  const showEdit = (viewId, formId) => {
+    document.getElementById(viewId)?.classList.add('hidden');
+    const form = document.getElementById(formId);
+    form?.classList.remove('hidden');
+    form?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  document.getElementById('ad-edit-btn')?.addEventListener('click', () => showEdit('ad-view', 'ad-form'));
+  document.getElementById('dp-edit-btn')?.addEventListener('click', () => showEdit('dp-view', 'dp-form'));
+  document.getElementById('sc-edit-btn')?.addEventListener('click', () => showEdit('sc-view', 'sc-form'));
+
+  wireDispatchEditor('jd-dispatch');
+  document.getElementById('save-dispatch-btn')?.addEventListener('click', async () => {
+    await saveSection(entry, { dispatch_contacts: readDispatchEditor('jd-dispatch') });
+    renderActiveClockPage();
+  });
+  document.getElementById('save-scope-btn')?.addEventListener('click', async () => {
+    await saveSection(entry, { scope_of_work: document.getElementById('jd-scope').value.trim() || null });
+    renderActiveClockPage();
   });
 
   // Collapsible sections — chevron rotation is pure CSS via the .open class
@@ -2539,6 +2718,95 @@ function comboSync(id, options) {
   search.value = o ? o.label : '';
 }
 
+/* ── Dispatch contacts + read-only rows ──────────────────────────── */
+function parseDispatch(raw) {
+  if (Array.isArray(raw)) return raw;
+  try {
+    const arr = JSON.parse(raw || '[]');
+    return Array.isArray(arr) ? arr.filter(c => c && (c.name || c.value)) : [];
+  } catch { return []; }
+}
+// Phone vs email is derived from the value — never asked for
+function contactKind(value) {
+  return String(value || '').includes('@') ? 'email' : 'phone';
+}
+function contactHref(value) {
+  const v = String(value || '').trim();
+  if (contactKind(v) === 'email') return `mailto:${v}`;
+  // keep digits, +, and the comma/; pause characters dialers understand
+  return `tel:${v.replace(/[^\d+,;*#]/g, '')}`;
+}
+function buildDispatchView(contacts) {
+  if (!contacts.length) return '<div class="empty-state-sm">No dispatch contacts yet</div>';
+  return contacts.map(c => {
+    const kind = contactKind(c.value);
+    return `
+    <div class="contact">
+      <div class="contact-top">
+        <span class="contact-name">${escHtml(c.name || 'Contact')}</span>
+        <span class="tag">${kind === 'email' ? 'EMAIL' : 'CALL'}</span>
+      </div>
+      ${c.value ? `<a class="contact-link" href="${escHtml(contactHref(c.value))}">${svg(kind === 'email' ? 'mail' : 'phone')} ${escHtml(c.value)}</a>` : ''}
+      ${c.note ? `<div class="contact-note">${escHtml(c.note)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+function buildDispatchEditor(prefix, contacts) {
+  const rows = contacts.length ? contacts : [{ name: '', value: '', note: '' }];
+  return `<div class="dispatch-editor" id="${prefix}-list">
+    ${rows.map(c => dispatchRowHtml(c)).join('')}
+  </div>
+  <button type="button" class="btn btn-ghost btn-sm" id="${prefix}-add" style="margin-top:6px;">${svg('plus')} Add contact</button>`;
+}
+function dispatchRowHtml(c = {}) {
+  return `<div class="dispatch-row">
+    <div class="input-row">
+      <input type="text" class="form-control dp-name" placeholder="Contact name" value="${escHtml(c.name || '')}">
+      <button type="button" class="btn btn-ghost btn-sm dp-del" style="color:var(--red);flex-shrink:0;" title="Remove">✕</button>
+    </div>
+    <input type="text" class="form-control dp-value" placeholder="Phone or email" value="${escHtml(c.value || '')}" style="margin-top:6px;">
+    <input type="text" class="form-control dp-note" placeholder="Note (optional)" value="${escHtml(c.note || '')}" style="margin-top:6px;">
+  </div>`;
+}
+function wireDispatchEditor(prefix) {
+  const list = document.getElementById(`${prefix}-list`);
+  if (!list) return;
+  document.getElementById(`${prefix}-add`)?.addEventListener('click', () => {
+    list.insertAdjacentHTML('beforeend', dispatchRowHtml());
+    list.lastElementChild.querySelector('.dp-name')?.focus();
+  });
+  list.addEventListener('click', e => {
+    const del = e.target.closest('.dp-del');
+    if (!del) return;
+    if (list.querySelectorAll('.dispatch-row').length === 1) {
+      list.querySelectorAll('input').forEach(i => { i.value = ''; });
+      return;
+    }
+    del.closest('.dispatch-row')?.remove();
+  });
+}
+function readDispatchEditor(prefix) {
+  const list = document.getElementById(`${prefix}-list`);
+  if (!list) return null;
+  const out = [...list.querySelectorAll('.dispatch-row')].map(row => ({
+    name:  row.querySelector('.dp-name')?.value.trim()  || '',
+    value: row.querySelector('.dp-value')?.value.trim() || '',
+    note:  row.querySelector('.dp-note')?.value.trim()  || '',
+  })).filter(c => c.name || c.value);
+  return out.length ? JSON.stringify(out) : null;
+}
+// Read-only row helpers: optional fields vanish, required ones warn
+function roRow(label, value, { required = false, blue = false } = {}) {
+  const v = (value ?? '').toString().trim();
+  if (!v) return required ? `<div class="review-row"><span>${label}</span><span class="req-flag">Required</span></div>` : '';
+  return `<div class="review-row"><span>${label}</span><span${blue ? ' style="color:var(--blue);font-weight:600;"' : ''}>${escHtml(v)}</span></div>`;
+}
+function roBlock(label, value) {
+  const v = (value ?? '').toString().trim();
+  if (!v) return '';
+  return `<div class="ro-block"><div class="ro-block-k">${label}</div><div class="ro-block-v">${escHtml(v)}</div></div>`;
+}
+
 /* ── Multi-value inputs (tickets, MODs) — stored comma-joined ────── */
 function splitMulti(str) {
   return (str || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -2611,6 +2879,8 @@ async function autoSaveActiveForm() {
     data.return_track    = noRet ? null : (g('jd-return-track').value.trim() || null);
   }
   if (g('jd-work-summary')) data.work_summary    = g('jd-work-summary').value.trim() || null;
+  if (g('jd-scope'))       data.scope_of_work    = g('jd-scope').value.trim()        || null;
+  if (g('jd-dispatch-list')) data.dispatch_contacts = readDispatchEditor('jd-dispatch');
   if (g('parking-toggle')) {
     const parkOn = g('parking-toggle').checked;
     data.parking_tolls = parkOn ? (parseFloat(g('parking-amount')?.value) || null) : null;
@@ -2621,10 +2891,18 @@ async function autoSaveActiveForm() {
 }
 
 /* ── Clock Out flow ─────────────────────────────────────────────── */
-async function initiateClockOut(entry) {
+async function initiateClockOut(entry, opts = {}) {
   const workSummary = document.getElementById('jd-work-summary')?.value.trim() || entry.work_summary || '';
   const assignId    = document.getElementById('jd-assignment')?.value.trim()   || entry.assignment_id || '';
   const modName     = (document.getElementById('jd-mods') ? readMultiInputs('jd-mods') : null) || entry.mod_name || '';
+
+  // A saved pre-fill means everything was answered already: jump to the time
+  const draft = parsePreClockout(entry);
+  if (draft && !opts.prefill) {
+    showClockOutTimePicker(entry, draft.workSummary || workSummary, draft.assignId || assignId,
+      draft.modName || modName, [], { draft });
+    return;
+  }
 
   // MOD is intentionally NOT checked here — it is collected at Manager Sign-Off
   const missing = [];
@@ -2649,14 +2927,23 @@ async function initiateClockOut(entry) {
     document.getElementById('co-cancel-btn').addEventListener('click', closeModal);
     document.getElementById('co-continue-btn').addEventListener('click', () => {
       closeModal();
-      showClockOutTimePicker(entry, workSummary, assignId, modName, [...missing]);
+      goNext([...missing]);
     });
     return;
   }
-  showClockOutTimePicker(entry, workSummary, assignId, modName, []);
+  goNext([]);
+
+  // Pre-filling has no time step — the time is stamped at the real clock-out
+  function goNext(overrides) {
+    if (opts.prefill) {
+      showClockOutModal(entry, workSummary, assignId, modName, overrides, null, { prefill: true });
+    } else {
+      showClockOutTimePicker(entry, workSummary, assignId, modName, overrides);
+    }
+  }
 }
 
-function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides) {
+function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides, opts = {}) {
   openModal(`
     <div class="modal-header">
       <h3>${svg('stop')} Clock Out</h3>
@@ -2717,7 +3004,16 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
     closeModal();
   });
 
-  const go = iso => { clearInterval(state.timeSelInterval); showClockOutModal(entry, workSummary, assignId, modName, overrides, iso); };
+  const go = iso => {
+    clearInterval(state.timeSelInterval);
+    // Finishing a pre-filled clock-out: everything was answered already, so go
+    // straight to the review with the real time — no status/signature re-ask
+    if (opts.draft) {
+      showFinalReview(entry, { ...opts.draft, clockOutISO: iso, mode: 'finish' });
+      return;
+    }
+    showClockOutModal(entry, workSummary, assignId, modName, overrides, iso);
+  };
 
   document.getElementById('co-ts-now').addEventListener('click', e => go(e.currentTarget.dataset.iso));
   document.getElementById('co-ts-exact').addEventListener('click', e => go(e.currentTarget.dataset.iso));
@@ -2741,14 +3037,15 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
   });
 }
 
-function showClockOutModal(entry, workSummary, assignId, modName, overrides, clockOutISO) {
+function showClockOutModal(entry, workSummary, assignId, modName, overrides, clockOutISO, opts = {}) {
   const override = field => overrides.includes(field) ? 'OVERRIDE!' : null;
-  const clockOutTime = new Date(clockOutISO);
+  const prefill = !!opts.prefill;
+  const clockOutTime = clockOutISO ? new Date(clockOutISO) : null;
 
   openModal(`
     <div class="modal-header">
-      <h3>${svg('stop')} Clock Out</h3>
-      <span style="font-size:12px;color:var(--text3);">Out: ${fmtHHMM(clockOutTime)}</span>
+      <h3>${prefill ? `${svg('check')} Pre-Fill Clock Out` : `${svg('stop')} Clock Out`}</h3>
+      <span style="font-size:12px;color:var(--text3);">${clockOutTime ? 'Out: ' + fmtHHMM(clockOutTime) : 'Time stamped later'}</span>
     </div>
     <div class="modal-body">
       <div class="form-group">
@@ -2808,9 +3105,10 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides, clo
     document.getElementById('no-code-btn').textContent = noCode ? 'Undo N/a' : 'No Code';
   });
 
-  document.getElementById('co-back-btn').addEventListener('click', () =>
-    showClockOutTimePicker(entry, workSummary, assignId, modName, overrides)
-  );
+  document.getElementById('co-back-btn').addEventListener('click', () => {
+    if (prefill) { closeModal(); return; }   // pre-fill has no time step behind it
+    showClockOutTimePicker(entry, workSummary, assignId, modName, overrides);
+  });
 
   document.getElementById('co-review-btn').addEventListener('click', () => {
     if (!selectedStatus) { showToast('Please select a WO status', 'error'); return; }
@@ -2831,14 +3129,18 @@ function showClockOutModal(entry, workSummary, assignId, modName, overrides, clo
       releaseCode,
       noCode,
       clockOutISO,
+      mode: prefill ? 'prefill' : 'normal',
     });
   });
 }
 
 function showFinalReview(entry, coData) {
+  const mode = coData.mode || 'normal';
+  const prefill = mode === 'prefill';          // no end time yet
+  const finishing = mode === 'finish';         // draft + real time, sign-off already done
   const techName = state.settings.tech_name || '—';
-  const clockOutTime = new Date(coData.clockOutISO);
-  const grossSec = Math.max(0, Math.floor((clockOutTime - new Date(entry.clock_in)) / 1000));
+  const clockOutTime = coData.clockOutISO ? new Date(coData.clockOutISO) : null;
+  const grossSec = clockOutTime ? Math.max(0, Math.floor((clockOutTime - new Date(entry.clock_in)) / 1000)) : 0;
   const netSec   = state.settings.paid_breaks === '1'
     ? grossSec
     : Math.max(0, grossSec - (entry.total_break_seconds || 0));
@@ -2850,7 +3152,7 @@ function showFinalReview(entry, coData) {
 
   openModal(`
     <div class="modal-header">
-      <h3>${svg('check')} Final Review</h3>
+      <h3>${svg('check')} ${prefill ? 'Review Pre-Fill' : 'Final Review'}</h3>
     </div>
     <div class="modal-body">
       <div class="review-row"><span>Tech:</span><span>${escHtml(techName)}</span></div>
@@ -2861,26 +3163,61 @@ function showFinalReview(entry, coData) {
       <div class="review-row"><span>MOD Name:</span><span>${escHtml(coData.modName || '— (asked at sign-off)')}</span></div>
       <div class="review-row"><span>Address:</span><span>${escHtml(entry.address||'—')}</span></div>
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
-      <div class="review-row"><span>Clock Out:</span><span>${fmtHHMM(clockOutTime)}</span></div>
-      <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
-      <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
-      ${travel  ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>`  : ''}
-      ${parking ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(parking)}</span></div>` : ''}
-      ${matsSum ? `<div class="review-row"><span>Materials:</span><span>${fmtMoney(matsSum)}</span></div>` : ''}
-      <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
+      ${prefill
+        ? `<div class="review-row"><span>Clock Out:</span><span style="color:var(--green);">stamped when you finish</span></div>`
+        : `<div class="review-row"><span>Clock Out:</span><span>${fmtHHMM(clockOutTime)}</span></div>
+           <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
+           <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
+           ${travel  ? `<div class="review-row"><span>Travel Reimb:</span><span>${fmtMoney(travel)}</span></div>`  : ''}
+           ${parking ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(parking)}</span></div>` : ''}
+           ${matsSum ? `<div class="review-row"><span>Materials:</span><span>${fmtMoney(matsSum)}</span></div>` : ''}
+           <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>`}
       <div class="review-row"><span>Status:</span><span class="status-chip ${coData.status}">${coData.status.toUpperCase()}${coData.revisit ? ' · REVISIT' : ''}</span></div>
       <div class="review-row"><span>Release Code:</span><span>${coData.noCode ? 'N/a' : escHtml(coData.releaseCode || '—')}</span></div>
+      ${finishing && coData.signed ? `<div class="review-row"><span>Signed by:</span><span style="color:var(--green);">${escHtml(coData.signed)}</span></div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-back-btn">← Back</button>
-      <button class="btn btn-danger" id="fr-confirm-btn">Confirm Clock Out</button>
+      <button class="btn ${prefill ? 'btn-primary' : 'btn-danger'}" id="fr-confirm-btn">
+        ${prefill ? `${svg('check')} Continue to Sign-Off` : 'Confirm Clock Out'}
+      </button>
     </div>`, { locked: true });
 
-  document.getElementById('fr-back-btn').addEventListener('click', () =>
-    showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO)
-  );
+  document.getElementById('fr-back-btn').addEventListener('click', () => {
+    if (finishing) {
+      showClockOutTimePicker(entry, coData.workSummary, coData.assignId, coData.modName, [], { draft: coData });
+      return;
+    }
+    showClockOutModal(entry, coData.workSummary, coData.assignId, coData.modName, [], coData.clockOutISO, { prefill });
+  });
 
-  document.getElementById('fr-confirm-btn').addEventListener('click', () => {
+  document.getElementById('fr-confirm-btn').addEventListener('click', async () => {
+    // Finishing a pre-filled clock-out: sign-off already happened, just stamp it
+    if (finishing) {
+      const btn = document.getElementById('fr-confirm-btn');
+      btn.disabled = true;
+      try {
+        const completed = await api.clockOut(entry.id, {
+          clock_out:        coData.clockOutISO,
+          status:           coData.status,
+          work_summary:     coData.workSummary,
+          assignment_id:    coData.assignId,
+          mod_name:         coData.modName,
+          release_code:     coData.releaseCode,
+          no_release_code:  coData.noCode,
+          revisit_required: coData.revisit ? 1 : 0,
+        });
+        try { await api.updateEntry(entry.id, { pre_clockout: null }); } catch { /* draft cleanup is best effort */ }
+        state.currentEntry = null;
+        state.lastCompletedEntry = completed;
+        closeModal();
+        renderSummaryPage(completed);
+      } catch (e) {
+        showToast(e.message || 'Clock out failed', 'error');
+        btn.disabled = false;
+      }
+      return;
+    }
     closeModal();
     showSignatureModal(entry, coData);
   });
@@ -2926,7 +3263,9 @@ function showSignatureModal(entry, coData) {
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="fr-sig-back">← Back</button>
-      <button class="btn btn-danger" id="fr-sig-done">${svg('check')} Clock Out</button>
+      <button class="btn ${coData.mode === 'prefill' ? 'btn-primary' : 'btn-danger'}" id="fr-sig-done">
+        ${coData.mode === 'prefill' ? `${svg('check')} Save Draft` : `${svg('check')} Clock Out`}
+      </button>
     </div>`, { locked: true });
 
   if (modMissing) wireMultiInputs('sig-mods');
@@ -2995,6 +3334,7 @@ function showSignatureModal(entry, coData) {
     }
     const btn = document.getElementById('fr-sig-done');
     btn.disabled = true;
+    let signedBy = null;
     try {
       if (sigDrawn && !sigSkipped) {
         let signer;
@@ -3009,6 +3349,7 @@ function showSignatureModal(entry, coData) {
             modNameFinal = splitMulti(modNameFinal).concat(signer).join(', ');
           }
         }
+        signedBy = signer;
         try {
           const dataUrl = sigCanvas.toDataURL('image/png');
           await api.uploadPhoto(entry.id, {
@@ -3020,6 +3361,30 @@ function showSignatureModal(entry, coData) {
           });
         } catch (err) { showToast('Signature upload failed: ' + err.message, 'error'); }
       }
+
+      // Pre-fill: store everything as a draft, keep the clock running
+      if (coData.mode === 'prefill') {
+        const draft = {
+          status:       coData.status,
+          workSummary:  coData.workSummary,
+          assignId:     coData.assignId,
+          modName:      modNameFinal,
+          releaseCode:  coData.releaseCode,
+          noCode:       coData.noCode,
+          revisit:      coData.revisit,
+          signed:       signedBy,
+          filled_at:    new Date().toISOString(),
+        };
+        state.currentEntry = await api.updateEntry(entry.id, {
+          pre_clockout: JSON.stringify(draft),
+          mod_name: modNameFinal || entry.mod_name,
+        });
+        closeModal();
+        showToast('Clock-out pre-filled — clock out whenever you leave', 'success');
+        renderActiveClockPage();
+        return;
+      }
+
       const completed = await api.clockOut(entry.id, {
         clock_out:        coData.clockOutISO,
         status:           coData.status,
@@ -4181,6 +4546,11 @@ async function openEntryDetail(entry) {
       ${entry.release_code ? `<div class="review-row"><span>Release Code:</span><span>${escHtml(entry.release_code)}</span></div>` : ''}
       ${mats.length ? '<div class="review-row"><span>Materials:</span><span>' + mats.map(m=>escHtml(m.name+(m.price?' ($'+m.price+')':''))).join(', ') + '</span></div>' : ''}
       ${entry.work_summary ? `<div class="review-row" style="align-items:flex-start;"><span>Summary:</span><span style="white-space:pre-wrap;">${escHtml(entry.work_summary)}</span></div>` : ''}
+      ${(() => {
+        const dc = parseDispatch(entry.dispatch_contacts);
+        return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
+      })()}
+      ${entry.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-prose">${escHtml(entry.scope_of_work)}</div>` : ''}
       <div id="det-photos"></div>
     </div>
     <div class="modal-footer">
