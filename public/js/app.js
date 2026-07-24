@@ -2490,6 +2490,7 @@ function renderActiveClockPage() {
         showToast('Trip linked to WO', 'success');
       } catch { /* non-critical */ }
     }
+    renderActiveClockPage();   // back to the read-only card with fresh values
   });
 
   // POCs save
