@@ -14,6 +14,7 @@ const state = {
   elapsedInterval: null,
   breakElapsedInterval: null,
   tripTimerInterval: null,
+  timeSelInterval: null,
   reminderTimeout: null,
   breakReturnTimeout: null,
   showReminderBanner: false,
@@ -371,11 +372,13 @@ function clearTimers() {
   clearInterval(state.elapsedInterval);
   clearInterval(state.breakElapsedInterval);
   clearInterval(state.tripTimerInterval);
+  clearInterval(state.timeSelInterval);
   clearTimeout(state.reminderTimeout);
   clearTimeout(state.breakReturnTimeout);
   state.elapsedInterval = null;
   state.breakElapsedInterval = null;
   state.tripTimerInterval = null;
+  state.timeSelInterval = null;
 }
 
 /* ── Clipboard helpers ───────────────────────────────────────────── */
@@ -492,6 +495,32 @@ function renderTimeSelector(containerId, label, onConfirm, extraTimeOptions = []
   const container = document.getElementById(containerId);
   if (!container) return;
 
+  // What the button SHOWS is what it commits: each button carries the exact
+  // ISO it will send, and a ticker keeps those values fresh while on screen.
+  // (Previously the label was computed at render and the value at click time,
+  //  so a button reading 8:00 could save 8:05 minutes later.)
+  function refreshTimeButtons() {
+    container.querySelectorAll('[data-offset]').forEach(btn => {
+      const d = timeFromRoundedNow(parseInt(btn.dataset.offset));
+      btn.dataset.iso = d.toISOString();
+      const span = btn.querySelector('span');
+      if (span) span.textContent = fmtHHMM(d);
+      else if (btn.dataset.nowLabel) btn.textContent = `Now · ${fmtHHMM(d)}`;
+    });
+    const exact = container.querySelector('#ts-exact');
+    if (exact) {
+      exact.dataset.iso = new Date().toISOString();
+      exact.textContent = `Exact now · ${fmtHHMM(new Date())}`;
+    }
+  }
+  function startTicker() {
+    clearInterval(state.timeSelInterval);
+    state.timeSelInterval = setInterval(() => {
+      if (!document.body.contains(container)) { clearInterval(state.timeSelInterval); return; }
+      refreshTimeButtons();
+    }, 10000);
+  }
+
   function phase1() {
     const extraBtnsHtml = extraTimeOptions.map((opt, i) =>
       `<button class="btn btn-primary btn-full" id="ts-extra-${i}" style="margin-bottom:6px;">${escHtml(opt.label)}</button>`
@@ -501,41 +530,45 @@ function renderTimeSelector(containerId, label, onConfirm, extraTimeOptions = []
         <div class="time-sel-label">${label}</div>
         ${extraBtnsHtml}
         <div class="time-sel-row">
-          <button class="btn btn-primary flex-1" id="ts-now">Now · ${fmtHHMM(timeFromRoundedNow(0))}</button>
+          <button class="btn btn-primary flex-1" id="ts-now" data-offset="0" data-now-label="1"></button>
           <button class="btn btn-ghost flex-1" id="ts-later">Other time →</button>
         </div>
       </div>`;
     extraTimeOptions.forEach((opt, i) => {
       document.getElementById(`ts-extra-${i}`)?.addEventListener('click', () => onConfirm(opt.isoTime));
     });
-    document.getElementById('ts-now').addEventListener('click', () => onConfirm(timeFromRoundedNow(0).toISOString()));
+    const nowBtn = document.getElementById('ts-now');
+    nowBtn.addEventListener('click', () => onConfirm(nowBtn.dataset.iso));
     document.getElementById('ts-later').addEventListener('click', phase2);
+    refreshTimeButtons();
+    startTicker();
   }
 
   function phase2() {
-    // Offsets are relative to the rounded "0" so round times are one tap away
-    const t = off => fmtHHMM(timeFromRoundedNow(off));
+    // Offsets are relative to the rounded "Now" so round times are one tap away
     container.innerHTML = `
       <div class="time-selector">
         <div class="time-sel-label">${label}</div>
         <div class="time-sel-grid5">
-          <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span>${t(-10)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span>${t(-5)}</span></button>
-          <button class="btn btn-primary time-adj-btn" data-offset="0">0<span>${t(0)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span>${t(5)}</span></button>
-          <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span>${t(10)}</span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span></span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span></span></button>
+          <button class="btn btn-primary time-adj-btn" data-offset="0">Now<span></span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span></span></button>
+          <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span></span></button>
         </div>
-        <button class="btn btn-ghost btn-full" id="ts-exact">Exact now · ${fmtHHMM(new Date())}</button>
+        <button class="btn btn-ghost btn-full" id="ts-exact"></button>
         <button class="btn btn-ghost btn-full" id="ts-custom">Enter time manually...</button>
         <div id="ts-custom-group" class="hidden" style="margin-top:8px;">
           <input type="datetime-local" class="form-control" id="ts-custom-input" value="${localISOString()}">
           <button class="btn btn-primary btn-full" id="ts-custom-confirm" style="margin-top:8px;">Confirm</button>
         </div>
       </div>`;
+    refreshTimeButtons();
+    startTicker();
     container.querySelectorAll('.time-adj-btn').forEach(btn => {
-      btn.addEventListener('click', () => onConfirm(timeFromRoundedNow(parseInt(btn.dataset.offset)).toISOString()));
+      btn.addEventListener('click', () => onConfirm(btn.dataset.iso));
     });
-    document.getElementById('ts-exact').addEventListener('click', () => onConfirm(new Date().toISOString()));
+    document.getElementById('ts-exact').addEventListener('click', e => onConfirm(e.currentTarget.dataset.iso));
     document.getElementById('ts-custom').addEventListener('click', () => {
       document.getElementById('ts-custom-group').classList.toggle('hidden');
     });
@@ -617,12 +650,11 @@ async function renderIdleClockPage() {
                   ${pj.project_name ? `<div class="sched-project">${escHtml(pj.project_name)}</div>` : ''}
                   <div class="sched-time-row">
                     <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
-                    ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
                     ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
                   </div>
                   <div class="sched-meta-row">
                     <div class="sched-line">${meta || '&nbsp;'}</div>
-                    <button class="btn btn-ghost sched-menu" data-id="${pj.id}" title="Actions">⋯</button>
+                    ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;flex-shrink:0;">${svg('return')} REVISIT</span>` : ''}
                   </div>
                   ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:6px;">${svg('play')} Start This Job</button>` : ''}
                 </div>`;
@@ -779,13 +811,6 @@ async function renderIdleClockPage() {
       if (e.target.closest('button')) return;
       const pj = (state.plannedJobs || []).find(p => p.id === Number(card.dataset.id));
       if (pj) openPlannedJobDetail(pj, applyPlannedJob);
-    });
-  });
-  document.querySelectorAll('.sched-menu').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const pj = (state.plannedJobs || []).find(p => p.id === Number(btn.dataset.id));
-      if (pj) openPlannedJobMenu(pj, applyPlannedJob);
     });
   });
   document.querySelectorAll('.sched-soon-start').forEach(btn => {
@@ -1002,16 +1027,14 @@ function openPlannedJobMenu(pj, onStart) {
       <button class="btn btn-ghost btn-sm" id="pjm-x">✕</button>
     </div>
     <div class="modal-body">
-      <button class="btn btn-secondary btn-full" id="pjm-details" style="margin-bottom:8px;">${svg('clock')} View Details</button>
-      <button class="btn btn-ghost btn-full" id="pjm-edit" style="margin-bottom:8px;">${svg('edit')} Edit</button>
+      <button class="btn btn-secondary btn-full" id="pjm-edit" style="margin-bottom:8px;">${svg('edit')} Edit</button>
       <button class="btn btn-ghost btn-full" id="pjm-del" style="color:var(--red);">${svg('trash')} Delete</button>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="pjm-cancel">Cancel</button>
+      <button class="btn btn-ghost" id="pjm-back">← Back</button>
     </div>`);
   document.getElementById('pjm-x').addEventListener('click', closeModal);
-  document.getElementById('pjm-cancel').addEventListener('click', closeModal);
-  document.getElementById('pjm-details').addEventListener('click', () => {
+  document.getElementById('pjm-back').addEventListener('click', () => {
     closeModal();
     openPlannedJobDetail(pj, onStart);
   });
@@ -2634,7 +2657,6 @@ async function initiateClockOut(entry) {
 }
 
 function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides) {
-  const t = off => fmtHHMM(timeFromRoundedNow(off));
   openModal(`
     <div class="modal-header">
       <h3>${svg('stop')} Clock Out</h3>
@@ -2643,7 +2665,7 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
       <div class="form-group">
         <label class="form-label">When did you finish?</label>
         <div class="time-sel-row">
-          <button class="btn btn-danger flex-1" id="co-ts-now">Clock Out · ${t(0)}</button>
+          <button class="btn btn-danger flex-1" id="co-ts-now" data-offset="0" data-now-label="1"></button>
           <button class="btn btn-ghost flex-1" id="co-ts-adjust">Early / Later →</button>
         </div>
       </div>
@@ -2651,14 +2673,14 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
         <div class="form-group" style="margin-top:12px;">
           <label class="form-label">Adjust time</label>
           <div class="time-sel-grid5">
-            <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span>${t(-10)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span>${t(-5)}</span></button>
-            <button class="btn btn-danger time-adj-btn" data-offset="0">0<span>${t(0)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span>${t(5)}</span></button>
-            <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span>${t(10)}</span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="-10">−10<span></span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="-5">−5<span></span></button>
+            <button class="btn btn-danger time-adj-btn" data-offset="0">Now<span></span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="5">+5<span></span></button>
+            <button class="btn btn-ghost time-adj-btn" data-offset="10">+10<span></span></button>
           </div>
         </div>
-        <button class="btn btn-ghost btn-full" id="co-ts-exact">Exact now · ${fmtHHMM(new Date())}</button>
+        <button class="btn btn-ghost btn-full" id="co-ts-exact"></button>
         <button class="btn btn-ghost btn-full" id="co-ts-manual-toggle">Enter time manually...</button>
         <div id="co-ts-manual-group" class="hidden" style="margin-top:8px;">
           <input type="datetime-local" class="form-control" id="co-ts-manual-input" value="${localISOString()}">
@@ -2670,19 +2692,42 @@ function showClockOutTimePicker(entry, workSummary, assignId, modName, overrides
       <button class="btn btn-ghost" id="co-ts-cancel">Cancel</button>
     </div>`, { locked: true });
 
-  document.getElementById('co-ts-cancel').addEventListener('click', closeModal);
+  // Buttons carry the exact ISO they commit and stay fresh while open
+  const body = document.getElementById('modal-body');
+  const refresh = () => {
+    body.querySelectorAll('[data-offset]').forEach(btn => {
+      const d = timeFromRoundedNow(parseInt(btn.dataset.offset));
+      btn.dataset.iso = d.toISOString();
+      const span = btn.querySelector('span');
+      if (span) span.textContent = fmtHHMM(d);
+      else if (btn.dataset.nowLabel) btn.textContent = `Clock Out · ${fmtHHMM(d)}`;
+    });
+    const ex = document.getElementById('co-ts-exact');
+    if (ex) { ex.dataset.iso = new Date().toISOString(); ex.textContent = `Exact now · ${fmtHHMM(new Date())}`; }
+  };
+  refresh();
+  clearInterval(state.timeSelInterval);
+  state.timeSelInterval = setInterval(() => {
+    if (!document.getElementById('co-ts-now')) { clearInterval(state.timeSelInterval); return; }
+    refresh();
+  }, 10000);
 
-  const go = iso => showClockOutModal(entry, workSummary, assignId, modName, overrides, iso);
+  document.getElementById('co-ts-cancel').addEventListener('click', () => {
+    clearInterval(state.timeSelInterval);
+    closeModal();
+  });
 
-  document.getElementById('co-ts-now').addEventListener('click', () => go(timeFromRoundedNow(0).toISOString()));
-  document.getElementById('co-ts-exact').addEventListener('click', () => go(new Date().toISOString()));
+  const go = iso => { clearInterval(state.timeSelInterval); showClockOutModal(entry, workSummary, assignId, modName, overrides, iso); };
+
+  document.getElementById('co-ts-now').addEventListener('click', e => go(e.currentTarget.dataset.iso));
+  document.getElementById('co-ts-exact').addEventListener('click', e => go(e.currentTarget.dataset.iso));
 
   document.getElementById('co-ts-adjust').addEventListener('click', () =>
     document.getElementById('co-adjust-panel').classList.remove('hidden')
   );
 
   document.querySelectorAll('.time-adj-btn').forEach(btn => {
-    btn.addEventListener('click', () => go(timeFromRoundedNow(parseInt(btn.dataset.offset)).toISOString()));
+    btn.addEventListener('click', () => go(btn.dataset.iso));
   });
 
   document.getElementById('co-ts-manual-toggle').addEventListener('click', () =>
@@ -3584,6 +3629,7 @@ async function renderJournalPage() {
     } else {
       // Work tab
       const [entries, payPeriods] = await Promise.all([api.getEntries(), api.getPayPeriods()]);
+      state.payPeriods = payPeriods;   // entry detail reads this to show Total Received
       const payMap = {};
       payPeriods.forEach(p => { payMap[p.week_start] = p; });
 
@@ -3895,6 +3941,11 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
         </span>
         ${curStatus === 'received' ? `<button class="btn btn-ghost btn-sm" id="pm-unconfirm">Undo confirmation</button>` : ''}
       </div>
+      ${curStatus !== 'received' ? `
+      <div class="field-hint" style="margin-top:-4px;">
+        <b>Save</b> keeps the week pending (notes and per-job values only).
+        <b>Confirm PAY</b> records the amount and date as received.
+      </div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pm-cancel">Cancel</button>
@@ -3978,22 +4029,25 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   });
 
   const doSave = async (status, btn) => {
+    // "Save" (pending) only records notes and any per-job values you typed —
+    // it must never mark money as received. Amount / paid date / auto-stamped
+    // received dates belong exclusively to Confirm PAY.
+    const receiving = status === 'received';
     const amount = parseFloat(document.getElementById('pm-amount').value) || null;
     const notes  = document.getElementById('pm-notes').value.trim() || null;
     const weekDate = document.getElementById('pm-week-date').value || '';
-    const confirmDate = status === 'received' ? new Date().toLocaleDateString('en-CA') : null;
+    const confirmDate = receiving ? new Date().toLocaleDateString('en-CA') : null;
     // paid_at is stored as fixed UTC noon of the picked date so the date part
     // round-trips exactly (modal prefill and CSV both read the first 10 chars)
     let paid_at;
-    if (status !== 'received' && payPeriod?.status === 'received') paid_at = null; // undo confirmation
+    if (!receiving)            paid_at = null;                  // pending / undo confirmation
     else if (weekDate)         paid_at = weekDate + 'T12:00:00Z';
-    else if (paidAtDate)       paid_at = null;                  // user cleared a previously set date
     else if (confirmDate)      paid_at = confirmDate + 'T12:00:00Z';
     else                       paid_at = payPeriod?.paid_at || null;
     try {
       if (btn) btn.disabled = true;
-      // Per-job default: week date if set, else day you confirm the pay
-      const defaultDate = weekDate || confirmDate;
+      // Per-job date is auto-stamped only when confirming
+      const defaultDate = receiving ? (weekDate || confirmDate) : null;
       // Persist changed per-entry overrides
       for (const e of entries) {
         const o = ovMap[e.id];
@@ -4010,8 +4064,13 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
           });
         }
       }
-      await api.upsertPayPeriod({ week_start: weekStart, week_end: weekEnd, status, received_amount: amount, expected_total: totalExpected(), notes, paid_at });
-      showToast(status === 'received' ? 'Pay confirmed' : 'Saved', 'success');
+      await api.upsertPayPeriod({
+        week_start: weekStart, week_end: weekEnd, status,
+        received_amount: receiving ? amount : null,
+        expected_total: totalExpected(), notes, paid_at,
+      });
+      showToast(receiving ? 'Pay confirmed' : 'Saved (pay still pending)', 'success');
+      state.payPeriods = null;   // force a refresh so entry details stay in sync
       closeModal();
       onSave();
     } catch (e) {
@@ -4051,22 +4110,35 @@ function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
         </div>
       </div>
       <div class="entry-card-bottom">
-        ${needsRev ? `<button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>` : ''}
         <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
         ${entry.rate_type === 'none' && !total
           ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
           : `<div class="entry-pay">${fmtMoney(total)}</div>`}
       </div>
+      ${needsRev ? `<div class="entry-rev-row">
+        <button class="rev-badge rev-needed rev-corner" data-need-rev="${entry.id}" title="Start the revisit">${svg('return')} REVISIT REQUIRED</button>
+      </div>` : ''}
     </div>`;
 }
 
-function openEntryDetail(entry) {
+async function openEntryDetail(entry) {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
   const sym    = state.settings.currency_symbol || '$';
   const mats   = parseMaterials(entry.materials);
+
+  // Received data only exists once this entry's week has been confirmed paid
+  if (!state.payPeriods) {
+    try { state.payPeriods = await api.getPayPeriods(); } catch { state.payPeriods = []; }
+  }
+  const wsDay   = state.settings.week_start === '7' ? 0 : 1;
+  const wkKey   = dateToISODate(getWeekBounds(new Date(entry.clock_in), wsDay).start);
+  const payPer  = (state.payPeriods || []).find(p => p.week_start === wkKey);
+  const paidWk  = payPer?.status === 'received';
+  const received = entry.received_pay != null ? parseFloat(entry.received_pay) : total;
+  const lowered  = paidWk && received < total - 0.005;
 
   openModal(`
     <div class="modal-header">
@@ -4093,6 +4165,14 @@ function openEntryDetail(entry) {
       ${entry.parking_tolls ? `<div class="review-row"><span>Parking/Tolls:</span><span>${fmtMoney(entry.parking_tolls)}</span></div>` : ''}
       ${entry.pay_adjustment_note ? `<div class="review-row"><span>Pay Note:</span><span>${escHtml(entry.pay_adjustment_note)}</span></div>` : ''}
       <div class="review-row total-row"><span>Total Expected:</span><span>${fmtMoney(total)}</span></div>
+      ${paidWk ? `
+      <div class="review-row total-row">
+        <span>Total Received:</span>
+        <span style="color:${lowered ? 'var(--red)' : 'var(--green)'};">
+          ${fmtMoney(received)}${lowered ? ` <span style="font-size:11px;font-weight:700;">LOWERED</span>` : ''}
+        </span>
+      </div>
+      ${entry.received_date ? `<div class="review-row"><span>Received Date:</span><span>${escHtml(entry.received_date.slice(0,10))}</span></div>` : ''}` : ''}
       <div class="review-row"><span>Status:</span><span class="status-chip ${entry.status||'pending'}">${(entry.status||'pending').toUpperCase()}</span></div>
       ${entry.mod_name ? `<div class="review-row"><span>MOD:</span><span>${escHtml(entry.mod_name)}</span></div>` : ''}
       ${entry.noc_name ? `<div class="review-row"><span>NOC:</span><span>${escHtml(entry.noc_name)}</span></div>` : ''}

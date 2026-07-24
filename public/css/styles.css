@@ -526,7 +526,8 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 }
 .rev-badge svg { width: 12px; height: 12px; }
 .rev-badge.rev-needed { background: var(--orange); color: #1a1a1a; }
-/* corner variant sits bottom-left on journal cards — a notch smaller */
+/* corner variant sits on its own row at the very bottom of journal cards */
+.entry-rev-row { display: flex; justify-content: flex-end; margin-top: 6px; }
 .rev-badge.rev-corner { font-size: 10px; padding: 4px 8px; min-height: 24px; }
 .rev-badge.rev-corner svg { width: 11px; height: 11px; }
 
