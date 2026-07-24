@@ -357,6 +357,7 @@ function renderPage() {
   switch (state.page) {
     case 'clock':    renderClockPage(); break;
     case 'journal':  renderJournalPage(); break;
+    case 'project':  renderProjectPage(); break;
     case 'overview': renderOverviewPage(); break;
     case 'settings': renderSettingsPage(); break;
   }
@@ -674,10 +675,7 @@ async function renderIdleClockPage() {
         </div>
         <div class="form-group">
           <label class="form-label">Project <span class="opt-label">optional</span></label>
-          <div class="input-row">
-            <div style="flex:1;min-width:0;">${buildCombo('project-select', 'Type to search projects...')}</div>
-            <button class="btn btn-ghost btn-icon" id="manage-projects-btn" title="Manage projects">${svg('edit')}</button>
-          </div>
+          ${buildCombo('project-select', 'Type to search projects...')}
         </div>
         <div class="form-group">
           <label class="form-label">Company</label>
@@ -731,7 +729,10 @@ async function renderIdleClockPage() {
 
   wireCombo('company-select', orgOptions);
   wireCombo('customer-select', cliOptions);
-  wireCombo('project-select', projComboOpts());
+  wireCombo('project-select', projComboOpts(), {
+    createLabel: '＋ New project…',
+    onCreate: () => openProjectFormModal(null, () => renderIdleClockPage()),
+  });
 
   // Schedule is the default view; the form appears only once a path is chosen
   const showForm = () => {
@@ -787,8 +788,6 @@ async function renderIdleClockPage() {
     const p = (state.projects || []).find(x => x.id === Number(e.target.value));
     if (p) applyProjectDefaults(p);
   });
-
-  document.getElementById('manage-projects-btn').addEventListener('click', () => openProjectsModal());
 
   const applyPlannedJob = (pj) => {
     showForm();
@@ -996,7 +995,7 @@ function openPlannedJobDetail(pj, onStart) {
         ${isPlannedSoon(pj) ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
       </div>
       <div style="font-size:16px;font-weight:700;margin-bottom:10px;">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
-      ${row('Project', pj.project_name ? escHtml(pj.project_name) : '')}
+      ${pj.project_name ? `<div class="review-row"><span>Project:</span><button class="project-link" data-proj="${pj.project_id}">${escHtml(pj.project_name)} ${svg('chevR')}</button></div>` : ''}
       ${row('Company', pj.org_name ? escHtml(pj.org_name) : '')}
       ${row('Customer', pj.client_name ? escHtml(pj.client_name) : '')}
       ${row('Site ID', pj.site_id ? escHtml(pj.site_id) : '')}
@@ -1023,6 +1022,10 @@ function openPlannedJobDetail(pj, onStart) {
 
   document.getElementById('pjd-x').addEventListener('click', closeModal);
   document.getElementById('pjd-close').addEventListener('click', closeModal);
+  document.querySelector('.project-link')?.addEventListener('click', e => {
+    closeModal();
+    openProjectPage(e.currentTarget.dataset.proj, 'clock');
+  });
   document.getElementById('pjd-menu').addEventListener('click', () => openPlannedJobMenu(pj, onStart));
   document.getElementById('pjd-start').addEventListener('click', () => {
     closeModal();
@@ -1391,51 +1394,25 @@ function openPlanJobModal(existing = null) {
 }
 
 /* ── Projects modal ──────────────────────────────────────────────── */
-function openProjectsModal() {
+/* ── Project create / edit form ──────────────────────────────────── */
+function openProjectFormModal(existing = null, onSaved = null) {
   const sym = state.settings.currency_symbol || '$';
-  const projects = state.projects || [];
-  const projCard = (p) => {
-    let d = {};
-    try { d = JSON.parse(p.defaults || '{}') || {}; } catch {}
-    const setKeys = Object.keys(d).filter(k => d[k] != null && d[k] !== '');
-    return `
-    <div class="card" style="display:flex;align-items:center;gap:6px;padding:8px 12px;margin-bottom:6px;${p.archived ? 'opacity:.65;' : ''}">
-      <div style="flex:1;min-width:0;">
-        <div style="font-weight:600;">${escHtml(p.name)}</div>
-        <div class="field-hint">${setKeys.length ? `Auto-fills: ${setKeys.join(', ')}` : 'No defaults set'}</div>
-      </div>
-      <button class="btn btn-ghost btn-sm proj-arch" data-id="${p.id}" data-archived="${p.archived ? 1 : 0}" title="${p.archived ? 'Unarchive' : 'Archive'}">
-        ${p.archived ? svg('return') : svg('stop')}
-      </button>
-      <button class="btn btn-ghost btn-sm proj-del" data-id="${p.id}" style="color:var(--red);">${svg('trash')}</button>
-    </div>`;
-  };
-  const active = projects.filter(p => !p.archived);
-  const archived = projects.filter(p => p.archived);
-  const projList = (active.length ? active.map(projCard).join('') : '<div class="empty-state" style="padding:12px;">No projects yet</div>')
-    + (archived.length ? `
-      <div class="subsection-label" style="margin-top:10px;">Archived</div>
-      ${archived.map(projCard).join('')}` : '');
-
   openModal(`
     <div class="modal-header">
-      <h3>${svg('org')} Projects</h3>
+      <h3>${svg('org')} ${existing ? 'Edit Project' : 'New Project'}</h3>
       <button class="btn btn-ghost btn-sm" id="prj-x">✕</button>
     </div>
     <div class="modal-body">
-      ${projList}
-      <div class="divider" style="margin:12px 0;"></div>
-      <div class="subsection-label">New Project</div>
-      <div class="form-group" style="margin-top:8px;">
+      <div class="form-group">
         <label class="form-label">Project Name <span class="req-star">*</span></label>
-        <input type="text" class="form-control" id="prj-name" placeholder="e.g. Store rollout Q3">
+        <input type="text" class="form-control" id="prj-name" value="${escHtml(existing?.name || '')}" placeholder="e.g. Store rollout Q3">
       </div>
-      <div class="field-hint" style="margin-bottom:8px;">Fill any fields below — they will auto-fill each new WO in this project.</div>
+      <div class="field-hint" style="margin-bottom:8px;">Fill any fields below — they auto-fill every new WO in this project.</div>
       ${buildJobFieldsHtml('prj', sym)}
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="prj-cancel">Close</button>
-      <button class="btn btn-primary" id="prj-save">${svg('check')} Create Project</button>
+      <button class="btn btn-ghost" id="prj-cancel">Cancel</button>
+      <button class="btn btn-primary" id="prj-save">${svg('check')} ${existing ? 'Save Changes' : 'Create Project'}</button>
     </div>`);
 
   document.getElementById('prj-x').addEventListener('click', closeModal);
@@ -1443,30 +1420,22 @@ function openProjectsModal() {
   const getRateType = wireJobFieldsPayType('prj');
   wireJobFieldCombos('prj');
 
-  document.querySelectorAll('.proj-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Delete this project? Entries keep their data, only the grouping is removed.')) return;
-      try {
-        await api.deleteProject(Number(btn.dataset.id));
-        state.projects = await api.getProjects();
-        closeModal();
-        openProjectsModal();
-      } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
-    });
-  });
-
-  document.querySelectorAll('.proj-arch').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const wasArchived = btn.dataset.archived === '1';
-      try {
-        await api.updateProject(Number(btn.dataset.id), { archived: !wasArchived });
-        state.projects = await api.getProjects();
-        showToast(wasArchived ? 'Project unarchived' : 'Project archived', 'success');
-        closeModal();
-        openProjectsModal();
-      } catch (err) { showToast(err.message || 'Update failed', 'error'); }
-    });
-  });
+  if (existing) {
+    let d = {};
+    try { d = JSON.parse(existing.defaults || '{}') || {}; } catch { d = {}; }
+    const g = id => document.getElementById(`prj-${id}`);
+    if (d.wo_title)        g('title').value = d.wo_title;
+    if (d.organization_id) { g('org').value = String(d.organization_id); comboSync('prj-org', orgComboOpts()); }
+    if (d.client_id)       { g('client').value = String(d.client_id); comboSync('prj-client', cliComboOpts()); }
+    if (d.assignment_id)   g('assign').value = d.assignment_id;
+    if (d.site_id)         g('site').value = d.site_id;
+    if (d.address)         g('addr').value = d.address;
+    if (d.rate_type)       document.querySelector(`#prj-paytype .toggle-btn[data-type="${d.rate_type === 'none' ? 'flat' : d.rate_type}"]`)?.click();
+    if (d.pay_rate_id)     g('rate').value = String(d.pay_rate_id);
+    if (d.flat_amount != null && d.flat_amount !== '') g('flat').value = d.flat_amount;
+    if (d.travel_reimb != null && d.travel_reimb !== '') g('travel').value = d.travel_reimb;
+    fillJobFieldExtras('prj', d);
+  }
 
   document.getElementById('prj-save').addEventListener('click', async () => {
     const name = document.getElementById('prj-name').value.trim();
@@ -1477,11 +1446,143 @@ function openProjectsModal() {
       if (defaults[k] == null || defaults[k] === '' || (k === 'rate_type' && defaults[k] === 'hourly' && !defaults.pay_rate_id)) delete defaults[k];
     });
     try {
-      await api.createProject({ name, defaults });
+      const saved = existing
+        ? await api.updateProject(existing.id, { name, defaults })
+        : await api.createProject({ name, defaults });
+      state.projects = await api.getProjects().catch(() => state.projects);
       closeModal();
-      showToast('Project created', 'success');
-      renderIdleClockPage();
+      showToast(existing ? 'Project updated' : 'Project created', 'success');
+      if (onSaved) onSaved(saved);
+      else renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+  });
+}
+
+/* ── Project page: overview + its work orders ────────────────────── */
+function openProjectPage(projectId, backTo = 'journal') {
+  state.projectId = Number(projectId);
+  state.projectBackTo = backTo;
+  state.projectQuery = '';
+  navigateTo('project');
+}
+
+async function renderProjectPage() {
+  const page = document.getElementById('page');
+  try {
+    const [projects, entries] = await Promise.all([api.getProjects(), api.getEntries()]);
+    state.projects = projects;
+    const project = projects.find(p => p.id === state.projectId);
+    if (!project) { page.innerHTML = '<div class="empty-state">Project not found</div>'; return; }
+
+    const mine = entries.filter(e => e.project_id === project.id);
+    const done = mine.filter(e => e.clock_out);
+    const sym  = state.settings.currency_symbol || '$';
+    const hrs  = done.reduce((s, e) => s + getNetSeconds(e) / 3600, 0);
+    const exp  = done.reduce((s, e) => s + calcTotalExpected(e), 0);
+    const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
+
+    page.innerHTML = `
+      <div class="proj-head">
+        <button class="btn btn-ghost btn-sm" id="pp-back">${svg('chevL')} Back</button>
+        <div class="proj-head-title">${escHtml(project.name)}${project.archived ? ' <span class="chip-archived">ARCHIVED</span>' : ''}</div>
+        <button class="btn btn-ghost btn-sm" id="pp-menu" title="Project actions">⋯</button>
+      </div>
+      <div class="stats-grid" style="padding:0 16px;">
+        <div class="stat-card"><div class="stat-label">Work Orders</div><div class="stat-value">${mine.length}</div></div>
+        <div class="stat-card"><div class="stat-label">Hours</div><div class="stat-value">${hrs.toFixed(2)}</div></div>
+        <div class="stat-card"><div class="stat-label">Expected</div><div class="stat-value">${sym}${exp.toFixed(2)}</div></div>
+        <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value">${done.filter(e => e.status === 'completed').length}</div></div>
+      </div>
+      <div style="padding:10px 16px 0;">
+        <input type="text" class="form-control" id="pp-search" placeholder="Search: title, assignment, site, date..." autocomplete="off">
+      </div>
+      <div id="pp-list"></div>`;
+
+    document.getElementById('pp-back').addEventListener('click', () => navigateTo(state.projectBackTo || 'journal'));
+    document.getElementById('pp-menu').addEventListener('click', () => openProjectMenu(project));
+
+    const listEl = document.getElementById('pp-list');
+    const renderList = () => {
+      const q = (state.projectQuery || '').trim();
+      const rows = mine
+        .filter(e => matchesEntry(e, q))
+        .sort((a, b) => new Date(b.clock_in) - new Date(a.clock_in));
+      listEl.innerHTML = rows.length
+        ? `${q ? `<div class="field-hint" style="padding:8px 16px 0;">${rows.length} match${rows.length === 1 ? '' : 'es'}</div>` : ''}
+           <div style="padding:8px 16px 16px;">${rows.map(e => renderEntryCard(e, false, revisitedIds, q)).join('')}</div>`
+        : `<div class="empty-state">${q ? 'No matches' : 'No work orders in this project yet'}</div>`;
+      listEl.querySelectorAll('.entry-card').forEach(card => {
+        card.addEventListener('click', e => {
+          if (e.target.closest('button') || e.target.closest('a')) return;
+          const en = mine.find(x => x.id === parseInt(card.dataset.id));
+          if (en) openEntryDetail(en);
+        });
+      });
+      listEl.querySelectorAll('.rev-badge[data-rev-of]').forEach(badge => {
+        badge.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const orig = entries.find(x => x.id === parseInt(badge.dataset.revOf));
+          if (orig) openEntryDetail(orig);
+        });
+      });
+      listEl.querySelectorAll('.rev-badge[data-need-rev]').forEach(badge => {
+        badge.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const en = entries.find(x => x.id === parseInt(badge.dataset.needRev));
+          if (en) openRevisitModal(en);
+        });
+      });
+    };
+    renderList();
+    document.getElementById('pp-search').addEventListener('input', e => {
+      state.projectQuery = e.target.value;
+      renderList();
+    });
+  } catch (err) {
+    page.innerHTML = '<div class="empty-state">Error loading project</div>';
+  }
+}
+
+function openProjectMenu(project) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('org')} ${escHtml(project.name)}</h3>
+      <button class="btn btn-ghost btn-sm" id="pm2-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <button class="btn btn-secondary btn-full" id="pm2-edit" style="margin-bottom:8px;">${svg('edit')} Edit Project & Defaults</button>
+      <button class="btn btn-ghost btn-full" id="pm2-arch" style="margin-bottom:8px;">
+        ${project.archived ? `${svg('return')} Unarchive Project` : `${svg('stop')} Archive Project`}
+      </button>
+      <button class="btn btn-ghost btn-full" id="pm2-del" style="color:var(--red);">${svg('trash')} Delete Project</button>
+      <div class="field-hint" style="margin-top:10px;">Archiving hides the project from pickers; work orders keep their data either way.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="pm2-cancel">Cancel</button>
+    </div>`);
+
+  document.getElementById('pm2-x').addEventListener('click', closeModal);
+  document.getElementById('pm2-cancel').addEventListener('click', closeModal);
+  document.getElementById('pm2-edit').addEventListener('click', () => {
+    closeModal();
+    openProjectFormModal(project, () => renderProjectPage());
+  });
+  document.getElementById('pm2-arch').addEventListener('click', async () => {
+    try {
+      await api.updateProject(project.id, { archived: !project.archived });
+      showToast(project.archived ? 'Project unarchived' : 'Project archived', 'success');
+      closeModal();
+      renderProjectPage();
+    } catch (err) { showToast(err.message || 'Update failed', 'error'); }
+  });
+  document.getElementById('pm2-del').addEventListener('click', async () => {
+    if (!confirm('Delete this project? Work orders keep their data, only the grouping is removed.')) return;
+    try {
+      await api.deleteProject(project.id);
+      closeModal();
+      showToast('Project deleted', 'success');
+      navigateTo(state.projectBackTo || 'journal');
+    } catch (err) { showToast(err.message || 'Delete failed', 'error'); }
   });
 }
 
@@ -2671,7 +2772,7 @@ function buildCombo(id, placeholder = 'Type to search...') {
     <div class="combo-list hidden" id="${id}-list"></div>
   </div>`;
 }
-function wireCombo(id, options) {
+function wireCombo(id, options, opts = {}) {
   const search = document.getElementById(`${id}-search`);
   const hidden = document.getElementById(id);
   const list = document.getElementById(`${id}-list`);
@@ -2682,7 +2783,8 @@ function wireCombo(id, options) {
     list.innerHTML = (ql ? '' : `<div class="combo-item" data-v="">— None —</div>`) +
       (items.length
         ? items.map(o => `<div class="combo-item" data-v="${escHtml(o.value)}">${escHtml(o.label)}</div>`).join('')
-        : '<div class="combo-empty">No matches</div>');
+        : '<div class="combo-empty">No matches</div>') +
+      (opts.createLabel ? `<div class="combo-item combo-create" data-v="__create__">${escHtml(opts.createLabel)}</div>` : '');
   };
   search.addEventListener('focus', () => { render(search.value); list.classList.remove('hidden'); });
   search.addEventListener('input', () => {
@@ -2696,6 +2798,12 @@ function wireCombo(id, options) {
     const item = e.target.closest('.combo-item');
     if (!item) return;
     e.preventDefault();
+    if (item.dataset.v === '__create__') {
+      list.classList.add('hidden');
+      search.blur();
+      opts.onCreate?.();
+      return;
+    }
     hidden.value = item.dataset.v || '';
     search.value = item.dataset.v ? item.textContent : '';
     list.classList.add('hidden');
@@ -4512,7 +4620,7 @@ async function openEntryDetail(entry) {
     </div>
     <div class="modal-body">
       <div class="review-row"><span>Date:</span><span>${fmtDateFull(entry.clock_in)}</span></div>
-      ${entry.project_name ? `<div class="review-row"><span>Project:</span><span>${escHtml(entry.project_name)}</span></div>` : ''}
+      ${entry.project_name ? `<div class="review-row"><span>Project:</span><button class="project-link" data-proj="${entry.project_id}">${escHtml(entry.project_name)} ${svg('chevR')}</button></div>` : ''}
       <div class="review-row"><span>Company:</span><span>${escHtml(entry.org_name||'—')}</span></div>
       <div class="review-row"><span>Customer:</span><span>${escHtml(entry.client_name||'—')}</span></div>
       <div class="review-row"><span>Assignment ID:</span><span>${escHtml(entry.assignment_id||'—')}</span></div>
@@ -4562,6 +4670,10 @@ async function openEntryDetail(entry) {
     </div>`);
 
   document.getElementById('det-close-btn').addEventListener('click', closeModal);
+  document.querySelector('#modal-body .project-link')?.addEventListener('click', e => {
+    closeModal();
+    openProjectPage(e.currentTarget.dataset.proj, state.page === 'project' ? 'journal' : state.page);
+  });
   document.getElementById('det-copy-btn').addEventListener('click', () => {
     copyToClipboard(buildTextReport(entry));
   });
