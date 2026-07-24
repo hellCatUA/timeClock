@@ -471,6 +471,31 @@ textarea.form-control { resize: vertical; min-height: 80px; line-height: 1.5; }
 .day-group { border-left: 2px solid var(--border); margin: 8px 0 8px 4px; padding-left: 8px; }
 .day-group-header { font-size: 12px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 4px; }
 
+/* ===== Project page ===== */
+.proj-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 6px;
+}
+.proj-head-title {
+  flex: 1; min-width: 0;
+  font-size: 17px; font-weight: 800; text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chip-archived {
+  font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--bg3); color: var(--text3); vertical-align: middle;
+}
+.project-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: inherit; font-size: 14px; font-weight: 600;
+  color: var(--blue); text-decoration: underline; text-underline-offset: 3px;
+  min-height: 32px; text-align: right;
+}
+.project-link svg { width: 13px; height: 13px; }
+.combo-item.combo-create { color: var(--green); font-weight: 600; border-top: 1px solid var(--border); }
+
 /* ===== Read-only blocks, dispatch, scope ===== */
 .ro-block { padding: 9px 0; border-bottom: 1px solid var(--bg3); }
 .ro-block:last-child { border-bottom: none; }
