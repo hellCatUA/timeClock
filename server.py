@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 PORT = int(os.environ.get("PORT", 3000))
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "timeclock.db"))
@@ -486,13 +486,49 @@ def _caldav_collection_url(s):
     cal = (s.get("caldav_calendar") or "personal").strip().strip("/")
     return f"{_caldav_base(s)}/remote.php/dav/calendars/{quote(s['caldav_user'])}/{quote(cal)}/"
 
-def _caldav_request(s, method, url, body=None, headers=None, timeout=15):
+def _caldav_request(s, method, url, body=None, headers=None, timeout=15, _hops=0):
     req = urllib.request.Request(url, data=body.encode("utf-8") if body else None, method=method)
     token = base64.b64encode(f"{s['caldav_user']}:{s['caldav_password']}".encode()).decode()
     req.add_header("Authorization", "Basic " + token)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
-    return urllib.request.urlopen(req, timeout=timeout)
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # urllib only redirects GET/HEAD/POST; a proxy that sends http->https
+        # would otherwise fail every PUT and DELETE.
+        if exc.code in (301, 302, 307, 308) and _hops < 3:
+            target = exc.headers.get("Location")
+            if target:
+                return _caldav_request(s, method, urljoin(url, target), body, headers, timeout, _hops + 1)
+        raise
+
+
+def caldav_write_error(exc, s):
+    """A CalDAV failure, in words that point at the fix."""
+    if isinstance(exc, urllib.error.HTTPError):
+        cal  = (s.get("caldav_calendar") or "personal").strip()
+        user = s.get("caldav_user") or "this user"
+        hint = {
+            401: "the app password was rejected",
+            403: f"'{user}' is not allowed to write to calendar '{cal}'",
+            404: f"calendar '{cal}' does not exist for '{user}' — check the name in the Calendar field",
+            405: "the server refused this method — a reverse proxy in front of Nextcloud is probably blocking PUT",
+            409: f"calendar '{cal}' is missing, so there is nowhere to store the event",
+            415: "Nextcloud did not accept the event format",
+            423: "the calendar is locked",
+            507: "the Nextcloud account is out of space",
+        }.get(exc.code)
+        msg = f"HTTP {exc.code} {exc.reason}"
+        if hint:
+            return f"{msg} — {hint}"
+        try:
+            body = re.sub(r"<[^>]+>", " ", exc.read().decode("utf-8", "replace"))
+            body = re.sub(r"\s+", " ", body).strip()[:160]
+        except Exception:
+            body = ""
+        return f"{msg}{f' ({body})' if body else ''}"
+    return caldav_url_error(exc, _caldav_base(s))
 
 def _ics_escape(text):
     return (str(text or "")
@@ -665,8 +701,9 @@ def caldav_push(job, settings=None):
         _caldav_request(s, "PUT", url, ics, {"Content-Type": "text/calendar; charset=utf-8"})
         return uid, None
     except Exception as exc:
-        print(f"CalDAV push failed for job {job.get('id')}: {exc}", file=sys.stderr)
-        return uid, str(exc)
+        err = caldav_write_error(exc, s)
+        print(f"CalDAV push failed for job {job.get('id')}: {err}", file=sys.stderr)
+        return uid, err
 
 def caldav_delete(uid, settings=None):
     s = settings or caldav_settings()
@@ -722,8 +759,9 @@ def caldav_push_entry(entry, settings=None):
                         {"Content-Type": "text/calendar; charset=utf-8"})
         return uid, None
     except Exception as exc:
-        print(f"CalDAV push failed for entry {entry.get('id')}: {exc}", file=sys.stderr)
-        return uid, str(exc)
+        err = caldav_write_error(exc, s)
+        print(f"CalDAV push failed for entry {entry.get('id')}: {err}", file=sys.stderr)
+        return uid, err
 
 def caldav_entry_sync_async(entry_id):
     """Push a finished work order in the background and store the resulting UID."""
@@ -747,6 +785,27 @@ def caldav_entry_sync_async(entry_id):
     threading.Thread(target=work, daemon=True).start()
 
 
+def caldav_probe_calendar(s):
+    """Write a throwaway event and remove it. Returns an error message, or None.
+
+    Listing calendars proves the credentials work; it does not prove the target
+    calendar exists or accepts writes, which is what actually matters here.
+    """
+    uid = f"qt-selftest-{uuid.uuid4().hex[:12]}"
+    ics = _wrap_vevent(uid, ["DTSTART;VALUE=DATE:19700101", "DTEND;VALUE=DATE:19700102"],
+                       "QuickTec connection test", 0)
+    url = _caldav_collection_url(s) + uid + ".ics"
+    try:
+        _caldav_request(s, "PUT", url, ics, {"Content-Type": "text/calendar; charset=utf-8"})
+    except Exception as exc:
+        return caldav_write_error(exc, s)
+    try:
+        _caldav_request(s, "DELETE", url)
+    except Exception as exc:
+        print(f"CalDAV self-test left {uid} behind: {exc}", file=sys.stderr)
+    return None
+
+
 def caldav_backfill(force=False, settings=None):
     """Push planned jobs and finished work orders to the calendar.
 
@@ -756,7 +815,7 @@ def caldav_backfill(force=False, settings=None):
     """
     s = settings or caldav_settings()
     if not caldav_ready(s):
-        return {"synced": 0, "failed": [], "total": 0}
+        return {"synced": 0, "failed": [], "errors": [], "total": 0}
 
     with get_db() as db:
         sql = PLANNED_SELECT + " WHERE pj.planned_date IS NOT NULL AND pj.planned_date != ''"
@@ -771,7 +830,27 @@ def caldav_backfill(force=False, settings=None):
                 sql += " AND (e.calendar_uid IS NULL OR e.calendar_uid = '')"
             entries = rows_to_list(db.execute(sql + " ORDER BY e.clock_in").fetchall())
 
-    synced, failed = 0, []
+    total = len(jobs) + len(entries)
+    failed, errors = [], {}
+
+    def note(err, title):
+        failed.append(title)
+        errors.setdefault(err, []).append(title)
+
+    def report(synced):
+        return {"synced": synced, "failed": failed, "total": total,
+                "errors": [{"message": m, "count": len(t), "examples": t[:3]}
+                           for m, t in errors.items()]}
+
+    if total and (err := caldav_probe_calendar(s)):
+        # One clear reason beats the same failure repeated for every job.
+        for rec in jobs:
+            note(err, rec.get("wo_title") or f"planned job {rec['id']}")
+        for rec in entries:
+            note(err, rec.get("wo_title") or f"work order {rec['id']}")
+        return report(0)
+
+    synced = 0
     for job in jobs:
         uid, err = caldav_push(job, s)
         if uid and not err:
@@ -780,7 +859,7 @@ def caldav_backfill(force=False, settings=None):
                            (uid, job["id"]))
             synced += 1
         elif err:
-            failed.append(job.get("wo_title") or f"planned job {job['id']}")
+            note(err, job.get("wo_title") or f"planned job {job['id']}")
 
     for entry in entries:
         uid, err = caldav_push_entry(entry, s)
@@ -790,9 +869,9 @@ def caldav_backfill(force=False, settings=None):
                            (uid, entry["id"]))
             synced += 1
         elif err:
-            failed.append(entry.get("wo_title") or f"work order {entry['id']}")
+            note(err, entry.get("wo_title") or f"work order {entry['id']}")
 
-    return {"synced": synced, "failed": failed, "total": len(jobs) + len(entries)}
+    return report(synced)
 
 
 def caldav_backfill_async():
@@ -2306,12 +2385,16 @@ def h_caldav_test(req, _groups):
         return 200, {"ok": False, "error": f"Unexpected response from the server: {exc}"}
 
     chosen = (s.get("caldav_calendar") or "personal").strip()
+    exists = any(c["slug"] == chosen for c in calendars)
+    # Reading the calendar list is not the thing that has been failing — writing is.
+    write_error = caldav_probe_calendar(s) if exists else None
     return 200, {
-        "ok": True,
+        "ok": write_error is None,
         "url": base,
         "calendars": calendars,
-        "selected_exists": any(c["slug"] == chosen for c in calendars),
+        "selected_exists": exists,
         "selected": chosen,
+        "error": write_error,
     }
 
 
