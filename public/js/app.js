@@ -51,6 +51,78 @@ function fmtDuration(totalSec) {
   const s = totalSec % 60;
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
+/* ── Estimated duration ──────────────────────────────────────────
+   Set on a project (as its default), on a planned job, or on the job
+   being started — each level overrides the one above it. */
+const EST_PRESETS = [[30,'30m'], [60,'1h'], [120,'2h'], [240,'4h'], [480,'8h']];
+
+function fmtMins(total) {
+  total = Math.round(Number(total) || 0);
+  if (total <= 0) return '';
+  const h = Math.floor(total / 60), m = total % 60;
+  return h && m ? `${h}h ${m}m` : h ? `${h}h` : `${m}m`;
+}
+
+function durationFieldHtml(id, minutes = null, label = 'Estimated Duration') {
+  const m = Number(minutes) || 0;
+  return `
+    <div class="form-group">
+      <label class="form-label">${label} <span class="opt-label">optional</span></label>
+      <div class="est-chips" id="${id}-chips">
+        ${EST_PRESETS.map(([v,l]) =>
+          `<button type="button" class="est-chip${m===v?' on':''}" data-m="${v}">${l}</button>`).join('')}
+      </div>
+      <div class="est-custom">
+        <input type="number" class="form-control" id="${id}-h" min="0" max="99" inputmode="numeric"
+               placeholder="0" value="${m ? (Math.floor(m/60) || '') : ''}"><span class="est-unit">h</span>
+        <input type="number" class="form-control" id="${id}-m" min="0" max="59" step="5" inputmode="numeric"
+               placeholder="00" value="${m ? (m % 60 || '') : ''}"><span class="est-unit">m</span>
+      </div>
+    </div>`;
+}
+
+function readDurationField(id) {
+  const h = parseInt(document.getElementById(`${id}-h`)?.value || '0', 10) || 0;
+  const m = parseInt(document.getElementById(`${id}-m`)?.value || '0', 10) || 0;
+  const total = h * 60 + m;
+  return total > 0 ? total : null;
+}
+
+function setDurationField(id, minutes) {
+  const m = Number(minutes) || 0;
+  const hEl = document.getElementById(`${id}-h`), mEl = document.getElementById(`${id}-m`);
+  if (!hEl || !mEl) return;
+  hEl.value = m ? (Math.floor(m/60) || '') : '';
+  mEl.value = m ? (m % 60 || '') : '';
+  document.querySelectorAll(`#${id}-chips .est-chip`)
+    .forEach(b => b.classList.toggle('on', Number(b.dataset.m) === m));
+}
+
+function wireDurationField(id) {
+  const sync = () => {
+    const total = readDurationField(id);
+    document.querySelectorAll(`#${id}-chips .est-chip`)
+      .forEach(b => b.classList.toggle('on', Number(b.dataset.m) === total));
+  };
+  document.getElementById(`${id}-chips`)?.addEventListener('click', e => {
+    const b = e.target.closest('.est-chip');
+    if (!b) return;
+    const v = Number(b.dataset.m);
+    setDurationField(id, readDurationField(id) === v ? 0 : v);   // tapping the active chip clears it
+  });
+  ['h','m'].forEach(k => document.getElementById(`${id}-${k}`)?.addEventListener('input', sync));
+}
+
+/* Worked minutes as they will be counted against the estimate. */
+function workedMinutes(entry) {
+  if (!entry?.clock_in || !entry?.clock_out) return null;
+  const gross = (new Date(entry.clock_out) - new Date(entry.clock_in)) / 1000;
+  const net = state.settings.paid_breaks === '1'
+    ? gross
+    : gross - (entry.total_break_seconds || 0);
+  return Math.max(0, Math.round(net / 60));
+}
+
 function fmtDecimalHours(totalSec) {
   return (totalSec / 3600).toFixed(2) + ' hrs';
 }
@@ -598,6 +670,7 @@ function startElapsedTimer(entry) {
   // always kill the previous interval or stale snapshots fight over the display
   clearInterval(state.elapsedInterval);
   const isFlat = entry.rate_type === 'flat';
+  const est = Number(entry.est_minutes) || 0;
   const startMs = new Date(entry.clock_in).getTime();
   const update = () => {
     const onBreak = !!entry.active_break;
@@ -627,6 +700,15 @@ function startElapsedTimer(entry) {
 
     const ed = document.getElementById('elapsed-display');
     if (ed) ed.textContent = fmtDuration(netSec);
+
+    const ep = document.getElementById('est-progress');
+    if (ep && est) {
+      const left = Math.round(est - netSec / 60);
+      ep.textContent = left >= 0
+        ? `Est ${fmtMins(est)} · ${fmtMins(left) || 'under a minute'} left`
+        : `Est ${fmtMins(est)} · ${fmtMins(-left)} over`;
+      ep.classList.toggle('over', left < 0);
+    }
 
     if (!isFlat && entry.hourly_rate) {
       const earn = document.getElementById('earnings-display');
@@ -831,7 +913,7 @@ async function renderIdleClockPage() {
                   <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
                   ${pj.project_name ? `<div class="sched-project">${escHtml(pj.project_name)}</div>` : ''}
                   <div class="sched-time-row">
-                    <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
+                    <span class="sched-time">${pj.planned_time ? plannedTimeRange(pj) : (pj.est_minutes ? `~${fmtMins(pj.est_minutes)}` : '—')}</span>
                     ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
                   </div>
                   <div class="sched-meta-row">
@@ -901,11 +983,13 @@ async function renderIdleClockPage() {
             <input type="number" class="form-control" id="travel-reimb-input" min="0" step="0.01" placeholder="0.00">
           </div>
         </div>
+        ${durationFieldHtml('ci-est')}
         <div id="clockin-time-selector"></div>
         </div>
       </div>
     </div>`;
 
+  wireDurationField('ci-est');
   wireCombo('company-select', orgOptions);
   wireCombo('customer-select', cliOptions);
   wireCombo('project-select', projComboOpts(), {
@@ -957,6 +1041,7 @@ async function renderIdleClockPage() {
     if (d.pay_rate_id)       document.getElementById('rate-select').value = String(d.pay_rate_id);
     if (d.flat_amount != null && d.flat_amount !== '') document.getElementById('flat-amount-input').value = d.flat_amount;
     if (d.travel_reimb != null && d.travel_reimb !== '') document.getElementById('travel-reimb-input').value = d.travel_reimb;
+    if (d.est_minutes)       setDurationField('ci-est', d.est_minutes);
     if (d.site_id)           prefillExtras.site_id = d.site_id;
     if (d.assignment_id)     prefillExtras.assignment_id = d.assignment_id;
     if (d.scope_of_work)     prefillExtras.scope_of_work = d.scope_of_work;
@@ -979,6 +1064,7 @@ async function renderIdleClockPage() {
     if (pj.pay_rate_id)     document.getElementById('rate-select').value = String(pj.pay_rate_id);
     if (pj.flat_amount != null) document.getElementById('flat-amount-input').value = pj.flat_amount;
     if (pj.travel_reimb != null) document.getElementById('travel-reimb-input').value = pj.travel_reimb;
+    if (pj.est_minutes) setDurationField('ci-est', pj.est_minutes);
     ['assignment_id','site_id','revisit_of','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','scope_of_work','dispatch_contacts'].forEach(k => {
       if (pj[k]) prefillExtras[k] = pj[k];
     });
@@ -1017,6 +1103,7 @@ async function renderIdleClockPage() {
     if (rv.pay_rate_id)     document.getElementById('rate-select').value = String(rv.pay_rate_id);
     if (rv.flat_amount != null && rv.flat_amount !== '') document.getElementById('flat-amount-input').value = rv.flat_amount;
     if (rv.travel_reimb != null && rv.travel_reimb !== '') document.getElementById('travel-reimb-input').value = rv.travel_reimb;
+    if (rv.est_minutes) setDurationField('ci-est', rv.est_minutes);
     ['assignment_id','site_id','ticket_num','inc_num','mod_name','noc_name','pm_pc_name','revisit_of','scope_of_work','dispatch_contacts'].forEach(k => {
       if (rv[k]) prefillExtras[k] = rv[k];
     });
@@ -1089,6 +1176,7 @@ async function renderIdleClockPage() {
         longitude:       geoCoords?.lng || null,
         wo_title:        woTitle || null,
         travel_reimb:    travel,
+        est_minutes:     readDurationField('ci-est'),
         assignment_id:   state.pendingTripAssignment || prefillExtras.assignment_id || null,
         site_id:         prefillExtras.site_id || null,
         ticket_num:      prefillExtras.ticket_num || null,
@@ -1131,6 +1219,19 @@ function fmtPlannedTime(t) {
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
+/* '9:30 AM – 11:30 AM' when the job carries an estimate, otherwise just the start. */
+function plannedTimeRange(pj) {
+  if (!pj.planned_time) return '';
+  const start = fmtPlannedTime(pj.planned_time);
+  const est = Number(pj.est_minutes) || 0;
+  if (!est) return start;
+  const [h, m] = pj.planned_time.split(':').map(Number);
+  const end = new Date();
+  end.setHours(h, m || 0, 0, 0);
+  end.setMinutes(end.getMinutes() + est);
+  return `${start} – ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 function plannedDayLabel(iso) {
   const today = new Date().toLocaleDateString('en-CA');
   const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA');
@@ -1151,7 +1252,7 @@ function isPlannedSoon(pj) {
 /* ── Planned job: read-only details ──────────────────────────────── */
 function openPlannedJobDetail(pj, onStart) {
   const sym = state.settings.currency_symbol || '$';
-  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + fmtPlannedTime(pj.planned_time) : ''}`;
+  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + plannedTimeRange(pj) : ''}`;
   const rate = pj.rate_type === 'flat'
     ? (pj.flat_amount ? `${sym}${parseFloat(pj.flat_amount).toFixed(2)} flat` : 'Non-Billable')
     : pj.rate_type === 'none'
@@ -1180,6 +1281,7 @@ function openPlannedJobDetail(pj, onStart) {
       ${row('Site ID', pj.site_id ? escHtml(pj.site_id) : '')}
       ${row('Assignment ID', pj.assignment_id ? escHtml(pj.assignment_id) : '')}
       ${pj.address ? `<div class="review-row"><span>Address:</span><a class="addr-link" href="https://maps.google.com/?q=${encodeURIComponent(pj.address)}" target="_blank" rel="noopener">${svg('location')} ${escHtml(pj.address)}</a></div>` : ''}
+      ${row('Estimated', pj.est_minutes ? fmtMins(pj.est_minutes) : '')}
       ${row('Pay', rate)}
       ${pj.travel_reimb ? row('Travel Reimb', `${sym}${parseFloat(pj.travel_reimb).toFixed(2)}`) : ''}
       ${row('Ticket #', pj.ticket_num ? escHtml(pj.ticket_num) : '')}
@@ -1432,6 +1534,7 @@ function buildJobFieldsHtml(prefix, sym) {
       <div class="money-wrap"><span class="money-sym">${sym}</span>
         <input type="number" class="form-control" id="${prefix}-travel" min="0" step="0.01"></div>
     </div>
+    ${durationFieldHtml(`${prefix}-est`)}
     <div class="form-group">
       <label class="form-label">Scope of Work <span class="opt-label">optional</span></label>
       <textarea class="form-control" id="${prefix}-scope" rows="4" placeholder="What has to be done on site..."></textarea>
@@ -1447,6 +1550,7 @@ function wireJobFieldCombos(prefix) {
   wireCombo(`${prefix}-org`, orgComboOpts());
   wireCombo(`${prefix}-client`, cliComboOpts());
   wireDispatchEditor(`${prefix}-dispatch`);
+  wireDurationField(`${prefix}-est`);
 }
 // Fills the shared job-field block's scope + dispatch from a saved record
 function fillJobFieldExtras(prefix, src) {
@@ -1487,6 +1591,7 @@ function applyProjectDefaultsToJobFields(prefix, p) {
   if (d.pay_rate_id)     g('rate').value = String(d.pay_rate_id);
   if (d.flat_amount != null && d.flat_amount !== '') g('flat').value = d.flat_amount;
   if (d.travel_reimb != null && d.travel_reimb !== '') g('travel').value = d.travel_reimb;
+  if (d.est_minutes) setDurationField(`${prefix}-est`, d.est_minutes);
   fillJobFieldExtras(prefix, d);
 }
 
@@ -1504,6 +1609,7 @@ function readJobFields(prefix, getRateType) {
     pay_rate_id:     (rt === 'hourly' && g('rate').value) ? Number(g('rate').value) : null,
     flat_amount:     rt === 'flat' ? (parseFloat(g('flat').value) || null) : null,
     travel_reimb:    parseFloat(g('travel').value) || null,
+    est_minutes:     readDurationField(`${prefix}-est`),
     scope_of_work:   g('scope')?.value.trim() || null,
     dispatch_contacts: readDispatchEditor(`${prefix}-dispatch`),
   };
@@ -1566,6 +1672,7 @@ function openPlanJobModal(existing = null) {
     if (existing.pay_rate_id) g('rate').value = String(existing.pay_rate_id);
     if (existing.flat_amount != null) g('flat').value = existing.flat_amount;
     if (existing.travel_reimb != null) g('travel').value = existing.travel_reimb;
+    if (existing.est_minutes) setDurationField('pj-est', existing.est_minutes);
     fillJobFieldExtras('pj', existing);
   }
 
@@ -1673,6 +1780,13 @@ async function renderProjectPage() {
     const exp  = done.reduce((s, e) => s + calcTotalExpected(e), 0);
     const revisitedIds = new Set(entries.filter(e => e.revisit_of).map(e => e.revisit_of));
 
+    // What the project says a job takes, against what it has actually taken
+    let projDefaults = {};
+    try { projDefaults = JSON.parse(project.defaults || '{}') || {}; } catch { projDefaults = {}; }
+    const estDefault = Number(projDefaults.est_minutes) || 0;
+    const timed      = done.map(workedMinutes).filter(m => m != null && m > 0);
+    const avgActual  = timed.length ? Math.round(timed.reduce((a, b) => a + b, 0) / timed.length / 5) * 5 : 0;
+
     page.innerHTML = `
       <div class="proj-head">
         <button class="btn btn-ghost btn-sm" id="pp-back">${svg('chevL')} Back</button>
@@ -1685,6 +1799,18 @@ async function renderProjectPage() {
         <div class="stat-card"><div class="stat-label">Expected</div><div class="stat-value">${sym}${exp.toFixed(2)}</div></div>
         <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value">${done.filter(e => e.status === 'completed').length}</div></div>
       </div>
+      ${(estDefault || avgActual) ? `
+      <div style="padding:10px 16px 0;">
+        <div class="card est-summary">
+          <div class="est-sum-row"><span>Estimate</span><span>${estDefault ? fmtMins(estDefault) : '—'}</span></div>
+          <div class="est-sum-row"><span>Actual average</span><span>${avgActual
+            ? `${fmtMins(avgActual)} <span class="est-sum-n">over ${timed.length} job${timed.length === 1 ? '' : 's'}</span>`
+            : '—'}</span></div>
+          ${avgActual && avgActual !== estDefault
+            ? `<button class="btn btn-ghost btn-sm" id="pp-use-actual" style="margin-top:8px;">${svg('check')} Use ${fmtMins(avgActual)} as the estimate</button>`
+            : ''}
+        </div>
+      </div>` : ''}
       <div style="padding:10px 16px 0;">
         <input type="text" class="form-control" id="pp-search" placeholder="Search: title, assignment, site, date..." autocomplete="off">
       </div>
@@ -1692,6 +1818,15 @@ async function renderProjectPage() {
 
     document.getElementById('pp-back').addEventListener('click', () => navigateTo(state.projectBackTo || 'journal'));
     document.getElementById('pp-menu').addEventListener('click', () => openProjectMenu(project));
+    document.getElementById('pp-use-actual')?.addEventListener('click', async () => {
+      try {
+        await api.updateProject(project.id, { name: project.name,
+                                              defaults: { ...projDefaults, est_minutes: avgActual } });
+        await reloadData();
+        showToast(`Estimate set to ${fmtMins(avgActual)}`, 'success');
+        renderProjectPage();
+      } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+    });
 
     const listEl = document.getElementById('pp-list');
     const renderList = () => {
@@ -2290,6 +2425,7 @@ function renderActiveClockPage() {
         <span class="dot"></span>${onBreak ? 'ON BREAK' : 'WORKING'}
       </div>
       <div class="elapsed-time" id="elapsed-display">00:00:00</div>
+      ${entry.est_minutes ? '<div class="est-progress" id="est-progress"></div>' : ''}
       ${entry.rate_type === 'none'
         ? `<div class="earning-rate" style="margin-top:4px;">Non-Billable Visit</div>`
         : isFlat && entry.flat_amount
@@ -2346,6 +2482,7 @@ function renderActiveClockPage() {
         ${roRow('Assignment ID', entry.assignment_id, { required: true })}
         ${roRow('Ticket #', entry.ticket_num)}
         ${roRow('INC #', entry.inc_num)}
+        ${roRow('Estimated', entry.est_minutes ? fmtMins(entry.est_minutes) : '')}
       </div>
       <div id="ad-form" class="${assignEdit ? '' : 'hidden'}">
       <div class="form-group">
@@ -2386,6 +2523,7 @@ function renderActiveClockPage() {
         <label class="form-label">INC # <span class="opt-label">optional</span></label>
         <input type="text" class="form-control" id="jd-inc" value="${escHtml(entry.inc_num||'')}">
       </div>
+      ${durationFieldHtml('jd-est', entry.est_minutes)}
       <button class="btn btn-ghost btn-sm btn-full" id="save-assignment-btn" style="margin-top:4px;">${svg('check')} Save</button>
       </div>
     </div>
@@ -2682,6 +2820,7 @@ function renderActiveClockPage() {
       assignment_id:   newAssignId,
       ticket_num:      readMultiInputs('jd-tickets'),
       inc_num:         document.getElementById('jd-inc').value.trim() || null,
+      est_minutes:     readDurationField('jd-est'),
     });
     if (newAssignId && state.pendingTripId) {
       try {
@@ -2702,6 +2841,7 @@ function renderActiveClockPage() {
 
   wireMultiInputs('jd-tickets');
   wireMultiInputs('jd-mods');
+  wireDurationField('jd-est');
 
   // Optional picture-section toggles
   const wireSectionToggle = (toggleId, wrapId) => {
@@ -3178,6 +3318,7 @@ async function autoSaveActiveForm() {
   if (g('jd-assignment'))  data.assignment_id    = g('jd-assignment').value.trim()  || null;
   if (g('jd-tickets'))     data.ticket_num       = readMultiInputs('jd-tickets');
   if (g('jd-inc'))         data.inc_num          = g('jd-inc').value.trim()         || null;
+  if (g('jd-est-h'))       data.est_minutes      = readDurationField('jd-est');
   if (g('jd-mods'))        data.mod_name         = readMultiInputs('jd-mods');
   if (g('jd-noc'))         data.noc_name         = g('jd-noc').value.trim()         || null;
   if (g('jd-pmpc'))        data.pm_pc_name       = g('jd-pmpc').value.trim()        || null;
@@ -4834,6 +4975,17 @@ async function openEntryDetail(entry) {
       <div class="review-row"><span>Clock In:</span><span>${fmtTime(entry.clock_in)}</span></div>
       <div class="review-row"><span>Clock Out:</span><span>${fmtTime(entry.clock_out)}</span></div>
       <div class="review-row"><span>Net Time:</span><span>${fmtDecimalHours(netSec)}</span></div>
+      ${(() => {
+        const est = Number(entry.est_minutes) || 0;
+        if (!est) return '';
+        const actual = workedMinutes(entry);
+        if (actual == null) return `<div class="review-row"><span>Estimated:</span><span>${fmtMins(est)}</span></div>`;
+        const diff = actual - est;
+        const tone = diff > 0 ? 'var(--orange)' : diff < 0 ? 'var(--green)' : 'var(--text2)';
+        const delta = diff === 0 ? 'on the nose' : `${diff > 0 ? '+' : '−'}${fmtMins(Math.abs(diff))}`;
+        return `<div class="review-row"><span>Estimated:</span><span>${fmtMins(est)}
+                  <span style="color:${tone};font-size:12px;">(${delta})</span></span></div>`;
+      })()}
       <div class="review-row"><span>Pay Type:</span><span>${entry.rate_type === 'flat' ? 'Flat' : entry.rate_type === 'none' ? 'Non-Billable' : 'Hourly'}</span></div>
       ${entry.rate_type === 'hourly' || !entry.rate_type ? `<div class="review-row"><span>Rate:</span><span>${sym}${entry.hourly_rate||'—'}/hr</span></div>` : ''}
       <div class="review-row"><span>Labor:</span><span>${fmtMoney(labor)}</span></div>
@@ -4988,6 +5140,7 @@ async function openEntryEdit(entry) {
           <input type="datetime-local" class="form-control" id="ee-clock-out" value="${entry.clock_out?localISOString(new Date(entry.clock_out)):''}">
         </div>
       </div>
+      ${durationFieldHtml('ee-est', entry.est_minutes)}
       <div class="form-group">
         <label class="form-label">Address</label>
         <input type="text" class="form-control" id="ee-address" value="${escHtml(entry.address||'')}">
@@ -5125,6 +5278,7 @@ async function openEntryEdit(entry) {
   wireCombo('ee-company', orgComboOpts());
   wireCombo('ee-customer', cliComboOpts());
   wireCombo('ee-project', projComboOpts(entry.project_id));
+  wireDurationField('ee-est');
   document.getElementById('ee-company').value = entry.organization_id ? String(entry.organization_id) : '';
   comboSync('ee-company', orgComboOpts());
   document.getElementById('ee-customer').value = entry.client_id ? String(entry.client_id) : '';
@@ -5208,6 +5362,7 @@ async function openEntryEdit(entry) {
         no_return_track: (isRepl && eeNoReturn) ? 1 : 0,
         return_track:    (isRepl && !eeNoReturn) ? document.getElementById('ee-return-track').value.trim() || null : null,
         travel_reimb:    parseFloat(document.getElementById('ee-travel-reimb').value) || null,
+        est_minutes:     readDurationField('ee-est'),
         parking_tolls:   parkingOn ? (parseFloat(document.getElementById('ee-parking-amount').value) || null) : null,
         materials:       matsOn ? readMaterialsFromDOM() : null,
         release_code:    eeNoCode ? null : (document.getElementById('ee-release-code').value.trim() || null),

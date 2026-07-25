@@ -81,6 +81,7 @@ def init_db():
             flat_amount REAL,
             clock_in TEXT NOT NULL,
             clock_out TEXT,
+            est_minutes INTEGER,
             calendar_uid TEXT,
             calendar_seq INTEGER DEFAULT 0,
             address TEXT,
@@ -224,6 +225,7 @@ def init_db():
             notes TEXT,
             planned_date TEXT,
             planned_time TEXT,
+            est_minutes INTEGER,
             revisit_of INTEGER,
             scope_of_work TEXT,
             dispatch_contacts TEXT,
@@ -338,6 +340,8 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_sync_entries', '1')",
         "ALTER TABLE time_entries ADD COLUMN calendar_uid TEXT",
         "ALTER TABLE time_entries ADD COLUMN calendar_seq INTEGER DEFAULT 0",
+        "ALTER TABLE time_entries ADD COLUMN est_minutes INTEGER",
+        "ALTER TABLE planned_jobs ADD COLUMN est_minutes INTEGER",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -558,6 +562,14 @@ def _ics_utc(ts):
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+def _fmt_minutes(total):
+    total = int(total or 0)
+    if total <= 0:
+        return ""
+    h, m = divmod(total, 60)
+    return f"{h}h {m}m" if h and m else f"{h}h" if h else f"{m}m"
+
+
 def _identity_lines(rec):
     """The who/where fields that a planned job and a finished work order share."""
     parts = []
@@ -589,7 +601,10 @@ def _dispatch_lines(rec):
 
 
 def _job_description(job):
-    parts = _identity_lines(job) + _dispatch_lines(job)
+    parts = []
+    if job.get("est_minutes"):
+        parts.append(f"Estimated: {_fmt_minutes(job['est_minutes'])}")
+    parts += _identity_lines(job) + _dispatch_lines(job)
     if job.get("scope_of_work"):
         parts += ["", "Scope of Work:", job["scope_of_work"]]
     return "\n".join(parts)
@@ -602,7 +617,14 @@ def _entry_description(entry):
     ci, co = _ics_utc(entry.get("clock_in")), _ics_utc(entry.get("clock_out"))
     if ci and co and co > ci:
         total = int((co - ci).total_seconds())
-        parts.append(f"On site: {total // 3600}h {total % 3600 // 60}m")
+        line = f"On site: {_fmt_minutes(total // 60)}"
+        est = int(entry.get("est_minutes") or 0)
+        if est:
+            diff = total // 60 - est
+            sign = "+" if diff > 0 else "-"
+            line += (f" (estimated {_fmt_minutes(est)}"
+                     + (f", {sign}{_fmt_minutes(abs(diff))}" if diff else ", on the nose") + ")")
+        parts.append(line)
     brk = int(entry.get("total_break_seconds") or 0)
     if brk:
         parts.append(f"Breaks: {brk // 60}m")
@@ -671,7 +693,9 @@ def build_vevent(job, duration_min=60, sequence=0):
             start = datetime.strptime(f"{date} {time_}", "%Y-%m-%d %H:%M")
         except ValueError:
             start = datetime.strptime(date, "%Y-%m-%d")
-        end = start + timedelta(minutes=int(duration_min or 60))
+        # The job's own estimate wins over the global default length.
+        minutes = int(job.get("est_minutes") or 0) or int(duration_min or 60)
+        end = start + timedelta(minutes=minutes)
         dt_lines = [f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
                     f"DTEND:{end.strftime('%Y%m%dT%H%M%S')}"]
     elif date:
@@ -1151,8 +1175,8 @@ def h_post_entry(req, _groups):
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
              status, release_code, no_release_code, materials, project_id, revisit_of,
-             scope_of_work, dispatch_contacts)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scope_of_work, dispatch_contacts, est_minutes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -1167,7 +1191,8 @@ def h_post_entry(req, _groups):
              data.get("status", "pending"), data.get("release_code"),
              1 if data.get("no_release_code") else 0, materials_str,
              data.get("project_id"), data.get("revisit_of"),
-             data.get("scope_of_work"), data.get("dispatch_contacts"))
+             data.get("scope_of_work"), data.get("dispatch_contacts"),
+             data.get("est_minutes"))
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -1199,7 +1224,7 @@ def h_put_entry(req, groups):
                 status=?, release_code=?, no_release_code=?, materials=?,
                 pay_adjustment=?, pay_adjustment_note=?, received_date=?, project_id=?,
                 revisit_of=?, custom_photo_fields=?,
-                scope_of_work=?, dispatch_contacts=?, pre_clockout=?
+                scope_of_work=?, dispatch_contacts=?, pre_clockout=?, est_minutes=?
             WHERE id=?
         """, (
             data.get("organization_id", ex["organization_id"]),
@@ -1245,6 +1270,7 @@ def h_put_entry(req, groups):
             data.get("scope_of_work", ex.get("scope_of_work")),
             data.get("dispatch_contacts", ex.get("dispatch_contacts")),
             data.get("pre_clockout", ex.get("pre_clockout")),
+            data.get("est_minutes", ex.get("est_minutes")),
             eid
         ))
         new_folder = _photo_folder({
@@ -2273,15 +2299,16 @@ def h_create_planned_job(req, _groups):
             """INSERT INTO planned_jobs
             (wo_title, organization_id, client_id, project_id, assignment_id, site_id,
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
-             planned_date, planned_time, revisit_of,
+             planned_date, planned_time, est_minutes, revisit_of,
              ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
              scope_of_work, dispatch_contacts)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
              data.get("flat_amount"), data.get("travel_reimb"), data.get("notes"),
-             data.get("planned_date"), data.get("planned_time"), data.get("revisit_of"),
+             data.get("planned_date"), data.get("planned_time"),
+             data.get("est_minutes"), data.get("revisit_of"),
              data.get("ticket_num"), data.get("inc_num"), data.get("mod_name"),
              data.get("noc_name"), data.get("pm_pc_name"),
              data.get("scope_of_work"), data.get("dispatch_contacts"))
@@ -2293,7 +2320,7 @@ def h_create_planned_job(req, _groups):
 PLANNED_JOB_FIELDS = [
     "wo_title", "organization_id", "client_id", "project_id", "assignment_id",
     "site_id", "address", "rate_type", "pay_rate_id", "flat_amount",
-    "travel_reimb", "notes", "planned_date", "planned_time", "revisit_of",
+    "travel_reimb", "notes", "planned_date", "planned_time", "est_minutes", "revisit_of",
     "ticket_num", "inc_num", "mod_name", "noc_name", "pm_pc_name",
     "scope_of_work", "dispatch_contacts",
 ]
