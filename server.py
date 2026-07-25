@@ -3,9 +3,12 @@
 
 import base64
 import ftplib
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import socket
 import sqlite3
 import ssl
@@ -48,12 +51,34 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # With more than one person using the app, two writes can land together;
+    # wait for the lock instead of failing the request outright.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
 def init_db():
     with get_db() as db:
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'tech',
+            phone TEXT,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE TABLE IF NOT EXISTS organizations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -342,6 +367,12 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN calendar_seq INTEGER DEFAULT 0",
         "ALTER TABLE time_entries ADD COLUMN est_minutes INTEGER",
         "ALTER TABLE planned_jobs ADD COLUMN est_minutes INTEGER",
+        "ALTER TABLE time_entries ADD COLUMN user_id INTEGER",
+        "ALTER TABLE planned_jobs ADD COLUMN user_id INTEGER",
+        "ALTER TABLE trips ADD COLUMN user_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_entries_user ON time_entries(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_planned_user ON planned_jobs(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_trips_user ON trips(user_id)",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -959,6 +990,136 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ── Accounts and sessions ──────────────────────────────────────────────────────
+# Two people share this install, so every request has to say who it is. Passwords
+# are PBKDF2-SHA256 and sessions are opaque tokens in an HttpOnly cookie — all of
+# it from the standard library, no dependencies.
+
+PBKDF2_ROUNDS = 200_000
+SESSION_DAYS  = 90
+SESSION_COOKIE = "qt_session"
+ROLES = ("supervisor", "tech")
+
+
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), PBKDF2_ROUNDS)
+    return dk.hex(), salt
+
+
+def verify_password(password, stored_hash, salt):
+    try:
+        calc, _ = hash_password(password, salt)
+    except Exception:
+        return False
+    return hmac.compare_digest(calc, stored_hash or "")
+
+
+def public_user(row):
+    if not row:
+        return None
+    return {"id": row["id"], "username": row["username"], "display_name": row["display_name"],
+            "role": row["role"], "phone": row["phone"], "active": row["active"]}
+
+
+def user_count(db=None):
+    def read(conn):
+        return conn.execute("SELECT COUNT(*) AS n FROM users WHERE active=1").fetchone()["n"]
+    if db is not None:
+        return read(db)
+    with get_db() as conn:
+        return read(conn)
+
+
+def create_session(db, user_id):
+    token = secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
+    db.execute("INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)", (token, user_id, expires))
+    return token
+
+
+def session_user(token):
+    """Resolve a cookie to its user, renewing the session as it ages."""
+    if not token:
+        return None
+    with get_db() as db:
+        row = db.execute(
+            "SELECT u.*, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id "
+            "WHERE s.token=? AND u.active=1", (token,)).fetchone()
+        if not row:
+            return None
+        expires = _ics_utc(row["expires_at"])
+        now = datetime.now(timezone.utc)
+        if not expires or expires <= now:
+            db.execute("DELETE FROM sessions WHERE token=?", (token,))
+            return None
+        # Slide the window once it is half spent — a phone in the field should
+        # not be asked to sign in again while it is being used.
+        if (expires - now).days < SESSION_DAYS / 2:
+            db.execute("UPDATE sessions SET expires_at=? WHERE token=?",
+                       ((now + timedelta(days=SESSION_DAYS)).isoformat(), token))
+        return public_user(row)
+
+
+def h_auth_state(req, _groups):
+    """What the app needs before it can draw anything."""
+    return 200, {"setup_required": user_count() == 0, "user": req.get("user")}
+
+
+def h_auth_setup(req, _groups):
+    """Claim the install. Only possible while there is nobody to sign in as."""
+    data = req.get("body", {})
+    username = (data.get("username") or "").strip()
+    display  = (data.get("display_name") or "").strip() or username
+    password = data.get("password") or ""
+    if not username or not password:
+        return 400, {"error": "Username and password are required"}
+    if len(password) < 8:
+        return 400, {"error": "Password must be at least 8 characters"}
+
+    with get_db() as db:
+        if user_count(db) > 0:
+            return 409, {"error": "This install already has an account"}
+        pw_hash, salt = hash_password(password)
+        cur = db.execute(
+            "INSERT INTO users (username, display_name, role, phone, password_hash, password_salt) "
+            "VALUES (?,?,?,?,?,?)",
+            (username, display, "supervisor", (data.get("phone") or "").strip() or None, pw_hash, salt))
+        uid = cur.lastrowid
+        # Everything recorded before accounts existed belongs to whoever claims
+        # the install — that is the person who has been using it all along.
+        claimed = sum(db.execute(f"UPDATE {t} SET user_id=? WHERE user_id IS NULL", (uid,)).rowcount
+                      for t in ("time_entries", "planned_jobs", "trips"))
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tech_name', ?)", (display,))
+        token = create_session(db, uid)
+        row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return 200, {"user": public_user(row), "claimed_rows": claimed, "_set_cookie": token}
+
+
+def h_auth_login(req, _groups):
+    data = req.get("body", {})
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
+        # Hash even when the user is unknown so a wrong name and a wrong password
+        # take the same time to answer.
+        ok = verify_password(password, row["password_hash"] if row else "0" * 64,
+                             row["password_salt"] if row else secrets.token_hex(16))
+        if not row or not ok:
+            return 401, {"error": "Wrong username or password"}
+        token = create_session(db, row["id"])
+    return 200, {"user": public_user(row), "_set_cookie": token}
+
+
+def h_auth_logout(req, _groups):
+    token = req.get("session_token")
+    if token:
+        with get_db() as db:
+            db.execute("DELETE FROM sessions WHERE token=?", (token,))
+    return 200, {"success": True, "_clear_cookie": True}
+
+
 # ── Router ─────────────────────────────────────────────────────────────────────
 
 def route(path, method, routes):
@@ -1133,8 +1294,10 @@ def attach_breaks(db, entry):
 
 
 def h_get_current(req, _groups):
+    uid = (req.get("user") or {}).get("id")
     with get_db() as db:
-        row = db.execute(ENTRY_SELECT + " WHERE e.clock_out IS NULL ORDER BY e.clock_in DESC LIMIT 1").fetchone()
+        row = db.execute(ENTRY_SELECT + " WHERE e.clock_out IS NULL AND e.user_id IS ?"
+                         " ORDER BY e.clock_in DESC LIMIT 1", (uid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
     return 200, entry
 
@@ -1161,10 +1324,12 @@ def h_post_entry(req, _groups):
     clock_in = data.get("clock_in")
     if not clock_in:
         return 400, {"error": "clock_in is required"}
+    uid = (req.get("user") or {}).get("id")
     materials = data.get("materials")
     materials_str = json.dumps(materials) if isinstance(materials, (list, dict)) else None
     with get_db() as db:
-        existing = db.execute("SELECT id FROM time_entries WHERE clock_out IS NULL").fetchone()
+        existing = db.execute(
+            "SELECT id FROM time_entries WHERE clock_out IS NULL AND user_id IS ?", (uid,)).fetchone()
         if existing:
             return 409, {"error": "Already clocked in", "entry_id": existing["id"]}
         cur = db.execute(
@@ -1175,8 +1340,8 @@ def h_post_entry(req, _groups):
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
              status, release_code, no_release_code, materials, project_id, revisit_of,
-             scope_of_work, dispatch_contacts, est_minutes)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scope_of_work, dispatch_contacts, est_minutes, user_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -1192,7 +1357,7 @@ def h_post_entry(req, _groups):
              1 if data.get("no_release_code") else 0, materials_str,
              data.get("project_id"), data.get("revisit_of"),
              data.get("scope_of_work"), data.get("dispatch_contacts"),
-             data.get("est_minutes"))
+             data.get("est_minutes"), uid)
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -2023,9 +2188,11 @@ def _augment_trip(db, trip_dict):
 
 
 def h_get_current_trip(req, _groups):
+    uid = (req.get("user") or {}).get("id")
     with get_db() as db:
         row = row_to_dict(db.execute(
-            "SELECT * FROM trips WHERE status='active' ORDER BY start_time DESC LIMIT 1"
+            "SELECT * FROM trips WHERE status='active' AND user_id IS ? ORDER BY start_time DESC LIMIT 1",
+            (uid,)
         ).fetchone())
         if not row:
             return 404, {"error": "No active trip"}
@@ -2042,8 +2209,10 @@ def h_start_trip(req, _groups):
     with get_db() as db:
         # Insert first to get the auto-increment id, then use it for trip_id
         cur = db.execute(
-            "INSERT INTO trips (category, assignment_id, trip_id, folder, start_time, mileage_start, notes) VALUES (?,?,?,?,?,?,?)",
-            (category, assignment_id, '', '', start_time, mileage_start, notes)
+            "INSERT INTO trips (category, assignment_id, trip_id, folder, start_time, mileage_start, notes, user_id)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (category, assignment_id, '', '', start_time, mileage_start, notes,
+             (req.get("user") or {}).get("id"))
         )
         db_id  = cur.lastrowid
         trip_id = _trip_id_str(db_id, category, assignment_id)
@@ -2330,8 +2499,8 @@ def h_create_planned_job(req, _groups):
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
              planned_date, planned_time, est_minutes, revisit_of,
              ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
-             scope_of_work, dispatch_contacts)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scope_of_work, dispatch_contacts, user_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
@@ -2340,7 +2509,8 @@ def h_create_planned_job(req, _groups):
              data.get("est_minutes"), data.get("revisit_of"),
              data.get("ticket_num"), data.get("inc_num"), data.get("mod_name"),
              data.get("noc_name"), data.get("pm_pc_name"),
-             data.get("scope_of_work"), data.get("dispatch_contacts"))
+             data.get("scope_of_work"), data.get("dispatch_contacts"),
+             (req.get("user") or {}).get("id"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     caldav_sync_async(row["id"])
@@ -2553,7 +2723,15 @@ def h_export_mileage_csv(req, _groups):
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+# Reachable without a session: everything else needs one.
+PUBLIC_API = {"/api/auth/state", "/api/auth/setup", "/api/auth/login", "/api/auth/logout"}
+
 ROUTES = [
+    (r"/api/auth/state",                ["GET"],    h_auth_state),
+    (r"/api/auth/setup",                ["POST"],   h_auth_setup),
+    (r"/api/auth/login",                ["POST"],   h_auth_login),
+    (r"/api/auth/logout",               ["POST"],   h_auth_logout),
+
     (r"/api/entries/current",           ["GET"],    h_get_current),
     (r"/api/entries",                   ["GET"],    h_get_entries),
     (r"/api/entries",                   ["POST"],   h_post_entry),
@@ -2624,7 +2802,7 @@ class Handler(BaseHTTPRequestHandler):
                 return {}
         return {}
 
-    def _send(self, status, body, content_type="application/json"):
+    def _send(self, status, body, content_type="application/json", cookie=None):
         if content_type == "application/json":
             data = json.dumps(body, default=str).encode()
         else:
@@ -2632,6 +2810,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(data)
 
@@ -2707,16 +2887,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _session_token(self):
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == SESSION_COOKIE:
+                return unquote(value)
+        return None
+
+    def _cookie_header(self, token, clear=False):
+        # Secure would stop the cookie being stored over plain http on the LAN,
+        # so it goes on only when the proxy says the request arrived over https.
+        proto = (self.headers.get("X-Forwarded-Proto") or "").lower()
+        bits = [f"{SESSION_COOKIE}={token or ''}", "Path=/", "HttpOnly", "SameSite=Lax"]
+        bits.append("Max-Age=0" if clear else f"Max-Age={SESSION_DAYS * 86400}")
+        if proto == "https":
+            bits.append("Secure")
+        return "; ".join(bits)
+
     def handle_request(self, method):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
 
+        token = self._session_token()
+        user = session_user(token)
+
         if not path.startswith("/api/"):
-            if method == "GET":
-                self._serve_static(path)
-            else:
+            if method != "GET":
                 self._send(405, {"error": "Method not allowed"})
+            elif path.startswith("/uploads/") and not user:
+                self._send(401, {"error": "Sign in required"})   # photos are not public
+            else:
+                self._serve_static(path)
             return
 
         handler, groups = route(path, method, ROUTES)
@@ -2724,8 +2927,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": "Not found"})
             return
 
+        if path not in PUBLIC_API and not user:
+            self._send(401, {"error": "Sign in required"})
+            return
+
         body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
-        req = {"body": body, "query": query, "path": path, "method": method}
+        req = {"body": body, "query": query, "path": path, "method": method,
+               "user": user, "session_token": token}
 
         try:
             status, result = handler(req, groups or ())
@@ -2734,6 +2942,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": str(exc)})
             return
 
+        # Handlers ask for a cookie change by putting it in the payload
+        cookie = None
+        if isinstance(result, dict):
+            if result.pop("_clear_cookie", None):
+                cookie = self._cookie_header("", clear=True)
+            new_token = result.pop("_set_cookie", None)
+            if new_token:
+                cookie = self._cookie_header(new_token)
+
         if status == "csv":
             self._send_csv(result)
         elif status == "zip":
@@ -2741,7 +2958,7 @@ class Handler(BaseHTTPRequestHandler):
         elif status == "ics":
             self._send_ics(result)
         else:
-            self._send(status, result)
+            self._send(status, result, cookie=cookie)
 
     def do_GET(self):    self.handle_request("GET")
     def do_HEAD(self):   self.handle_request("GET")
