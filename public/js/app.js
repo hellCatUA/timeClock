@@ -683,6 +683,11 @@ function startElapsedTimer(entry) {
       const earn = document.getElementById('earnings-display');
       if (earn) earn.textContent = fmtMoney(0);
       if (badge && !onBreak) badge.innerHTML = `<span class="dot"></span>STARTS AT ${fmtHHMM(new Date(startMs))}`;
+      const pending = document.getElementById('est-progress');
+      if (pending && est) {                       // nothing to count down from yet
+        pending.textContent = `Est ${fmtMins(est)}`;
+        pending.classList.remove('over');
+      }
       return;
     }
     if (badge && !onBreak && badge.textContent.includes('STARTS AT')) {
@@ -1542,6 +1547,7 @@ function wireJobFieldCombos(prefix) {
 // Fills the shared job-field block's scope + dispatch from a saved record
 function fillJobFieldExtras(prefix, src) {
   if (!src) return;
+  if (src.est_minutes) setDurationField(`${prefix}-est`, src.est_minutes);
   const scope = document.getElementById(`${prefix}-scope`);
   if (scope && src.scope_of_work) scope.value = src.scope_of_work;
   const list = document.getElementById(`${prefix}-dispatch-list`);
@@ -1578,7 +1584,6 @@ function applyProjectDefaultsToJobFields(prefix, p) {
   if (d.pay_rate_id)     g('rate').value = String(d.pay_rate_id);
   if (d.flat_amount != null && d.flat_amount !== '') g('flat').value = d.flat_amount;
   if (d.travel_reimb != null && d.travel_reimb !== '') g('travel').value = d.travel_reimb;
-  if (d.est_minutes) setDurationField(`${prefix}-est`, d.est_minutes);
   fillJobFieldExtras(prefix, d);
 }
 
@@ -1664,7 +1669,6 @@ function openPlanJobModal(existing = null) {
     if (existing.pay_rate_id) g('rate').value = String(existing.pay_rate_id);
     if (existing.flat_amount != null) g('flat').value = existing.flat_amount;
     if (existing.travel_reimb != null) g('travel').value = existing.travel_reimb;
-    if (existing.est_minutes) setDurationField('pj-est', existing.est_minutes);
     fillJobFieldExtras('pj', existing);
   }
 
