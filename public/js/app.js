@@ -5573,8 +5573,10 @@ async function renderSettingsPage() {
         <div id="s-cal-options" class="${calOn?'':'hidden'}">
           <div class="form-group">
             <label class="form-label">Nextcloud URL</label>
-            <input type="url" class="form-control" id="s-cal-url" placeholder="https://cloud.example.com"
-                   value="${escHtml(s.caldav_url||'')}" autocomplete="off" inputmode="url">
+            <input type="text" class="form-control" id="s-cal-url" placeholder="https://cloud.example.com"
+                   value="${escHtml(s.caldav_url||'')}" autocomplete="off" inputmode="url"
+                   autocapitalize="off" spellcheck="false">
+            <div class="field-hint">The address this app can reach, which is not always the one in your browser: <code>localhost</code> here means the app itself, not Nextcloud.</div>
           </div>
           <div class="form-group">
             <label class="form-label">Username</label>
@@ -5737,6 +5739,8 @@ function wireCalendarSettings() {
     caldav_password: document.getElementById('s-cal-pass').value,
     caldav_calendar: document.getElementById('s-cal-name').value.trim() || 'personal',
   });
+  // The server fills in a missing scheme; show what it actually settled on.
+  const showUrl = url => { if (url) document.getElementById('s-cal-url').value = url; };
 
   document.getElementById('s-cal-enabled').addEventListener('change', e => {
     document.getElementById('s-cal-options').classList.toggle('hidden', !e.target.checked);
@@ -5767,6 +5771,7 @@ function wireCalendarSettings() {
       document.getElementById('s-cal-pass').value = '';
       document.getElementById('s-cal-pass').placeholder =
         state.settings.caldav_password_set === '1' ? '•••••••• (saved)' : 'Nextcloud app password';
+      showUrl(state.settings.caldav_url);
       showToast('Calendar settings saved', 'success');
     } catch (e) { showToast(e.message, 'error'); }
   });
@@ -5778,6 +5783,7 @@ function wireCalendarSettings() {
     statusEl.classList.remove('hidden');
     try {
       const r = await api.testCaldav(readForm());
+      showUrl(r.url);
       if (!r.ok) { showStatus(escHtml(r.error || 'Connection failed'), 'err'); return; }
       const list = (r.calendars || []);
       const chosen = document.getElementById('s-cal-name').value.trim() || 'personal';

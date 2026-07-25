@@ -6,7 +6,9 @@ import ftplib
 import json
 import os
 import re
+import socket
 import sqlite3
+import ssl
 import sys
 import threading
 import urllib.error
@@ -16,7 +18,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit, urlunsplit
 
 PORT = int(os.environ.get("PORT", 3000))
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "timeclock.db"))
@@ -422,8 +424,63 @@ def caldav_ready(s):
             and (s.get("caldav_user") or "").strip()
             and (s.get("caldav_password") or "").strip())
 
+_PRIVATE_IP = re.compile(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)")
+
+def caldav_normalize_url(raw):
+    """Turn what a person types into a usable base URL. Returns (url, error).
+
+    Accepts a bare host ('cloud.example.com', 'nextcloud:8080'), repairs the
+    'https:/host' single-slash typo, and drops a trailing slash. A bare host
+    gets https, except for addresses that can only be local — a container name,
+    an IP, localhost — where plain http is what people actually run.
+    """
+    url = (raw or "").strip()
+    if not url:
+        return "", None
+    url = re.sub(r"^(https?):/(?!/)", r"\1://", url, flags=re.I)
+    if "://" not in url:
+        host = url.split("/")[0].split("@")[-1]
+        name = re.sub(r":\d+$", "", host).strip("[]").lower()
+        local = (name in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+                 or "." not in name                       # bare container/service name
+                 or re.fullmatch(r"[\d.]+", name) is not None   # bare IP address
+                 or bool(_PRIVATE_IP.match(name)))
+        url = ("http://" if local else "https://") + url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return None, f"'{parts.scheme}' is not a web address — start with https:// or http://"
+    if not parts.netloc:
+        return None, "That address has no host — try https://cloud.example.com"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", "")), None
+
+
+def caldav_url_error(exc, url):
+    """Turn a connection failure into something worth acting on."""
+    parts = urlsplit(url or "")
+    host = parts.hostname or "the server"
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    reason = getattr(exc, "reason", exc)
+    local = host in ("localhost", "127.0.0.1", "::1")
+    if isinstance(reason, ssl.SSLError) or "CERTIFICATE" in str(reason).upper():
+        if "WRONG_VERSION_NUMBER" in str(reason).upper():
+            return f"{host}:{port} speaks plain http, not https — drop the 's' from the address."
+        return (f"TLS handshake with {host} failed ({reason}). A self-signed certificate is not accepted — "
+                f"use the address your reverse proxy serves, or plain http inside the network.")
+    if isinstance(reason, ConnectionRefusedError):
+        extra = (" Note that localhost inside this container is the app itself, not Nextcloud — "
+                 "use the Nextcloud container name or its external address.") if local else ""
+        return f"Nothing is listening on {host}:{port}.{extra}"
+    if isinstance(reason, socket.gaierror):
+        return (f"Cannot resolve '{host}' from inside this container. If that is a Docker service name, "
+                f"both containers have to share a network; otherwise use the address you open in a browser.")
+    if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+        return f"{host}:{port} did not answer in time — it is probably firewalled or unreachable from here."
+    return f"Could not reach {host}: {reason}"
+
+
 def _caldav_base(s):
-    return (s.get("caldav_url") or "").strip().rstrip("/")
+    url, _ = caldav_normalize_url(s.get("caldav_url"))
+    return url or ""
 
 def _caldav_collection_url(s):
     cal = (s.get("caldav_calendar") or "personal").strip().strip("/")
@@ -1499,7 +1556,12 @@ def h_get_settings(req, _groups):
 
 
 def h_put_settings(req, _groups):
-    data = req.get("body", {})
+    data = dict(req.get("body", {}))
+    if "caldav_url" in data:
+        url, err = caldav_normalize_url(data["caldav_url"])
+        if err:
+            return 400, {"error": err}
+        data["caldav_url"] = url
     with get_db() as db:
         for k, v in data.items():
             k = str(k)
@@ -2207,13 +2269,16 @@ def h_caldav_test(req, _groups):
     for k in ("caldav_url", "caldav_user", "caldav_password", "caldav_calendar"):
         if data.get(k):
             s[k] = data[k]
-    if not (s.get("caldav_url") and s.get("caldav_user") and s.get("caldav_password")):
+    base, err = caldav_normalize_url(s.get("caldav_url"))
+    if err:
+        return 200, {"ok": False, "error": err}
+    if not (base and s.get("caldav_user") and s.get("caldav_password")):
         return 400, {"error": "URL, user and app password are required"}
 
     body = ('<?xml version="1.0" encoding="utf-8"?>'
             '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
             '<d:prop><d:displayname/><d:resourcetype/></d:prop></d:propfind>')
-    url = f"{_caldav_base(s)}/remote.php/dav/calendars/{quote(s['caldav_user'])}/"
+    url = f"{base}/remote.php/dav/calendars/{quote(s['caldav_user'])}/"
     try:
         resp = _caldav_request(s, "PROPFIND", url, body,
                                {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
@@ -2221,9 +2286,10 @@ def h_caldav_test(req, _groups):
     except urllib.error.HTTPError as exc:
         hint = "wrong user or app password" if exc.code in (401, 403) else \
                "calendar path not found — check the Nextcloud URL" if exc.code == 404 else ""
-        return 200, {"ok": False, "error": f"HTTP {exc.code} {exc.reason}" + (f" ({hint})" if hint else "")}
+        return 200, {"ok": False, "url": base,
+                     "error": f"HTTP {exc.code} {exc.reason}" + (f" ({hint})" if hint else "")}
     except Exception as exc:
-        return 200, {"ok": False, "error": f"Could not reach the server: {exc}"}
+        return 200, {"ok": False, "url": base, "error": caldav_url_error(exc, url)}
 
     calendars = []
     try:
@@ -2242,6 +2308,7 @@ def h_caldav_test(req, _groups):
     chosen = (s.get("caldav_calendar") or "personal").strip()
     return 200, {
         "ok": True,
+        "url": base,
         "calendars": calendars,
         "selected_exists": any(c["slug"] == chosen for c in calendars),
         "selected": chosen,
