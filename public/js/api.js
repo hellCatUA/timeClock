@@ -61,9 +61,15 @@ const api = (() => {
     updatePlannedJob:   (id, d)  => req('PUT',    `/api/planned-jobs/${id}`, d),
     deletePlannedJob:   (id)     => req('DELETE', `/api/planned-jobs/${id}`),
 
+    getPlannedIcsUrl:   (id)     => `/api/planned-jobs/${id}/ics`,
+
     // Settings
     getSettings:        ()       => req('GET',    '/api/settings'),
     saveSettings:       (d)      => req('PUT',    '/api/settings', d),
+
+    // Calendar (CalDAV / Nextcloud)
+    testCaldav:         (d)      => req('POST',   '/api/caldav/test', d || {}),
+    syncAllCaldav:      ()       => req('POST',   '/api/caldav/sync-all', {}),
 
     // Reports
     getExportUrl:       (from, to) => `/api/reports/export/csv?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&tz=${new Date().getTimezoneOffset()}`,

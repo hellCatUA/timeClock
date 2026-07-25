@@ -8,11 +8,15 @@ import os
 import re
 import sqlite3
 import sys
+import threading
+import urllib.error
+import urllib.request
 import uuid
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 PORT = int(os.environ.get("PORT", 3000))
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "timeclock.db"))
@@ -219,6 +223,8 @@ def init_db():
             revisit_of INTEGER,
             scope_of_work TEXT,
             dispatch_contacts TEXT,
+            calendar_uid TEXT,
+            calendar_seq INTEGER DEFAULT 0,
             ticket_num TEXT,
             inc_num TEXT,
             mod_name TEXT,
@@ -242,7 +248,13 @@ def init_db():
             ('ftp_user', ''),
             ('ftp_password', ''),
             ('ftp_path', '/timeclock/photos'),
-            ('mileage_rate', '0.67');
+            ('mileage_rate', '0.67'),
+            ('caldav_enabled', '0'),
+            ('caldav_url', ''),
+            ('caldav_user', ''),
+            ('caldav_password', ''),
+            ('caldav_calendar', 'personal'),
+            ('caldav_duration_min', '60');
         """)
 
 
@@ -310,6 +322,14 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE time_entries ADD COLUMN pre_clockout TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN scope_of_work TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN calendar_uid TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN calendar_seq INTEGER DEFAULT 0",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_enabled', '0')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_url', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_user', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_password', '')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_calendar', 'personal')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_duration_min', '60')",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -370,6 +390,183 @@ def row_to_dict(row):
 
 def rows_to_list(rows):
     return [dict(r) for r in rows]
+
+
+# ── Nextcloud / CalDAV calendar sync ────────────────────────────────────────────
+# Planned jobs are pushed to a CalDAV calendar as VEVENTs. Creating and updating
+# is a plain HTTP PUT of an .ics body, deleting is a DELETE — no CalDAV client
+# library needed. All calls are made from a background thread so the request
+# that triggered them returns immediately.
+
+CALDAV_KEYS = ("caldav_enabled", "caldav_url", "caldav_user", "caldav_password",
+               "caldav_calendar", "caldav_duration_min")
+
+def caldav_settings(db=None):
+    def read(conn):
+        return {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM settings WHERE key LIKE 'caldav_%'").fetchall()}
+    if db is not None:
+        return read(db)
+    with get_db() as conn:
+        return read(conn)
+
+def caldav_ready(s):
+    return (s.get("caldav_enabled") == "1"
+            and (s.get("caldav_url") or "").strip()
+            and (s.get("caldav_user") or "").strip()
+            and (s.get("caldav_password") or "").strip())
+
+def _caldav_base(s):
+    return (s.get("caldav_url") or "").strip().rstrip("/")
+
+def _caldav_collection_url(s):
+    cal = (s.get("caldav_calendar") or "personal").strip().strip("/")
+    return f"{_caldav_base(s)}/remote.php/dav/calendars/{quote(s['caldav_user'])}/{quote(cal)}/"
+
+def _caldav_request(s, method, url, body=None, headers=None, timeout=15):
+    req = urllib.request.Request(url, data=body.encode("utf-8") if body else None, method=method)
+    token = base64.b64encode(f"{s['caldav_user']}:{s['caldav_password']}".encode()).decode()
+    req.add_header("Authorization", "Basic " + token)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+def _ics_escape(text):
+    return (str(text or "")
+            .replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
+            .replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\n"))
+
+def _ics_fold(line):
+    """iCalendar lines must not exceed 75 octets; continuations start with a space."""
+    out, cur = [], ""
+    for ch in line:
+        if len(cur.encode("utf-8")) + len(ch.encode("utf-8")) > 73:
+            out.append(cur)
+            cur = " " + ch
+        else:
+            cur += ch
+    out.append(cur)
+    return "\r\n".join(out)
+
+def _job_description(job):
+    parts = []
+    if job.get("project_name"):   parts.append(f"Project: {job['project_name']}")
+    if job.get("org_name"):       parts.append(f"Company: {job['org_name']}")
+    if job.get("client_name"):    parts.append(f"Customer: {job['client_name']}")
+    if job.get("site_id"):        parts.append(f"Site ID: {job['site_id']}")
+    if job.get("assignment_id"):  parts.append(f"Assignment ID: {job['assignment_id']}")
+    if job.get("ticket_num"):     parts.append(f"Ticket #: {job['ticket_num']}")
+    if job.get("mod_name"):       parts.append(f"MOD: {job['mod_name']}")
+    try:
+        contacts = json.loads(job.get("dispatch_contacts") or "[]")
+    except Exception:
+        contacts = []
+    if contacts:
+        parts.append("")
+        parts.append("Dispatch:")
+        for c in contacts:
+            line = f"  {c.get('name') or 'Contact'}: {c.get('value') or ''}"
+            if c.get("note"):
+                line += f" ({c['note']})"
+            parts.append(line)
+    if job.get("scope_of_work"):
+        parts.append("")
+        parts.append("Scope of Work:")
+        parts.append(job["scope_of_work"])
+    return "\n".join(parts)
+
+def build_vevent(job, duration_min=60, sequence=0):
+    """VEVENT for a planned job. Times are floating (local wall clock)."""
+    uid = job.get("calendar_uid") or f"qt-planned-{job['id']}-{uuid.uuid4().hex[:8]}"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    date = (job.get("planned_date") or "").strip()
+    time_ = (job.get("planned_time") or "").strip()
+
+    if date and time_:
+        try:
+            start = datetime.strptime(f"{date} {time_}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            start = datetime.strptime(date, "%Y-%m-%d")
+        end = start + timedelta(minutes=int(duration_min or 60))
+        dt_lines = [f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+                    f"DTEND:{end.strftime('%Y%m%dT%H%M%S')}"]
+    elif date:
+        day = datetime.strptime(date, "%Y-%m-%d")
+        dt_lines = [f"DTSTART;VALUE=DATE:{day.strftime('%Y%m%d')}",
+                    f"DTEND;VALUE=DATE:{(day + timedelta(days=1)).strftime('%Y%m%d')}"]
+    else:
+        return None, None   # nothing to put on a calendar without a date
+
+    title = job.get("wo_title") or job.get("assignment_id") or "Planned job"
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//QuickTec//TimeClock//EN",
+        "CALSCALE:GREGORIAN", "BEGIN:VEVENT",
+        f"UID:{uid}", f"DTSTAMP:{stamp}", *dt_lines,
+        _ics_fold(f"SUMMARY:{_ics_escape(title)}"),
+        f"SEQUENCE:{int(sequence or 0)}",
+        "STATUS:CONFIRMED", "TRANSP:OPAQUE",
+    ]
+    if job.get("address"):
+        lines.append(_ics_fold(f"LOCATION:{_ics_escape(job['address'])}"))
+    desc = _job_description(job)
+    if desc:
+        lines.append(_ics_fold(f"DESCRIPTION:{_ics_escape(desc)}"))
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return uid, "\r\n".join(lines) + "\r\n"
+
+def caldav_push(job, settings=None):
+    """Create/update the event for a planned job. Returns (uid, error)."""
+    s = settings or caldav_settings()
+    if not caldav_ready(s):
+        return None, None
+    uid, ics = build_vevent(job, s.get("caldav_duration_min", "60"), job.get("calendar_seq", 0))
+    if not ics:
+        return None, None
+    url = _caldav_collection_url(s) + quote(uid) + ".ics"
+    try:
+        _caldav_request(s, "PUT", url, ics, {"Content-Type": "text/calendar; charset=utf-8"})
+        return uid, None
+    except Exception as exc:
+        print(f"CalDAV push failed for job {job.get('id')}: {exc}", file=sys.stderr)
+        return uid, str(exc)
+
+def caldav_delete(uid, settings=None):
+    s = settings or caldav_settings()
+    if not caldav_ready(s) or not uid:
+        return
+    try:
+        _caldav_request(s, "DELETE", _caldav_collection_url(s) + quote(uid) + ".ics")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            print(f"CalDAV delete failed for {uid}: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"CalDAV delete failed for {uid}: {exc}", file=sys.stderr)
+
+def caldav_sync_async(job_id):
+    """Push a planned job in the background and store the resulting UID."""
+    def work():
+        try:
+            with get_db() as db:
+                s = caldav_settings(db)
+                if not caldav_ready(s):
+                    return
+                job = row_to_dict(db.execute(PLANNED_SELECT + " WHERE pj.id=?", (job_id,)).fetchone())
+            if not job:
+                return
+            uid, err = caldav_push(job, s)
+            if uid and not err:
+                with get_db() as db:
+                    db.execute(
+                        "UPDATE planned_jobs SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
+                        (uid, job_id))
+        except Exception as exc:
+            print(f"CalDAV sync thread error: {exc}", file=sys.stderr)
+    threading.Thread(target=work, daemon=True).start()
+
+def caldav_delete_async(uid):
+    if not uid:
+        return
+    threading.Thread(target=lambda: caldav_delete(uid), daemon=True).start()
 
 
 def ftp_sync_photo(local_path, remote_filename, settings):
@@ -1092,19 +1289,38 @@ def h_upsert_pay_period(req, _groups):
 
 # ── Settings ───────────────────────────────────────────────────────────────────
 
+# Secrets never travel back to the browser; it only learns whether one is stored.
+SECRET_SETTINGS = ("caldav_password", "ftp_password")
+
+
+def public_settings(rows):
+    out = {}
+    for r in rows:
+        if r["key"] in SECRET_SETTINGS:
+            out[r["key"] + "_set"] = "1" if (r["value"] or "").strip() else "0"
+        else:
+            out[r["key"]] = r["value"]
+    return out
+
+
 def h_get_settings(req, _groups):
     with get_db() as db:
         rows = db.execute("SELECT key, value FROM settings").fetchall()
-    return 200, {r["key"]: r["value"] for r in rows}
+    return 200, public_settings(rows)
 
 
 def h_put_settings(req, _groups):
     data = req.get("body", {})
     with get_db() as db:
         for k, v in data.items():
-            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (str(k), str(v)))
+            k = str(k)
+            if k.endswith("_set"):
+                continue                      # read-only flag from GET
+            if k in SECRET_SETTINGS and not str(v).strip():
+                continue                      # blank means "keep the stored secret"
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
         rows = db.execute("SELECT key, value FROM settings").fetchall()
-    return 200, {r["key"]: r["value"] for r in rows}
+    return 200, public_settings(rows)
 
 
 # ── Reports ────────────────────────────────────────────────────────────────────
@@ -1705,16 +1921,17 @@ def h_delete_project(req, groups):
 
 # ── Planned jobs ────────────────────────────────────────────────────────────────
 
+PLANNED_SELECT = """
+    SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name
+    FROM planned_jobs pj
+    LEFT JOIN organizations o ON pj.organization_id = o.id
+    LEFT JOIN clients c ON pj.client_id = c.id
+    LEFT JOIN projects pr ON pj.project_id = pr.id
+"""
+
 def h_get_planned_jobs(req, _groups):
     with get_db() as db:
-        rows = rows_to_list(db.execute("""
-            SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name
-            FROM planned_jobs pj
-            LEFT JOIN organizations o ON pj.organization_id = o.id
-            LEFT JOIN clients c ON pj.client_id = c.id
-            LEFT JOIN projects pr ON pj.project_id = pr.id
-            ORDER BY pj.created_at DESC
-        """).fetchall())
+        rows = rows_to_list(db.execute(PLANNED_SELECT + " ORDER BY pj.created_at DESC").fetchall())
     return 200, rows
 
 def h_create_planned_job(req, _groups):
@@ -1738,6 +1955,7 @@ def h_create_planned_job(req, _groups):
              data.get("scope_of_work"), data.get("dispatch_contacts"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
+    caldav_sync_async(row["id"])
     return 201, row
 
 PLANNED_JOB_FIELDS = [
@@ -1761,14 +1979,103 @@ def h_update_planned_job(req, groups):
             (*vals, pid)
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (pid,)).fetchone())
+    caldav_sync_async(row["id"])
     return 200, row
 
 def h_delete_planned_job(req, groups):
     with get_db() as db:
+        row = row_to_dict(db.execute("SELECT calendar_uid FROM planned_jobs WHERE id=?", (groups[0],)).fetchone())
         cur = db.execute("DELETE FROM planned_jobs WHERE id=?", (groups[0],))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
+    caldav_delete_async((row or {}).get("calendar_uid"))
     return 200, {"success": True}
+
+
+def h_planned_job_ics(req, groups):
+    """Plain .ics download — works with any calendar, no credentials needed."""
+    with get_db() as db:
+        job = row_to_dict(db.execute(PLANNED_SELECT + " WHERE pj.id=?", (groups[0],)).fetchone())
+    if not job:
+        return 404, {"error": "Not found"}
+    with get_db() as db:
+        s = caldav_settings(db)
+    uid, ics = build_vevent(job, s.get("caldav_duration_min", "60"))
+    if not ics:
+        return 400, {"error": "This job has no planned date yet"}
+    name = re.sub(r'[^\w-]', '', (job.get("wo_title") or f"job-{job['id']}").replace(" ", "-"))[:40]
+    return "ics", (f"{name or 'planned-job'}.ics", ics)
+
+
+def h_caldav_test(req, _groups):
+    """Verify credentials and list the calendars available to the user."""
+    data = req.get("body", {})
+    with get_db() as db:
+        s = caldav_settings(db)
+    # allow testing values typed in the form before they are saved
+    for k in ("caldav_url", "caldav_user", "caldav_password", "caldav_calendar"):
+        if data.get(k):
+            s[k] = data[k]
+    if not (s.get("caldav_url") and s.get("caldav_user") and s.get("caldav_password")):
+        return 400, {"error": "URL, user and app password are required"}
+
+    body = ('<?xml version="1.0" encoding="utf-8"?>'
+            '<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
+            '<d:prop><d:displayname/><d:resourcetype/></d:prop></d:propfind>')
+    url = f"{_caldav_base(s)}/remote.php/dav/calendars/{quote(s['caldav_user'])}/"
+    try:
+        resp = _caldav_request(s, "PROPFIND", url, body,
+                               {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
+        xml = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        hint = "wrong user or app password" if exc.code in (401, 403) else \
+               "calendar path not found — check the Nextcloud URL" if exc.code == 404 else ""
+        return 200, {"ok": False, "error": f"HTTP {exc.code} {exc.reason}" + (f" ({hint})" if hint else "")}
+    except Exception as exc:
+        return 200, {"ok": False, "error": f"Could not reach the server: {exc}"}
+
+    calendars = []
+    try:
+        root = ET.fromstring(xml)
+        ns = {"d": "DAV:", "c": "urn:ietf:params:xml:ns:caldav"}
+        for resp_el in root.findall("d:response", ns):
+            href = (resp_el.findtext("d:href", "", ns) or "").rstrip("/")
+            is_cal = resp_el.find(".//c:calendar", ns) is not None
+            if not is_cal:
+                continue
+            name = resp_el.findtext(".//d:displayname", "", ns) or href.rsplit("/", 1)[-1]
+            calendars.append({"slug": unquote(href.rsplit("/", 1)[-1]), "name": name})
+    except ET.ParseError as exc:
+        return 200, {"ok": False, "error": f"Unexpected response from the server: {exc}"}
+
+    chosen = (s.get("caldav_calendar") or "personal").strip()
+    return 200, {
+        "ok": True,
+        "calendars": calendars,
+        "selected_exists": any(c["slug"] == chosen for c in calendars),
+        "selected": chosen,
+    }
+
+
+def h_caldav_sync_all(req, _groups):
+    """Push every dated planned job — used after enabling or changing settings."""
+    with get_db() as db:
+        s = caldav_settings(db)
+        if not caldav_ready(s):
+            return 400, {"error": "Calendar sync is off or not configured"}
+        jobs = rows_to_list(db.execute(
+            PLANNED_SELECT + " WHERE pj.planned_date IS NOT NULL AND pj.planned_date != ''").fetchall())
+    sent, failed = 0, []
+    for job in jobs:
+        uid, err = caldav_push(job, s)
+        if uid and not err:
+            with get_db() as db:
+                db.execute("UPDATE planned_jobs SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
+                           (uid, job["id"]))
+            sent += 1
+        elif err:
+            failed.append(job.get("wo_title") or f"job {job['id']}")
+    return 200, {"synced": sent, "failed": failed, "total": len(jobs)}
 
 
 # ── Trip categories ─────────────────────────────────────────────────────────────
@@ -1907,7 +2214,10 @@ ROUTES = [
     (r"/api/planned-jobs",              ["GET"],    h_get_planned_jobs),
     (r"/api/planned-jobs",              ["POST"],   h_create_planned_job),
     (r"/api/planned-jobs/(\d+)",        ["PUT"],    h_update_planned_job),
+    (r"/api/planned-jobs/(\d+)/ics",    ["GET"],    h_planned_job_ics),
     (r"/api/planned-jobs/(\d+)",        ["DELETE"], h_delete_planned_job),
+    (r"/api/caldav/test",               ["POST"],   h_caldav_test),
+    (r"/api/caldav/sync-all",           ["POST"],   h_caldav_sync_all),
     (r"/api/settings",                  ["GET"],    h_get_settings),
     (r"/api/settings",                  ["PUT"],    h_put_settings),
     (r"/api/reports/export/csv",        ["GET"],    h_export_csv),
@@ -1946,6 +2256,16 @@ class Handler(BaseHTTPRequestHandler):
         data = ("﻿" + content).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_ics(self, result):
+        fn, text = result
+        data = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/calendar; charset=utf-8")
         self.send_header("Content-Disposition", f'attachment; filename="{fn}"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -2034,6 +2354,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_csv(result)
         elif status == "zip":
             self._send_zip(result)
+        elif status == "ics":
+            self._send_ics(result)
         else:
             self._send(status, result)
 
@@ -2054,7 +2376,8 @@ if __name__ == "__main__":
     init_db()
     migrate_db()
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    # Threaded so a slow outbound sync (CalDAV / FTP) can't stall the UI
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"TimeClock running on http://localhost:{PORT}")
     try:
         server.serve_forever()
