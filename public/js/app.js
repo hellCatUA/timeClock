@@ -5,6 +5,7 @@
 /* ── State ──────────────────────────────────────────────────────── */
 const state = {
   page: 'clock',
+  user: null,
   currentEntry: null,
   lastCompletedEntry: null,
   organizations: [],
@@ -5822,6 +5823,18 @@ async function renderSettingsPage() {
   page.innerHTML = `
     <div class="p-16">
 
+      <!-- Account -->
+      <div class="section-label">Account</div>
+      <div class="card">
+        <div class="account-row">
+          <div class="account-who">
+            <div class="account-name">${escHtml(state.user?.display_name || state.user?.username || '—')}</div>
+            <div class="account-role">${escHtml(state.user?.role || '')}${state.user?.username ? ' · ' + escHtml(state.user.username) : ''}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="s-signout">Sign Out</button>
+        </div>
+      </div>
+
       <!-- Tech Info -->
       <div class="section-label">Technician Info</div>
       <div class="card">
@@ -5980,6 +5993,10 @@ async function renderSettingsPage() {
 
       <div style="height:16px;"></div>
     </div>`;
+
+  document.getElementById('s-signout').addEventListener('click', () => {
+    if (confirm('Sign out of QuickTec?')) signOut();
+  });
 
   // Tech info save
   let weekStart = s.week_start || '1';
@@ -6326,6 +6343,101 @@ function showClientForm(client) {
 /* ================================================================
    INIT
    ================================================================ */
+/* ── Sign in ──────────────────────────────────────────────────────
+   Two people share this install, so the app asks who it is before it
+   draws anything. On a brand-new database there is nobody to sign in
+   as yet — the first visitor claims the install as the supervisor. */
+function renderAuthGate({ setup }) {
+  document.getElementById('app').classList.add('auth-mode');
+  document.getElementById('page').innerHTML = `
+    <div class="auth-wrap">
+      <div class="auth-card">
+        <div class="auth-title">${setup ? 'Set up QuickTec' : 'Sign in'}</div>
+        <div class="auth-sub">${setup
+          ? 'Create the supervisor account. Everything already recorded becomes yours.'
+          : 'Enter your account to continue.'}</div>
+        ${setup ? `
+        <div class="form-group">
+          <label class="form-label">Your Name</label>
+          <input type="text" class="form-control" id="au-display" placeholder="e.g. Oleh" autocomplete="name">
+        </div>` : ''}
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input type="text" class="form-control" id="au-user" autocomplete="username"
+                 autocapitalize="off" autocorrect="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" class="form-control" id="au-pass"
+                 autocomplete="${setup ? 'new-password' : 'current-password'}">
+          ${setup ? '<div class="field-hint">At least 8 characters.</div>' : ''}
+        </div>
+        ${setup ? `
+        <div class="form-group">
+          <label class="form-label">Phone <span class="opt-label">optional</span></label>
+          <input type="tel" class="form-control" id="au-phone" placeholder="Shown to your tech in Dispatch">
+        </div>` : ''}
+        <button class="btn btn-primary btn-full" id="au-go">${setup ? 'Create Account' : 'Sign In'}</button>
+        <div id="au-error" class="auth-error hidden"></div>
+      </div>
+    </div>`;
+
+  const err = msg => {
+    const el = document.getElementById('au-error');
+    el.textContent = msg;
+    el.classList.remove('hidden');
+  };
+
+  const submit = async () => {
+    const btn = document.getElementById('au-go');
+    const username = document.getElementById('au-user').value.trim();
+    const password = document.getElementById('au-pass').value;
+    if (!username || !password) { err('Username and password are required'); return; }
+    btn.disabled = true;
+    document.getElementById('au-error').classList.add('hidden');
+    try {
+      const res = setup
+        ? await api.authSetup({ username, password,
+                                display_name: document.getElementById('au-display').value.trim(),
+                                phone: document.getElementById('au-phone').value.trim() })
+        : await api.authLogin({ username, password });
+      state.user = res.user;
+      await boot();
+      document.getElementById('app').classList.remove('auth-mode');
+      if (setup && res.claimed_rows) {
+        showToast(`Signed in — ${res.claimed_rows} existing records are yours`, 'success', 4000);
+      }
+    } catch (e) {
+      err(e.message || 'Could not sign in');
+      btn.disabled = false;
+    }
+  };
+
+  document.getElementById('au-go').addEventListener('click', submit);
+  ['au-user', 'au-pass'].forEach(id =>
+    document.getElementById(id).addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }));
+  document.getElementById(setup ? 'au-display' : 'au-user').focus();
+}
+
+// api.js calls this when the server stops recognising the session
+window.onSessionLost = () => {
+  if (!state.user) return;
+  clearTimers();
+  state.user = null;
+  state.currentEntry = null;
+  renderAuthGate({ setup: false });
+  showToast('Session expired — sign in again', 'error');
+};
+
+async function signOut() {
+  try { await api.authLogout(); } catch { /* the cookie is going either way */ }
+  clearTimers();
+  state.user = null;
+  state.currentEntry = null;
+  state.currentTrip = null;
+  renderAuthGate({ setup: false });
+}
+
 async function reloadData() {
   const [orgs, clients, rates, settings] = await Promise.all([
     api.getOrganizations(),
@@ -6339,8 +6451,7 @@ async function reloadData() {
   state.settings      = settings;
 }
 
-async function init() {
-  startLiveClock();
+async function boot() {
   try {
     await reloadData();
     state.tripCategories = await api.getTripCategories().catch(() => []);
@@ -6349,6 +6460,24 @@ async function init() {
     console.error('Init failed:', e);
   }
   renderPage();
+}
+
+async function init() {
+  startLiveClock();
+  let auth;
+  try {
+    auth = await api.authState();
+  } catch (e) {
+    console.error('Could not reach the server:', e);
+    document.getElementById('page').innerHTML =
+      '<div class="empty-state">Cannot reach the server. Check the connection and reload.</div>';
+    return;
+  }
+  if (auth.setup_required) { renderAuthGate({ setup: true }); return; }
+  if (!auth.user)          { renderAuthGate({ setup: false }); return; }
+  state.user = auth.user;
+  document.getElementById('app').classList.remove('auth-mode');
+  await boot();
 }
 
 init();

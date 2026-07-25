@@ -1,6 +1,6 @@
 const api = (() => {
   async function req(method, path, body) {
-    const opts = { method, headers: {} };
+    const opts = { method, headers: {}, credentials: 'same-origin' };
     if (body !== undefined) {
       opts.body = JSON.stringify(body);
       opts.headers['Content-Type'] = 'application/json';
@@ -8,12 +8,21 @@ const api = (() => {
     const res = await fetch(path, opts);
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
+      if (res.status === 401 && !path.startsWith('/api/auth/')) {
+        window.onSessionLost?.();
+      }
       throw Object.assign(new Error(err.error || 'Request failed'), { status: res.status, data: err });
     }
     return res.json();
   }
 
   return {
+    // Accounts
+    authState:          ()  => req('GET',  '/api/auth/state'),
+    authSetup:          (d) => req('POST', '/api/auth/setup', d),
+    authLogin:          (d) => req('POST', '/api/auth/login', d),
+    authLogout:         ()  => req('POST', '/api/auth/logout', {}),
+
     // Entries
     getCurrentEntry:    ()       => req('GET',    '/api/entries/current'),
     getEntries:         (params) => req('GET',    '/api/entries' + (params ? '?' + new URLSearchParams(params) : '')),
