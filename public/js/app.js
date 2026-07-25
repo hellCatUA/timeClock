@@ -1757,11 +1757,130 @@ function openProjectFormModal(existing = null, onSaved = null) {
   });
 }
 
+/* ── Sites within a project ──────────────────────────────────────
+   A site is a Site ID *at a customer*: the same store number under a
+   different customer is a different place, so both have to match. */
+function siteKey(entry) {
+  const sid = (entry.site_id || '').trim();
+  return sid ? `${entry.client_id || 0}::${sid.toLowerCase()}` : null;
+}
+
+function collectSites(entries) {
+  const map = new Map();
+  for (const e of entries) {
+    const key = siteKey(e);
+    if (!key) continue;
+    let s = map.get(key);
+    if (!s) {
+      s = { key, site_id: (e.site_id || '').trim(), client_id: e.client_id || null,
+            client_name: e.client_name || '', org_name: e.org_name || '',
+            address: '', visits: [] };
+      map.set(key, s);
+    }
+    s.visits.push(e);
+    if (!s.address && e.address) s.address = e.address;
+    if (!s.client_name && e.client_name) s.client_name = e.client_name;
+    if (!s.org_name && e.org_name) s.org_name = e.org_name;
+  }
+  for (const s of map.values()) {
+    s.visits.sort((a, b) => new Date(b.clock_in) - new Date(a.clock_in));
+    s.revisits = s.visits.filter(v => v.revisit_of).length;
+    s.last     = s.visits[0];
+    s.first    = s.visits[s.visits.length - 1];
+    // Newest address wins — a site that moved should show where it is now
+    const withAddr = s.visits.find(v => v.address);
+    if (withAddr) s.address = withAddr.address;
+  }
+  return [...map.values()].sort((a, b) => new Date(b.last.clock_in) - new Date(a.last.clock_in));
+}
+
+function matchesSite(s, q) {
+  if (!q) return true;
+  const hay = [s.site_id, s.client_name, s.org_name, s.address,
+               ...s.visits.map(v => fmtDateFull(v.clock_in))].join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t));
+}
+
+function siteCardHtml(s, q = '') {
+  const meta = [s.org_name, s.client_name].filter(Boolean).map(v => hlText(v, q)).join(' · ');
+  return `
+    <div class="card site-card" data-key="${escHtml(s.key)}">
+      <div class="site-top">
+        <div class="site-left">
+          <div class="site-id">#${hlText(s.site_id, q)}</div>
+          ${meta ? `<div class="site-meta">${meta}</div>` : ''}
+          ${s.address ? `<a class="entry-addr" href="https://maps.google.com/?q=${encodeURIComponent(s.address)}"
+             target="_blank" rel="noopener" onclick="event.stopPropagation()">${svg('location')} ${hlText(s.address, q)}</a>` : ''}
+        </div>
+        <button class="btn btn-secondary more-actions-btn site-menu-btn" data-key="${escHtml(s.key)}" title="Site actions">⋯</button>
+      </div>
+      <div class="site-counts">
+        <span class="site-count">${s.visits.length} visit${s.visits.length === 1 ? '' : 's'}</span>
+        ${s.revisits ? `<span class="site-count rev">${s.revisits} revisit${s.revisits === 1 ? '' : 's'}</span>` : ''}
+        <span class="site-dates">Last ${fmtDateShort(s.last.clock_in)}${
+          s.visits.length > 1 ? ` · First ${fmtDateShort(s.first.clock_in)}` : ''}</span>
+      </div>
+      <div class="site-visits">
+        ${s.visits.map(v => `
+          <div class="site-visit${v.revisit_of ? ' rev' : ''}" data-id="${v.id}">
+            <span class="site-visit-date">${fmtDateFull(v.clock_in)}</span>
+            ${v.revisit_of ? `<span class="rev-badge" style="pointer-events:none;">${svg('return')} REVISIT</span>` : ''}
+            <span class="status-chip ${v.status || 'pending'}">${(v.status || 'pending').toUpperCase()}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function openSiteMenu(site, project) {
+  const last = site.last;
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('location')} #${escHtml(site.site_id)}</h3>
+      <button class="btn btn-ghost btn-sm" id="sm-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint" style="margin-bottom:10px;">
+        ${escHtml([site.org_name, site.client_name].filter(Boolean).join(' · ') || 'No customer')}
+        ${site.address ? ` — ${escHtml(site.address)}` : ''}
+      </div>
+      <button class="btn btn-primary btn-full" id="sm-visit" style="margin-bottom:8px;">${svg('play')} Start a Visit Here</button>
+      <button class="btn btn-secondary btn-full" id="sm-revisit">${svg('return')} Start a Revisit</button>
+      <div class="field-hint" style="margin-top:10px;">
+        A visit carries the address, customer and Site ID. A revisit carries the last job at this site.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="sm-cancel">Cancel</button>
+    </div>`);
+
+  document.getElementById('sm-x').addEventListener('click', closeModal);
+  document.getElementById('sm-cancel').addEventListener('click', closeModal);
+
+  document.getElementById('sm-visit').addEventListener('click', () => {
+    if (state.currentEntry) { showToast('Clock out of the current job first', 'error'); return; }
+    state.pendingRevisit = {                       // the clock page's prefill bag
+      address:         site.address || null,
+      client_id:       site.client_id || null,
+      organization_id: last.organization_id || null,
+      project_id:      project?.id || last.project_id || null,
+      site_id:         site.site_id,
+    };
+    closeModal();
+    navigateTo('clock');
+  });
+
+  document.getElementById('sm-revisit').addEventListener('click', () => {
+    closeModal();
+    openRevisitModal(last);
+  });
+}
+
 /* ── Project page: overview + its work orders ────────────────────── */
 function openProjectPage(projectId, backTo = 'journal') {
   state.projectId = Number(projectId);
   state.projectBackTo = backTo;
   state.projectQuery = '';
+  state.projectView = 'jobs';
   navigateTo('project');
 }
 
@@ -1787,6 +1906,15 @@ async function renderProjectPage() {
     const timed      = done.map(workedMinutes).filter(m => m != null && m > 0);
     const avgActual  = timed.length ? Math.round(timed.reduce((a, b) => a + b, 0) / timed.length / 5) * 5 : 0;
 
+    const sites = collectSites(mine);
+    const view  = state.projectView === 'sites' ? 'sites' : 'jobs';
+    const byStatus = { completed: 0, fail: 0, cancel: 0, pending: 0 };
+    for (const e of mine) {
+      const k = e.status || 'pending';
+      if (k in byStatus) byStatus[k]++;
+    }
+    const statusRows = Object.entries(byStatus).filter(([, v]) => v > 0);
+
     page.innerHTML = `
       <div class="proj-head">
         <button class="btn btn-ghost btn-sm" id="pp-back">${svg('chevL')} Back</button>
@@ -1794,52 +1922,54 @@ async function renderProjectPage() {
         <button class="btn btn-ghost btn-sm" id="pp-menu" title="Project actions">⋯</button>
       </div>
       <div class="stats-grid" style="padding:0 16px;">
-        <div class="stat-card"><div class="stat-label">Work Orders</div><div class="stat-value">${mine.length}</div></div>
-        <div class="stat-card"><div class="stat-label">Hours</div><div class="stat-value">${hrs.toFixed(2)}</div></div>
-        <div class="stat-card"><div class="stat-label">Expected</div><div class="stat-value">${sym}${exp.toFixed(2)}</div></div>
-        <div class="stat-card"><div class="stat-label">Completed</div><div class="stat-value">${done.filter(e => e.status === 'completed').length}</div></div>
-      </div>
-      ${(estDefault || avgActual) ? `
-      <div style="padding:10px 16px 0;">
-        <div class="card est-summary">
-          <div class="est-sum-row"><span>Estimate</span><span>${estDefault ? fmtMins(estDefault) : '—'}</span></div>
-          <div class="est-sum-row"><span>Actual average</span><span>${avgActual
-            ? `${fmtMins(avgActual)} <span class="est-sum-n">over ${timed.length} job${timed.length === 1 ? '' : 's'}</span>`
-            : '—'}</span></div>
-          ${avgActual && avgActual !== estDefault
-            ? `<button class="btn btn-ghost btn-sm" id="pp-use-actual" style="margin-top:8px;">${svg('check')} Use ${fmtMins(avgActual)} as the estimate</button>`
-            : ''}
+        <button class="stat-card stat-tap${view === 'sites' ? ' on' : ''}" id="pp-sites-stat">
+          <div class="stat-label">Sites</div><div class="stat-value">${sites.length}</div>
+        </button>
+        <button class="stat-card stat-tap${view === 'jobs' ? ' on' : ''}" id="pp-jobs-stat">
+          <div class="stat-label">Jobs</div><div class="stat-value">${mine.length}</div>
+        </button>
+        <div class="stat-card">
+          <div class="stat-label">Total Hours</div>
+          <div class="stat-value">${hrs.toFixed(2)}</div>
+          ${avgActual ? `<div class="stat-sub">Avg ${fmtMins(avgActual)}</div>` : ''}
         </div>
-      </div>` : ''}
-      <div style="padding:10px 16px 0;">
-        <input type="text" class="form-control" id="pp-search" placeholder="Search: title, assignment, site, date..." autocomplete="off">
+        <div class="stat-card"><div class="stat-label">Expected</div><div class="stat-value">${sym}${exp.toFixed(2)}</div></div>
       </div>
-      <div id="pp-list"></div>`;
+      <div style="padding:10px 16px 0;">
+        <input type="text" class="form-control" id="pp-search"
+               placeholder="${view === 'sites' ? 'Search sites: site ID, customer, address...' : 'Search: title, assignment, site, date...'}"
+               value="${escHtml(state.projectQuery || '')}" autocomplete="off">
+      </div>
+      <div id="pp-list"></div>
+      ${statusRows.length ? `
+      <div class="section-label" style="padding-left:16px;">Job Statuses</div>
+      <div style="padding:0 16px 16px;">
+        <div class="card">
+          <div class="status-breakdown">
+            ${statusRows.map(([k, v]) => `
+              <div class="status-row">
+                <span class="status-chip ${k}">${k.toUpperCase()}</span>
+                <span>${v}</span>
+                <div class="status-bar-bg"><div class="status-bar-fill ${k}" style="width:${Math.round(v / Math.max(mine.length, 1) * 100)}%"></div></div>
+              </div>`).join('')}
+          </div>
+        </div>
+      </div>` : ''}`;
 
     document.getElementById('pp-back').addEventListener('click', () => navigateTo(state.projectBackTo || 'journal'));
-    document.getElementById('pp-menu').addEventListener('click', () => openProjectMenu(project));
-    document.getElementById('pp-use-actual')?.addEventListener('click', async () => {
-      try {
-        const saved = await api.updateProject(project.id, { name: project.name,
-                                                            defaults: { ...projDefaults, est_minutes: avgActual } });
-        await reloadData();
-        const followed = saved?.planned_jobs_updated || 0;
-        showToast(`Estimate set to ${fmtMins(avgActual)}`
-          + (followed ? ` — ${followed} planned job${followed === 1 ? '' : 's'} followed` : ''), 'success');
+    document.getElementById('pp-menu').addEventListener('click', () => openProjectMenu(project, { avgActual, estDefault, projDefaults }));
+    ['sites', 'jobs'].forEach(v => {
+      document.getElementById(`pp-${v}-stat`).addEventListener('click', () => {
+        if (state.projectView === v) return;
+        state.projectView = v;
+        state.projectQuery = '';
         renderProjectPage();
-      } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+      });
     });
 
     const listEl = document.getElementById('pp-list');
-    const renderList = () => {
-      const q = (state.projectQuery || '').trim();
-      const rows = mine
-        .filter(e => matchesEntry(e, q))
-        .sort((a, b) => new Date(b.clock_in) - new Date(a.clock_in));
-      listEl.innerHTML = rows.length
-        ? `${q ? `<div class="field-hint" style="padding:8px 16px 0;">${rows.length} match${rows.length === 1 ? '' : 'es'}</div>` : ''}
-           <div style="padding:8px 16px 16px;">${rows.map(e => renderEntryCard(e, false, revisitedIds, q)).join('')}</div>`
-        : `<div class="empty-state">${q ? 'No matches' : 'No work orders in this project yet'}</div>`;
+
+    const wireEntryCards = () => {
       listEl.querySelectorAll('.entry-card').forEach(card => {
         card.addEventListener('click', e => {
           if (e.target.closest('button') || e.target.closest('a')) return;
@@ -1862,6 +1992,57 @@ async function renderProjectPage() {
         });
       });
     };
+
+    const renderJobs = (q) => {
+      const rows = mine
+        .filter(e => matchesEntry(e, q))
+        .sort((a, b) => new Date(b.clock_in) - new Date(a.clock_in));
+      // A revisit and its original both get the journal's orange edge
+      const revLinked = new Set();
+      rows.forEach(e => {
+        if (e.revisit_of && rows.some(o => o.id === e.revisit_of)) { revLinked.add(e.id); revLinked.add(e.revisit_of); }
+      });
+      listEl.innerHTML = rows.length
+        ? `${q ? `<div class="field-hint" style="padding:8px 16px 0;">${rows.length} match${rows.length === 1 ? '' : 'es'}</div>` : ''}
+           <div style="padding:8px 16px 16px;">${rows.map(e =>
+             renderEntryCard(e, revLinked.has(e.id), revisitedIds, q, { showDate: true })).join('')}</div>`
+        : `<div class="empty-state">${q ? 'No matches' : 'No work orders in this project yet'}</div>`;
+      wireEntryCards();
+    };
+
+    const renderSites = (q) => {
+      const rows = sites.filter(s => matchesSite(s, q));
+      listEl.innerHTML = rows.length
+        ? `${q ? `<div class="field-hint" style="padding:8px 16px 0;">${rows.length} match${rows.length === 1 ? '' : 'es'}</div>` : ''}
+           <div style="padding:8px 16px 16px;">${rows.map(s => siteCardHtml(s, q)).join('')}</div>`
+        : `<div class="empty-state">${q ? 'No matches' : 'No sites yet — a work order needs a Site ID'}</div>`;
+
+      listEl.querySelectorAll('.site-card').forEach(card => {
+        card.addEventListener('click', e => {
+          if (e.target.closest('button')) return;
+          card.classList.toggle('open');
+        });
+      });
+      listEl.querySelectorAll('.site-menu-btn').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const s = sites.find(x => x.key === btn.dataset.key);
+          if (s) openSiteMenu(s, project);
+        });
+      });
+      listEl.querySelectorAll('.site-visit').forEach(row => {
+        row.addEventListener('click', ev => {
+          ev.stopPropagation();
+          const en = mine.find(x => x.id === parseInt(row.dataset.id));
+          if (en) openEntryDetail(en);
+        });
+      });
+    };
+
+    const renderList = () => {
+      const q = (state.projectQuery || '').trim();
+      if (view === 'sites') renderSites(q); else renderJobs(q);
+    };
     renderList();
     document.getElementById('pp-search').addEventListener('input', e => {
       state.projectQuery = e.target.value;
@@ -1872,7 +2053,8 @@ async function renderProjectPage() {
   }
 }
 
-function openProjectMenu(project) {
+function openProjectMenu(project, est = {}) {
+  const { avgActual = 0, estDefault = 0, projDefaults = {} } = est;
   openModal(`
     <div class="modal-header">
       <h3>${svg('org')} ${escHtml(project.name)}</h3>
@@ -1880,6 +2062,14 @@ function openProjectMenu(project) {
     </div>
     <div class="modal-body">
       <button class="btn btn-secondary btn-full" id="pm2-edit" style="margin-bottom:8px;">${svg('edit')} Edit Project & Defaults</button>
+      ${avgActual ? `
+      <div class="est-menu-row">
+        <span>Estimate <b>${estDefault ? fmtMins(estDefault) : '—'}</b></span>
+        <span>Actual avg <b>${fmtMins(avgActual)}</b></span>
+      </div>
+      ${avgActual !== estDefault
+        ? `<button class="btn btn-ghost btn-full" id="pm2-use-actual" style="margin-bottom:8px;">${svg('check')} Use ${fmtMins(avgActual)} as the estimate</button>`
+        : ''}` : ''}
       <button class="btn btn-ghost btn-full" id="pm2-arch" style="margin-bottom:8px;">
         ${project.archived ? `${svg('return')} Unarchive Project` : `${svg('stop')} Archive Project`}
       </button>
@@ -1892,6 +2082,19 @@ function openProjectMenu(project) {
 
   document.getElementById('pm2-x').addEventListener('click', closeModal);
   document.getElementById('pm2-cancel').addEventListener('click', closeModal);
+  document.getElementById('pm2-use-actual')?.addEventListener('click', async ev => {
+    ev.currentTarget.disabled = true;
+    try {
+      const saved = await api.updateProject(project.id,
+        { name: project.name, defaults: { ...projDefaults, est_minutes: avgActual } });
+      await reloadData();
+      const followed = saved?.planned_jobs_updated || 0;
+      showToast(`Estimate set to ${fmtMins(avgActual)}`
+        + (followed ? ` — ${followed} planned job${followed === 1 ? '' : 's'} followed` : ''), 'success');
+      closeModal();
+      renderProjectPage();
+    } catch (err) { showToast(err.message || 'Save failed', 'error'); }
+  });
   document.getElementById('pm2-edit').addEventListener('click', () => {
     closeModal();
     openProjectFormModal(project, () => renderProjectPage());
@@ -4903,7 +5106,7 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
-function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
+function renderEntryCard(entry, linked = false, revisitedIds = null, q = '', opts = {}) {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
   const total  = calcTotalExpected(entry);
@@ -4929,7 +5132,7 @@ function renderEntryCard(entry, linked = false, revisitedIds = null, q = '') {
         </div>
       </div>
       <div class="entry-card-bottom">
-        <div class="entry-times">${svg('clock')} ${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
+        <div class="entry-times">${svg('clock')} ${opts.showDate ? hlText(fmtDateShort(entry.clock_in), q) + ' · ' : ''}${fmtTime(entry.clock_in)}${entry.clock_out?' → '+fmtTime(entry.clock_out):' (active)'}</div>
         ${entry.clock_out ? `<div class="entry-duration">${fmtDecimalHours(netSec)}</div>` : ''}
         ${entry.rate_type === 'none' && !total
           ? '<div class="entry-pay" style="color:var(--text3);font-weight:600;">Non-Billable</div>'
