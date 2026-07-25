@@ -79,6 +79,8 @@ def init_db():
             flat_amount REAL,
             clock_in TEXT NOT NULL,
             clock_out TEXT,
+            calendar_uid TEXT,
+            calendar_seq INTEGER DEFAULT 0,
             address TEXT,
             latitude REAL,
             longitude REAL,
@@ -254,7 +256,8 @@ def init_db():
             ('caldav_user', ''),
             ('caldav_password', ''),
             ('caldav_calendar', 'personal'),
-            ('caldav_duration_min', '60');
+            ('caldav_duration_min', '60'),
+            ('caldav_sync_entries', '1');
         """)
 
 
@@ -330,6 +333,9 @@ def migrate_db():
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_password', '')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_calendar', 'personal')",
         "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_duration_min', '60')",
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('caldav_sync_entries', '1')",
+        "ALTER TABLE time_entries ADD COLUMN calendar_uid TEXT",
+        "ALTER TABLE time_entries ADD COLUMN calendar_seq INTEGER DEFAULT 0",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -399,7 +405,7 @@ def rows_to_list(rows):
 # that triggered them returns immediately.
 
 CALDAV_KEYS = ("caldav_enabled", "caldav_url", "caldav_user", "caldav_password",
-               "caldav_calendar", "caldav_duration_min")
+               "caldav_calendar", "caldav_duration_min", "caldav_sync_entries")
 
 def caldav_settings(db=None):
     def read(conn):
@@ -448,37 +454,122 @@ def _ics_fold(line):
     out.append(cur)
     return "\r\n".join(out)
 
-def _job_description(job):
-    parts = []
-    if job.get("project_name"):   parts.append(f"Project: {job['project_name']}")
-    if job.get("org_name"):       parts.append(f"Company: {job['org_name']}")
-    if job.get("client_name"):    parts.append(f"Customer: {job['client_name']}")
-    if job.get("site_id"):        parts.append(f"Site ID: {job['site_id']}")
-    if job.get("assignment_id"):  parts.append(f"Assignment ID: {job['assignment_id']}")
-    if job.get("ticket_num"):     parts.append(f"Ticket #: {job['ticket_num']}")
-    if job.get("mod_name"):       parts.append(f"MOD: {job['mod_name']}")
+def _ics_utc(ts):
+    """'2026-07-25T03:44:32+00:00' or '...Z' -> datetime in UTC (None if unparsable)."""
+    if not ts:
+        return None
     try:
-        contacts = json.loads(job.get("dispatch_contacts") or "[]")
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _identity_lines(rec):
+    """The who/where fields that a planned job and a finished work order share."""
+    parts = []
+    if rec.get("project_name"):   parts.append(f"Project: {rec['project_name']}")
+    if rec.get("org_name"):       parts.append(f"Company: {rec['org_name']}")
+    if rec.get("client_name"):    parts.append(f"Customer: {rec['client_name']}")
+    if rec.get("site_id"):        parts.append(f"Site ID: {rec['site_id']}")
+    if rec.get("assignment_id"):  parts.append(f"Assignment ID: {rec['assignment_id']}")
+    if rec.get("ticket_num"):     parts.append(f"Ticket #: {rec['ticket_num']}")
+    if rec.get("inc_num"):        parts.append(f"INC #: {rec['inc_num']}")
+    if rec.get("mod_name"):       parts.append(f"MOD: {rec['mod_name']}")
+    return parts
+
+
+def _dispatch_lines(rec):
+    try:
+        contacts = json.loads(rec.get("dispatch_contacts") or "[]")
     except Exception:
-        contacts = []
-    if contacts:
-        parts.append("")
-        parts.append("Dispatch:")
-        for c in contacts:
-            line = f"  {c.get('name') or 'Contact'}: {c.get('value') or ''}"
-            if c.get("note"):
-                line += f" ({c['note']})"
-            parts.append(line)
+        return []
+    if not contacts:
+        return []
+    parts = ["", "Dispatch:"]
+    for c in contacts:
+        line = f"  {c.get('name') or 'Contact'}: {c.get('value') or ''}"
+        if c.get("note"):
+            line += f" ({c['note']})"
+        parts.append(line)
+    return parts
+
+
+def _job_description(job):
+    parts = _identity_lines(job) + _dispatch_lines(job)
     if job.get("scope_of_work"):
-        parts.append("")
-        parts.append("Scope of Work:")
-        parts.append(job["scope_of_work"])
+        parts += ["", "Scope of Work:", job["scope_of_work"]]
     return "\n".join(parts)
+
+
+def _entry_description(entry):
+    parts = []
+    if entry.get("status"):
+        parts.append(f"Status: {str(entry['status']).upper()}")
+    ci, co = _ics_utc(entry.get("clock_in")), _ics_utc(entry.get("clock_out"))
+    if ci and co and co > ci:
+        total = int((co - ci).total_seconds())
+        parts.append(f"On site: {total // 3600}h {total % 3600 // 60}m")
+    brk = int(entry.get("total_break_seconds") or 0)
+    if brk:
+        parts.append(f"Breaks: {brk // 60}m")
+    if entry.get("revisit_required"):
+        parts.append("REVISIT REQUIRED")
+    parts += _identity_lines(entry)
+    if entry.get("release_code"):
+        parts.append(f"Release code: {entry['release_code']}")
+    parts += _dispatch_lines(entry)
+    if entry.get("work_summary"):
+        parts += ["", "Work Summary:", entry["work_summary"]]
+    return "\n".join(parts)
+
+def _wrap_vevent(uid, dt_lines, summary, sequence, location=None, description=None, category=None):
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//QuickTec//TimeClock//EN",
+        "CALSCALE:GREGORIAN", "BEGIN:VEVENT",
+        f"UID:{uid}", f"DTSTAMP:{stamp}", *dt_lines,
+        _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
+        f"SEQUENCE:{int(sequence or 0)}",
+        "STATUS:CONFIRMED", "TRANSP:OPAQUE",
+    ]
+    if category:
+        lines.append(f"CATEGORIES:{_ics_escape(category)}")
+    if location:
+        lines.append(_ics_fold(f"LOCATION:{_ics_escape(location)}"))
+    if description:
+        lines.append(_ics_fold(f"DESCRIPTION:{_ics_escape(description)}"))
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def build_entry_vevent(entry, sequence=0):
+    """VEVENT for a finished work order. Clock times are absolute, so UTC."""
+    start = _ics_utc(entry.get("clock_in"))
+    end   = _ics_utc(entry.get("clock_out"))
+    if not start or not end:
+        return None, None          # still clocked in — nothing to record yet
+    if end <= start:
+        end = start + timedelta(minutes=15)   # zero-length events hide in some clients
+    uid = entry.get("calendar_uid") or f"qt-entry-{entry['id']}-{uuid.uuid4().hex[:8]}"
+    title = entry.get("wo_title") or entry.get("assignment_id") or "Work order"
+    status = (entry.get("status") or "").strip().lower()
+    if status in ("fail", "cancel"):
+        title = f"[{status.upper()}] {title}"
+    ics = _wrap_vevent(
+        uid,
+        [f"DTSTART:{start.strftime('%Y%m%dT%H%M%SZ')}",
+         f"DTEND:{end.strftime('%Y%m%dT%H%M%SZ')}"],
+        title, sequence,
+        location=entry.get("address"),
+        description=_entry_description(entry),
+        category="Work Order")
+    return uid, ics
+
 
 def build_vevent(job, duration_min=60, sequence=0):
     """VEVENT for a planned job. Times are floating (local wall clock)."""
     uid = job.get("calendar_uid") or f"qt-planned-{job['id']}-{uuid.uuid4().hex[:8]}"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     date = (job.get("planned_date") or "").strip()
     time_ = (job.get("planned_time") or "").strip()
 
@@ -498,21 +589,11 @@ def build_vevent(job, duration_min=60, sequence=0):
         return None, None   # nothing to put on a calendar without a date
 
     title = job.get("wo_title") or job.get("assignment_id") or "Planned job"
-    lines = [
-        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//QuickTec//TimeClock//EN",
-        "CALSCALE:GREGORIAN", "BEGIN:VEVENT",
-        f"UID:{uid}", f"DTSTAMP:{stamp}", *dt_lines,
-        _ics_fold(f"SUMMARY:{_ics_escape(title)}"),
-        f"SEQUENCE:{int(sequence or 0)}",
-        "STATUS:CONFIRMED", "TRANSP:OPAQUE",
-    ]
-    if job.get("address"):
-        lines.append(_ics_fold(f"LOCATION:{_ics_escape(job['address'])}"))
-    desc = _job_description(job)
-    if desc:
-        lines.append(_ics_fold(f"DESCRIPTION:{_ics_escape(desc)}"))
-    lines += ["END:VEVENT", "END:VCALENDAR"]
-    return uid, "\r\n".join(lines) + "\r\n"
+    ics = _wrap_vevent(uid, dt_lines, title, sequence,
+                       location=job.get("address"),
+                       description=_job_description(job),
+                       category="Planned Job")
+    return uid, ics
 
 def caldav_push(job, settings=None):
     """Create/update the event for a planned job. Returns (uid, error)."""
@@ -567,6 +648,110 @@ def caldav_delete_async(uid):
     if not uid:
         return
     threading.Thread(target=lambda: caldav_delete(uid), daemon=True).start()
+
+def caldav_entries_on(s):
+    return caldav_ready(s) and s.get("caldav_sync_entries", "1") == "1"
+
+def caldav_push_entry(entry, settings=None):
+    """Create/update the event for a finished work order. Returns (uid, error)."""
+    s = settings or caldav_settings()
+    if not caldav_entries_on(s):
+        return None, None
+    uid, ics = build_entry_vevent(entry, entry.get("calendar_seq", 0))
+    if not ics:
+        return None, None
+    try:
+        _caldav_request(s, "PUT", _caldav_collection_url(s) + quote(uid) + ".ics", ics,
+                        {"Content-Type": "text/calendar; charset=utf-8"})
+        return uid, None
+    except Exception as exc:
+        print(f"CalDAV push failed for entry {entry.get('id')}: {exc}", file=sys.stderr)
+        return uid, str(exc)
+
+def caldav_entry_sync_async(entry_id):
+    """Push a finished work order in the background and store the resulting UID."""
+    def work():
+        try:
+            with get_db() as db:
+                s = caldav_settings(db)
+                if not caldav_entries_on(s):
+                    return
+                entry = row_to_dict(db.execute(ENTRY_SELECT + " WHERE e.id=?", (entry_id,)).fetchone())
+            if not entry:
+                return
+            uid, err = caldav_push_entry(entry, s)
+            if uid and not err:
+                with get_db() as db:
+                    db.execute(
+                        "UPDATE time_entries SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
+                        (uid, entry_id))
+        except Exception as exc:
+            print(f"CalDAV entry sync thread error: {exc}", file=sys.stderr)
+    threading.Thread(target=work, daemon=True).start()
+
+
+def caldav_backfill(force=False, settings=None):
+    """Push planned jobs and finished work orders to the calendar.
+
+    force=False only touches records that have never reached the calendar, so it
+    is cheap enough to run whenever settings change or the server starts — that
+    is also what heals anything missed while Nextcloud was unreachable.
+    """
+    s = settings or caldav_settings()
+    if not caldav_ready(s):
+        return {"synced": 0, "failed": [], "total": 0}
+
+    with get_db() as db:
+        sql = PLANNED_SELECT + " WHERE pj.planned_date IS NOT NULL AND pj.planned_date != ''"
+        if not force:
+            sql += " AND (pj.calendar_uid IS NULL OR pj.calendar_uid = '')"
+        jobs = rows_to_list(db.execute(sql).fetchall())
+
+        entries = []
+        if caldav_entries_on(s):
+            sql = ENTRY_SELECT + " WHERE e.clock_out IS NOT NULL"
+            if not force:
+                sql += " AND (e.calendar_uid IS NULL OR e.calendar_uid = '')"
+            entries = rows_to_list(db.execute(sql + " ORDER BY e.clock_in").fetchall())
+
+    synced, failed = 0, []
+    for job in jobs:
+        uid, err = caldav_push(job, s)
+        if uid and not err:
+            with get_db() as db:
+                db.execute("UPDATE planned_jobs SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
+                           (uid, job["id"]))
+            synced += 1
+        elif err:
+            failed.append(job.get("wo_title") or f"planned job {job['id']}")
+
+    for entry in entries:
+        uid, err = caldav_push_entry(entry, s)
+        if uid and not err:
+            with get_db() as db:
+                db.execute("UPDATE time_entries SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
+                           (uid, entry["id"]))
+            synced += 1
+        elif err:
+            failed.append(entry.get("wo_title") or f"work order {entry['id']}")
+
+    return {"synced": synced, "failed": failed, "total": len(jobs) + len(entries)}
+
+
+def caldav_backfill_async():
+    """Catch up on anything the calendar is missing, quietly, in the background."""
+    def work():
+        try:
+            s = caldav_settings()
+            if not caldav_ready(s):
+                return
+            r = caldav_backfill(force=False, settings=s)
+            if r["total"]:
+                print(f"CalDAV catch-up: {r['synced']}/{r['total']} pushed"
+                      + (f", {len(r['failed'])} failed" if r["failed"] else ""), file=sys.stderr)
+        except Exception as exc:
+            print(f"CalDAV catch-up error: {exc}", file=sys.stderr)
+    threading.Thread(target=work, daemon=True).start()
 
 
 def ftp_sync_photo(local_path, remote_filename, settings):
@@ -946,6 +1131,7 @@ def h_put_entry(req, groups):
                 old_dir.rename(new_dir)
             except Exception:
                 pass
+    caldav_entry_sync_async(eid)
     return 200, entry
 
 
@@ -1001,6 +1187,7 @@ def h_clockout(req, groups):
         result = row_to_dict(row)
         result["breaks"] = breaks
         result["active_break"] = None
+    caldav_entry_sync_async(eid)
     return 200, result
 
 
@@ -1092,6 +1279,7 @@ def h_delete_entry(req, groups):
         photos = rows_to_list(db.execute(
             "SELECT * FROM entry_photos WHERE entry_id=?", (eid,)
         ).fetchall())
+        existing = row_to_dict(db.execute("SELECT calendar_uid FROM time_entries WHERE id=?", (eid,)).fetchone())
         cur = db.execute("DELETE FROM time_entries WHERE id=?", (eid,))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
@@ -1099,6 +1287,7 @@ def h_delete_entry(req, groups):
         fp = UPLOADS_DIR / (photo.get('folder') or str(eid)) / photo['filename']
         try: fp.unlink(missing_ok=True)
         except Exception: pass
+    caldav_delete_async((existing or {}).get("calendar_uid"))
     return 200, {"success": True}
 
 
@@ -1320,6 +1509,8 @@ def h_put_settings(req, _groups):
                 continue                      # blank means "keep the stored secret"
             db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, str(v)))
         rows = db.execute("SELECT key, value FROM settings").fetchall()
+    # Turning sync on (or pointing it at another calendar) backfills the history.
+    caldav_backfill_async()
     return 200, public_settings(rows)
 
 
@@ -2058,24 +2249,11 @@ def h_caldav_test(req, _groups):
 
 
 def h_caldav_sync_all(req, _groups):
-    """Push every dated planned job — used after enabling or changing settings."""
-    with get_db() as db:
-        s = caldav_settings(db)
-        if not caldav_ready(s):
-            return 400, {"error": "Calendar sync is off or not configured"}
-        jobs = rows_to_list(db.execute(
-            PLANNED_SELECT + " WHERE pj.planned_date IS NOT NULL AND pj.planned_date != ''").fetchall())
-    sent, failed = 0, []
-    for job in jobs:
-        uid, err = caldav_push(job, s)
-        if uid and not err:
-            with get_db() as db:
-                db.execute("UPDATE planned_jobs SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
-                           (uid, job["id"]))
-            sent += 1
-        elif err:
-            failed.append(job.get("wo_title") or f"job {job['id']}")
-    return 200, {"synced": sent, "failed": failed, "total": len(jobs)}
+    """Re-push everything — planned jobs and the whole work-order history."""
+    s = caldav_settings()
+    if not caldav_ready(s):
+        return 400, {"error": "Calendar sync is off or not configured"}
+    return 200, caldav_backfill(force=True, settings=s)
 
 
 # ── Trip categories ─────────────────────────────────────────────────────────────
@@ -2376,6 +2554,8 @@ if __name__ == "__main__":
     init_db()
     migrate_db()
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    # Anything the calendar missed while Nextcloud was down gets pushed now.
+    caldav_backfill_async()
     # Threaded so a slow outbound sync (CalDAV / FTP) can't stall the UI
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"TimeClock running on http://localhost:{PORT}")
