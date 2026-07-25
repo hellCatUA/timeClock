@@ -2276,19 +2276,23 @@ def h_update_project(req, groups):
         db.execute("UPDATE projects SET name=?, defaults=?, archived=? WHERE id=?", (name, defaults_str, archived, pid))
         row = row_to_dict(db.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
 
-        # The project's estimate is a default, so it keeps reaching the jobs that
-        # never got one of their own — and the ones still carrying the old default.
-        # A job with a deliberately different estimate is left alone.
+        # The project's estimate is a default, so saving the project hands it to
+        # every job that has none of its own — whether or not the value itself
+        # changed — and moves the ones still carrying the previous default. A job
+        # with a deliberately different estimate is left alone.
         old_est, new_est = _defaults_est(ex.get("defaults")), _defaults_est(defaults_str)
-        followers = []
-        if new_est != old_est:
-            followers = [r["id"] for r in db.execute(
-                "SELECT id FROM planned_jobs WHERE project_id=? AND (est_minutes IS NULL OR est_minutes=?)",
-                (pid, old_est if old_est is not None else -1)).fetchall()]
-            if followers:
-                db.execute(
-                    "UPDATE planned_jobs SET est_minutes=? WHERE id IN (%s)" % ",".join("?" * len(followers)),
-                    [new_est, *followers])
+        clauses, params = ["est_minutes IS NULL"], [int(pid)]
+        if old_est is not None:
+            clauses.append("est_minutes=?")
+            params.append(old_est)
+        candidates = db.execute(
+            f"SELECT id, est_minutes FROM planned_jobs WHERE project_id=? AND ({' OR '.join(clauses)})",
+            params).fetchall()
+        followers = [r["id"] for r in candidates if r["est_minutes"] != new_est]
+        if followers:
+            db.execute(
+                "UPDATE planned_jobs SET est_minutes=? WHERE id IN (%s)" % ",".join("?" * len(followers)),
+                [new_est, *followers])
     for jid in followers:
         caldav_sync_async(jid)      # their calendar events are a different length now
     row["planned_jobs_updated"] = len(followers)
