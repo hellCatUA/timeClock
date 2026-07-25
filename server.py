@@ -1061,6 +1061,16 @@ def session_user(token):
         return public_user(row)
 
 
+def scope_clause(req, column="user_id"):
+    """Reads are private to their owner. A tech only ever sees their own rows;
+    a supervisor still sees everything (the Me/Everyone split is wave 2 UI).
+    Returns a SQL fragment and its args, ready to append to a WHERE."""
+    user = req.get("user") or {}
+    if user.get("role") == "tech":
+        return f" AND {column} IS ?", [user.get("id")]
+    return "", []
+
+
 def h_auth_state(req, _groups):
     """What the app needs before it can draw anything."""
     return 200, {"setup_required": user_count() == 0, "user": req.get("user")}
@@ -1312,6 +1322,7 @@ def h_get_entries(req, _groups):
         sql += " AND e.clock_in >= ?"; args.append(frm)
     if to:
         sql += " AND e.clock_in <= ?"; args.append(to)
+    scope_sql, scope_args = scope_clause(req, "e.user_id"); sql += scope_sql; args += scope_args
     sql += " ORDER BY e.clock_in DESC"
     with get_db() as db:
         rows = rows_to_list(db.execute(sql, args).fetchall())
@@ -1860,6 +1871,7 @@ def h_export_csv(req, _groups):
 
     sql = ENTRY_SELECT + " WHERE 1=1"
     args = []
+    scope_sql, scope_args = scope_clause(req, "e.user_id"); sql += scope_sql; args += scope_args
     if frm: sql += " AND e.clock_in >= ?"; args.append(frm)
     if to:  sql += " AND e.clock_in <= ?"; args.append(to)
     sql += " ORDER BY e.clock_in ASC"
@@ -2169,6 +2181,7 @@ def h_get_trips(req, _groups):
     to  = params.get("to",  [None])[0]
     sql = "SELECT * FROM trips WHERE 1=1"
     args = []
+    scope_sql, scope_args = scope_clause(req, "user_id"); sql += scope_sql; args += scope_args
     if frm: sql += " AND start_time >= ?"; args.append(frm)
     if to:  sql += " AND start_time <= ?"; args.append(to)
     sql += " ORDER BY start_time DESC"
@@ -2486,8 +2499,10 @@ PLANNED_SELECT = """
 """
 
 def h_get_planned_jobs(req, _groups):
+    scope_sql, scope_args = scope_clause(req, "pj.user_id")
     with get_db() as db:
-        rows = rows_to_list(db.execute(PLANNED_SELECT + " ORDER BY pj.created_at DESC").fetchall())
+        rows = rows_to_list(db.execute(
+            PLANNED_SELECT + " WHERE 1=1" + scope_sql + " ORDER BY pj.created_at DESC", scope_args).fetchall())
     return 200, rows
 
 def h_create_planned_job(req, _groups):
@@ -2669,6 +2684,7 @@ def h_export_mileage_csv(req, _groups):
     to  = params.get("to",  [None])[0]
     sql = "SELECT * FROM trips WHERE status='completed'"
     args = []
+    scope_sql, scope_args = scope_clause(req, "user_id"); sql += scope_sql; args += scope_args
     if frm: sql += " AND start_time >= ?"; args.append(frm)
     if to:  sql += " AND start_time <= ?"; args.append(to)
     sql += " ORDER BY start_time ASC"
@@ -2784,6 +2800,17 @@ ROUTES = [
     (r"/api/settings",                  ["PUT"],    h_put_settings),
     (r"/api/reports/export/csv",        ["GET"],    h_export_csv),
 ]
+
+
+# A tech may only touch their own rows by id. Reads are already scoped; this
+# closes the by-id path so a guessed id cannot edit, delete or read someone
+# else's entry, trip or planned job. Central so no handler can forget it.
+OWNED_TABLES = {"entries": "time_entries", "trips": "trips", "planned-jobs": "planned_jobs"}
+
+
+def owned_resource(path):
+    m = re.match(r"/api/(entries|trips|planned-jobs)/(\d+)", path)
+    return (OWNED_TABLES[m.group(1)], int(m.group(2))) if m else (None, None)
 
 
 # ── Request handler ─────────────────────────────────────────────────────────────
@@ -2930,6 +2957,17 @@ class Handler(BaseHTTPRequestHandler):
         if path not in PUBLIC_API and not user:
             self._send(401, {"error": "Sign in required"})
             return
+
+        # A tech reaching a specific entry/trip/planned job by id must own it.
+        # Unknown ids fall through so the handler can answer its own 404.
+        if user and user.get("role") == "tech":
+            table, rid = owned_resource(path)
+            if table:
+                with get_db() as db:
+                    row = db.execute(f"SELECT user_id FROM {table} WHERE id=?", (rid,)).fetchone()
+                if row is not None and row["user_id"] != user["id"]:
+                    self._send(403, {"error": "Not yours"})
+                    return
 
         body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
         req = {"body": body, "query": query, "path": path, "method": method,
