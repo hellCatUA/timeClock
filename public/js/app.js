@@ -5457,6 +5457,7 @@ async function renderSettingsPage() {
   const paidBreaks    = s.paid_breaks === '1';
   const breakReminder = parseInt(s.break_frequency_minutes||'0',10) > 0;
   const calOn         = s.caldav_enabled === '1';
+  const calEntries    = s.caldav_sync_entries !== '0';
 
   page.innerHTML = `
     <div class="p-16">
@@ -5598,13 +5599,21 @@ async function renderSettingsPage() {
             </div>
             <div class="field-hint">Used when the planned job has a time. Date-only jobs become all-day events.</div>
           </div>
+          <div class="form-group">
+            <div class="toggle-row">
+              <label class="form-label" style="margin:0;">Include Finished Work Orders</label>
+              <label class="switch"><input type="checkbox" id="s-cal-entries" ${calEntries?'checked':''}><span class="slider"></span></label>
+            </div>
+            <div class="field-hint">Every clocked-out job lands in the calendar with its real start and end time. Past work is backfilled automatically the first time you save.</div>
+          </div>
         </div>
         <div class="row-gap8" style="margin-top:8px;">
           <button class="btn btn-primary btn-sm" id="s-save-cal-btn">${svg('check')} Save</button>
           <button class="btn btn-ghost btn-sm" id="s-test-cal-btn">${svg('refresh')} Test</button>
         </div>
         <div id="s-cal-status" class="cal-status hidden"></div>
-        <button class="btn btn-ghost btn-sm" id="s-syncall-cal-btn" style="margin-top:8px;">${svg('calendar')} Sync All Planned Jobs</button>
+        <button class="btn btn-ghost btn-sm" id="s-syncall-cal-btn" style="margin-top:8px;">${svg('calendar')} Re-Sync Everything</button>
+        <div class="field-hint">Rebuilds every event from scratch. Only needed if the calendar got out of step — new and past jobs sync on their own.</div>
       </div>
 
       <div style="height:16px;"></div>
@@ -5753,6 +5762,7 @@ function wireCalendarSettings() {
         ...form,
         caldav_enabled:      enabled ? '1' : '0',
         caldav_duration_min: document.querySelector('#s-cal-dur .toggle-btn.active')?.dataset.v || '60',
+        caldav_sync_entries: document.getElementById('s-cal-entries').checked ? '1' : '0',
       });
       document.getElementById('s-cal-pass').value = '';
       document.getElementById('s-cal-pass').placeholder =
@@ -5799,7 +5809,7 @@ function wireCalendarSettings() {
       const r = await api.syncAllCaldav();
       const failed = r.failed || [];
       showStatus(
-        `${failed.length ? svg('alert') : svg('check')} ${r.synced} of ${r.total} planned job${r.total===1?'':'s'} synced` +
+        `${failed.length ? svg('alert') : svg('check')} ${r.synced} of ${r.total} event${r.total===1?'':'s'} synced` +
         (failed.length ? `<div class="cal-fail">Failed: ${escHtml(failed.join(', '))}</div>` : ''),
         failed.length ? 'warn' : 'ok');
     } catch (e) {
