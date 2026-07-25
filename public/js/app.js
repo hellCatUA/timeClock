@@ -222,9 +222,9 @@ function toggleMdCheckbox(src, index) {
   );
 }
 
-// Makes the checkboxes inside a rendered scope tappable: flips the box,
-// saves the new source, and re-renders just that container
-function wireScopeCheckboxes(containerId, entry, onSaved) {
+// Makes the checkboxes inside a rendered scope tappable, wherever the scope is
+// shown. getSource() returns the current raw markdown, save(updated) persists it.
+function wireScopeCheckboxes(containerId, { getSource, save, onSaved }) {
   const box = document.getElementById(containerId);
   if (!box) return;
   box.classList.add('scope-interactive');
@@ -232,24 +232,16 @@ function wireScopeCheckboxes(containerId, entry, onSaved) {
     const cb = e.target.closest('.md-box[data-cb]');
     if (!cb) return;
     e.preventDefault();
-    const idx = Number(cb.dataset.cb);
-    const current = (state.currentEntry && state.currentEntry.id === entry.id)
-      ? state.currentEntry.scope_of_work
-      : entry.scope_of_work;
-    const updated = toggleMdCheckbox(current, idx);
+    const current = getSource();
+    const updated = toggleMdCheckbox(current, Number(cb.dataset.cb));
     if (updated === current) return;
-    cb.textContent = cb.textContent === '☑' ? '☐' : '☑';   // instant feedback
-    // keep the (hidden) raw editor in sync, otherwise autoSaveActiveForm would
-    // write its stale text back over the ticks on the next navigation
-    const rawEditor = document.getElementById('jd-scope');
-    if (rawEditor) rawEditor.value = updated;
+    const flip = () => { cb.textContent = cb.textContent === '☑' ? '☐' : '☑'; };
+    flip();                                   // instant feedback
     try {
-      const saved = await api.updateEntry(entry.id, { scope_of_work: updated });
-      if (state.currentEntry && state.currentEntry.id === entry.id) state.currentEntry = saved;
-      entry.scope_of_work = updated;
-      onSaved?.(saved);
+      const saved = await save(updated);
+      onSaved?.(saved, updated);
     } catch (err) {
-      cb.textContent = cb.textContent === '☑' ? '☐' : '☑';  // put it back
+      flip();                                 // put it back
       showToast(err.message || 'Could not save', 'error');
     }
   });
@@ -1198,7 +1190,7 @@ function openPlannedJobDetail(pj, onStart) {
         const dc = parseDispatch(pj.dispatch_contacts);
         return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
       })()}
-      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-rich">${renderRichText(pj.scope_of_work)}</div>` : ''}
+      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div id="pjd-scope"><div class="scope-rich">${renderRichText(pj.scope_of_work)}</div></div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pjd-close">Close</button>
@@ -1207,6 +1199,16 @@ function openPlannedJobDetail(pj, onStart) {
 
   document.getElementById('pjd-x').addEventListener('click', closeModal);
   document.getElementById('pjd-close').addEventListener('click', closeModal);
+  wireScopeCheckboxes('pjd-scope', {
+    getSource: () => pj.scope_of_work,
+    save: async updated => {
+      const saved = await api.updatePlannedJob(pj.id, { scope_of_work: updated });
+      pj.scope_of_work = updated;
+      const cached = (state.plannedJobs || []).find(x => x.id === pj.id);
+      if (cached) cached.scope_of_work = updated;
+      return saved;
+    },
+  });
   document.querySelector('.project-link')?.addEventListener('click', e => {
     closeModal();
     openProjectPage(e.currentTarget.dataset.proj, 'clock');
@@ -2629,9 +2631,20 @@ function renderActiveClockPage() {
     renderActiveClockPage();
   };
 
-  // Scope checkboxes are tappable while the job is active — ticking one
-  // rewrites "- [ ]" to "- [x]" in the stored source
-  wireScopeCheckboxes('sc-view', entry);
+  // Scope checkboxes are tappable — ticking one rewrites "- [ ]" to "- [x]"
+  // in the stored source. The hidden raw editor is kept in sync so
+  // autoSaveActiveForm can't write its stale text back over the ticks.
+  wireScopeCheckboxes('sc-view', {
+    getSource: () => (state.currentEntry || entry).scope_of_work,
+    save: async updated => {
+      const ed = document.getElementById('jd-scope');
+      if (ed) ed.value = updated;
+      const saved = await api.updateEntry(entry.id, { scope_of_work: updated });
+      state.currentEntry = saved;
+      entry.scope_of_work = updated;
+      return saved;
+    },
+  });
 
   wireDispatchEditor('jd-dispatch');
   document.getElementById('save-dispatch-btn')?.addEventListener('click', async () => {
@@ -4844,7 +4857,7 @@ async function openEntryDetail(entry) {
         const dc = parseDispatch(entry.dispatch_contacts);
         return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
       })()}
-      ${entry.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div class="scope-rich">${renderRichText(entry.scope_of_work)}</div>` : ''}
+      ${entry.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div id="det-scope"><div class="scope-rich">${renderRichText(entry.scope_of_work)}</div></div>` : ''}
       <div id="det-photos"></div>
     </div>
     <div class="modal-footer">
@@ -4856,6 +4869,15 @@ async function openEntryDetail(entry) {
     </div>`);
 
   document.getElementById('det-close-btn').addEventListener('click', closeModal);
+  wireScopeCheckboxes('det-scope', {
+    getSource: () => entry.scope_of_work,
+    save: async updated => {
+      const saved = await api.updateEntry(entry.id, { scope_of_work: updated });
+      entry.scope_of_work = updated;
+      if (state.currentEntry && state.currentEntry.id === entry.id) state.currentEntry = saved;
+      return saved;
+    },
+  });
   document.querySelector('#modal-body .project-link')?.addEventListener('click', e => {
     closeModal();
     openProjectPage(e.currentTarget.dataset.proj, state.page === 'project' ? 'journal' : state.page);
