@@ -352,6 +352,8 @@ const ICONS = {
   file:     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
   phone:    '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
   mail:     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  refresh:  '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
 };
 const svg = name => icon(ICONS[name] || '');
 
@@ -1229,6 +1231,8 @@ function openPlannedJobMenu(pj, onStart) {
     </div>
     <div class="modal-body">
       <button class="btn btn-secondary btn-full" id="pjm-edit" style="margin-bottom:8px;">${svg('edit')} Edit</button>
+      ${pj.planned_date ? `<a class="btn btn-ghost btn-full" id="pjm-ics" style="margin-bottom:8px;"
+           href="${api.getPlannedIcsUrl(pj.id)}" download>${svg('calendar')} Add to Calendar (.ics)</a>` : ''}
       <button class="btn btn-ghost btn-full" id="pjm-del" style="color:var(--red);">${svg('trash')} Delete</button>
     </div>
     <div class="modal-footer">
@@ -5452,6 +5456,7 @@ async function renderSettingsPage() {
   const breaksEnabled = s.breaks_enabled === '1';
   const paidBreaks    = s.paid_breaks === '1';
   const breakReminder = parseInt(s.break_frequency_minutes||'0',10) > 0;
+  const calOn         = s.caldav_enabled === '1';
 
   page.innerHTML = `
     <div class="p-16">
@@ -5552,6 +5557,54 @@ async function renderSettingsPage() {
           </div>
         </div>
         <button class="btn btn-primary btn-sm" id="s-save-mileage-btn">${svg('check')} Save Rate</button>
+      </div>
+
+      <!-- Calendar Sync -->
+      <div class="section-label">Calendar Sync</div>
+      <div class="card">
+        <div class="form-group">
+          <div class="toggle-row">
+            <label class="form-label" style="margin:0;">Sync Planned Jobs</label>
+            <label class="switch"><input type="checkbox" id="s-cal-enabled" ${calOn?'checked':''}><span class="slider"></span></label>
+          </div>
+          <div class="field-hint">Planned jobs are pushed to a Nextcloud (CalDAV) calendar when created, edited or deleted.</div>
+        </div>
+        <div id="s-cal-options" class="${calOn?'':'hidden'}">
+          <div class="form-group">
+            <label class="form-label">Nextcloud URL</label>
+            <input type="url" class="form-control" id="s-cal-url" placeholder="https://cloud.example.com"
+                   value="${escHtml(s.caldav_url||'')}" autocomplete="off" inputmode="url">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Username</label>
+            <input type="text" class="form-control" id="s-cal-user" value="${escHtml(s.caldav_user||'')}" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">App Password</label>
+            <input type="password" class="form-control" id="s-cal-pass" autocomplete="new-password"
+                   placeholder="${s.caldav_password_set==='1' ? '•••••••• (saved)' : 'Nextcloud app password'}">
+            <div class="field-hint">Nextcloud → Settings → Security → Create new app password. Leave blank to keep the saved one.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Calendar</label>
+            <input type="text" class="form-control" id="s-cal-name" value="${escHtml(s.caldav_calendar||'personal')}" autocomplete="off">
+            <div class="field-hint" id="s-cal-list"></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Default Duration</label>
+            <div class="toggle-group" id="s-cal-dur">
+              ${[['30','30 min'],['60','1 hr'],['120','2 hrs'],['240','4 hrs']].map(([v,l])=>
+                `<button class="toggle-btn ${(s.caldav_duration_min||'60')===v?'active':''}" data-v="${v}">${l}</button>`).join('')}
+            </div>
+            <div class="field-hint">Used when the planned job has a time. Date-only jobs become all-day events.</div>
+          </div>
+        </div>
+        <div class="row-gap8" style="margin-top:8px;">
+          <button class="btn btn-primary btn-sm" id="s-save-cal-btn">${svg('check')} Save</button>
+          <button class="btn btn-ghost btn-sm" id="s-test-cal-btn">${svg('refresh')} Test</button>
+        </div>
+        <div id="s-cal-status" class="cal-status hidden"></div>
+        <button class="btn btn-ghost btn-sm" id="s-syncall-cal-btn" style="margin-top:8px;">${svg('calendar')} Sync All Planned Jobs</button>
       </div>
 
       <div style="height:16px;"></div>
@@ -5659,6 +5712,100 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
+  wireCalendarSettings();
+}
+
+/* ── Settings ▸ Calendar Sync ────────────────────────────────────── */
+function wireCalendarSettings() {
+  const statusEl = document.getElementById('s-cal-status');
+  const showStatus = (msg, kind) => {
+    statusEl.className = `cal-status ${kind||''}`;
+    statusEl.innerHTML = msg;
+  };
+  const readForm = () => ({
+    caldav_url:      document.getElementById('s-cal-url').value.trim().replace(/\/+$/, ''),
+    caldav_user:     document.getElementById('s-cal-user').value.trim(),
+    caldav_password: document.getElementById('s-cal-pass').value,
+    caldav_calendar: document.getElementById('s-cal-name').value.trim() || 'personal',
+  });
+
+  document.getElementById('s-cal-enabled').addEventListener('change', e => {
+    document.getElementById('s-cal-options').classList.toggle('hidden', !e.target.checked);
+  });
+
+  document.getElementById('s-cal-dur').addEventListener('click', e => {
+    const btn = e.target.closest('.toggle-btn');
+    if (!btn) return;
+    document.querySelectorAll('#s-cal-dur .toggle-btn').forEach(b => b.classList.toggle('active', b===btn));
+  });
+
+  document.getElementById('s-save-cal-btn').addEventListener('click', async () => {
+    const enabled = document.getElementById('s-cal-enabled').checked;
+    const form    = readForm();
+    if (enabled && (!form.caldav_url || !form.caldav_user)) {
+      showToast('URL and username are required', 'error'); return;
+    }
+    if (enabled && !form.caldav_password && state.settings.caldav_password_set !== '1') {
+      showToast('App password is required', 'error'); return;
+    }
+    try {
+      state.settings = await api.saveSettings({
+        ...form,
+        caldav_enabled:      enabled ? '1' : '0',
+        caldav_duration_min: document.querySelector('#s-cal-dur .toggle-btn.active')?.dataset.v || '60',
+      });
+      document.getElementById('s-cal-pass').value = '';
+      document.getElementById('s-cal-pass').placeholder =
+        state.settings.caldav_password_set === '1' ? '•••••••• (saved)' : 'Nextcloud app password';
+      showToast('Calendar settings saved', 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+  });
+
+  document.getElementById('s-test-cal-btn').addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    showStatus('Checking…', '');
+    statusEl.classList.remove('hidden');
+    try {
+      const r = await api.testCaldav(readForm());
+      if (!r.ok) { showStatus(escHtml(r.error || 'Connection failed'), 'err'); return; }
+      const list = (r.calendars || []);
+      const chosen = document.getElementById('s-cal-name').value.trim() || 'personal';
+      const hit = list.find(c => c.slug === chosen);
+      const names = list.map(c =>
+        `<button class="cal-pick${c.slug===chosen?' on':''}" data-slug="${escHtml(c.slug)}">${escHtml(c.name)}</button>`).join('');
+      showStatus(
+        (hit ? `${svg('check')} Connected — writing to <b>${escHtml(hit.name)}</b>`
+             : `${svg('alert')} Connected, but there is no calendar named <b>${escHtml(chosen)}</b>`) +
+        (names ? `<div class="cal-picks-label">${hit ? 'Switch calendar:' : 'Pick a calendar:'}</div>` +
+                 `<div class="cal-picks">${names}</div>` : ''),
+        hit ? 'ok' : 'warn');
+      statusEl.querySelectorAll('.cal-pick').forEach(b => b.addEventListener('click', () => {
+        document.getElementById('s-cal-name').value = b.dataset.slug;
+        statusEl.querySelectorAll('.cal-pick').forEach(x => x.classList.toggle('on', x===b));
+        showToast('Press Save to apply', '');
+      }));
+    } catch (e) {
+      showStatus(escHtml(e.message), 'err');
+    } finally { btn.disabled = false; }
+  });
+
+  document.getElementById('s-syncall-cal-btn').addEventListener('click', async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    statusEl.classList.remove('hidden');
+    showStatus('Syncing…', '');
+    try {
+      const r = await api.syncAllCaldav();
+      const failed = r.failed || [];
+      showStatus(
+        `${failed.length ? svg('alert') : svg('check')} ${r.synced} of ${r.total} planned job${r.total===1?'':'s'} synced` +
+        (failed.length ? `<div class="cal-fail">Failed: ${escHtml(failed.join(', '))}</div>` : ''),
+        failed.length ? 'warn' : 'ok');
+    } catch (e) {
+      showStatus(escHtml(e.message), 'err');
+    } finally { btn.disabled = false; }
+  });
 }
 
 function renderRatesList() {
