@@ -1169,6 +1169,34 @@ mark.hl { background: var(--orange); color: #1a1a1a; border-radius: 3px; padding
 .trip-cat-btn { padding: 10px 8px; border: 1.5px solid var(--border); background: var(--bg3); color: var(--text); border-radius: 8px; font-size: 13px; text-align: center; cursor: pointer; transition: all .15s; }
 .trip-cat-btn.active { border-color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
 
+/* ===== Estimated duration ===== */
+.est-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.est-chip {
+  flex: 1 1 0;
+  min-width: 52px;
+  padding: 9px 4px;
+  border: 1.5px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+}
+.est-chip.on { border-color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.est-custom { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.est-custom .form-control { width: 68px; text-align: center; }
+.est-unit { font-size: 13px; color: var(--text3); margin-right: 8px; }
+
+.est-progress { font-size: 13px; color: var(--text2); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.est-progress.over { color: var(--orange); font-weight: 600; }
+
+.est-summary { padding: 12px 14px; }
+.est-sum-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 13.5px; padding: 3px 0; }
+.est-sum-row > span:first-child { color: var(--text3); }
+.est-sum-n { font-size: 11.5px; color: var(--text3); font-weight: 400; }
+
 /* ===== Settings ▸ Calendar Sync ===== */
 .row-gap8 { display: flex; gap: 8px; flex-wrap: wrap; }
 .cal-status {
