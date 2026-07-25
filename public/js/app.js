@@ -5784,18 +5784,28 @@ function wireCalendarSettings() {
     try {
       const r = await api.testCaldav(readForm());
       showUrl(r.url);
-      if (!r.ok) { showStatus(escHtml(r.error || 'Connection failed'), 'err'); return; }
-      const list = (r.calendars || []);
+      const list = r.calendars || [];
       const chosen = document.getElementById('s-cal-name').value.trim() || 'personal';
       const hit = list.find(c => c.slug === chosen);
       const names = list.map(c =>
         `<button class="cal-pick${c.slug===chosen?' on':''}" data-slug="${escHtml(c.slug)}">${escHtml(c.name)}</button>`).join('');
-      showStatus(
-        (hit ? `${svg('check')} Connected — writing to <b>${escHtml(hit.name)}</b>`
-             : `${svg('alert')} Connected, but there is no calendar named <b>${escHtml(chosen)}</b>`) +
-        (names ? `<div class="cal-picks-label">${hit ? 'Switch calendar:' : 'Pick a calendar:'}</div>` +
-                 `<div class="cal-picks">${names}</div>` : ''),
-        hit ? 'ok' : 'warn');
+      const chips = names
+        ? `<div class="cal-picks-label">${hit ? 'Switch calendar:' : 'Pick a calendar:'}</div><div class="cal-picks">${names}</div>`
+        : '';
+
+      let head, kind;
+      if (!list.length) {
+        head = `${svg('alert')} ${escHtml(r.error || 'Connection failed')}`; kind = 'err';
+      } else if (!hit) {
+        head = `${svg('alert')} Connected, but there is no calendar named <b>${escHtml(chosen)}</b>`; kind = 'warn';
+      } else if (r.error) {
+        head = `${svg('alert')} Signed in, but writing to <b>${escHtml(hit.name)}</b> failed` +
+               `<div class="cal-fail">${escHtml(r.error)}</div>`;
+        kind = 'err';
+      } else {
+        head = `${svg('check')} Connected — writing to <b>${escHtml(hit.name)}</b>`; kind = 'ok';
+      }
+      showStatus(head + chips, kind);
       statusEl.querySelectorAll('.cal-pick').forEach(b => b.addEventListener('click', () => {
         document.getElementById('s-cal-name').value = b.dataset.slug;
         statusEl.querySelectorAll('.cal-pick').forEach(x => x.classList.toggle('on', x===b));
@@ -5813,11 +5823,19 @@ function wireCalendarSettings() {
     showStatus('Syncing…', '');
     try {
       const r = await api.syncAllCaldav();
-      const failed = r.failed || [];
+      const errs = r.errors || [];
+      // Show why it failed, not a wall of job names that says nothing.
+      const detail = errs.map(e => {
+        const more = e.count - (e.examples || []).length;
+        const eg = (e.examples || []).length
+          ? `<div class="cal-fail-eg">${escHtml(e.examples.join(', '))}${more > 0 ? `, +${more} more` : ''}</div>`
+          : '';
+        return `<div class="cal-fail"><b>${escHtml(e.message)}</b>`
+             + (e.count ? ` — ${e.count} of ${r.total}` : '') + eg + '</div>';
+      }).join('');
       showStatus(
-        `${failed.length ? svg('alert') : svg('check')} ${r.synced} of ${r.total} event${r.total===1?'':'s'} synced` +
-        (failed.length ? `<div class="cal-fail">Failed: ${escHtml(failed.join(', '))}</div>` : ''),
-        failed.length ? 'warn' : 'ok');
+        `${errs.length ? svg('alert') : svg('check')} ${r.synced} of ${r.total} event${r.total===1?'':'s'} synced` + detail,
+        errs.length ? (r.synced ? 'warn' : 'err') : 'ok');
     } catch (e) {
       showStatus(escHtml(e.message), 'err');
     } finally { btn.disabled = false; }
