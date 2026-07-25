@@ -913,7 +913,7 @@ async function renderIdleClockPage() {
                   <div class="sched-title">${escHtml(pj.wo_title || pj.assignment_id || 'Planned job')}</div>
                   ${pj.project_name ? `<div class="sched-project">${escHtml(pj.project_name)}</div>` : ''}
                   <div class="sched-time-row">
-                    <span class="sched-time">${pj.planned_time ? plannedTimeRange(pj) : (pj.est_minutes ? `~${fmtMins(pj.est_minutes)}` : '—')}</span>
+                    <span class="sched-time">${pj.planned_time ? fmtPlannedTime(pj.planned_time) : '—'}</span>
                     ${soon ? '<span class="sched-soon-chip">STARTING SOON</span>' : ''}
                   </div>
                   <div class="sched-meta-row">
@@ -1219,19 +1219,6 @@ function fmtPlannedTime(t) {
   return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 }
 
-/* '9:30 AM – 11:30 AM' when the job carries an estimate, otherwise just the start. */
-function plannedTimeRange(pj) {
-  if (!pj.planned_time) return '';
-  const start = fmtPlannedTime(pj.planned_time);
-  const est = Number(pj.est_minutes) || 0;
-  if (!est) return start;
-  const [h, m] = pj.planned_time.split(':').map(Number);
-  const end = new Date();
-  end.setHours(h, m || 0, 0, 0);
-  end.setMinutes(end.getMinutes() + est);
-  return `${start} – ${end.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`;
-}
-
 function plannedDayLabel(iso) {
   const today = new Date().toLocaleDateString('en-CA');
   const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString('en-CA');
@@ -1252,7 +1239,7 @@ function isPlannedSoon(pj) {
 /* ── Planned job: read-only details ──────────────────────────────── */
 function openPlannedJobDetail(pj, onStart) {
   const sym = state.settings.currency_symbol || '$';
-  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + plannedTimeRange(pj) : ''}`;
+  const when = `${pj.planned_date ? plannedDayLabel(pj.planned_date) : 'Unscheduled'}${pj.planned_time ? ' · ' + fmtPlannedTime(pj.planned_time) : ''}`;
   const rate = pj.rate_type === 'flat'
     ? (pj.flat_amount ? `${sym}${parseFloat(pj.flat_amount).toFixed(2)} flat` : 'Non-Billable')
     : pj.rate_type === 'none'
@@ -1653,9 +1640,14 @@ function openPlanJobModal(existing = null) {
   // Picking a project auto-fills its configured defaults (creating only —
   // when editing, the job's own saved values must win)
   document.getElementById('pj-project').addEventListener('change', e => {
-    if (existing) return;
     const p = (state.projects || []).find(x => x.id === Number(e.target.value));
-    if (p) applyProjectDefaultsToJobFields('pj', p);
+    if (!p) return;
+    if (!existing) { applyProjectDefaultsToJobFields('pj', p); return; }
+    // Editing: the job's own values stand, but an unset estimate follows the project
+    if (readDurationField('pj-est')) return;
+    let d = {};
+    try { d = JSON.parse(p.defaults || '{}') || {}; } catch { d = {}; }
+    if (d.est_minutes) setDurationField('pj-est', d.est_minutes);
   });
 
   if (existing) {
@@ -1749,8 +1741,12 @@ function openProjectFormModal(existing = null, onSaved = null) {
         ? await api.updateProject(existing.id, { name, defaults })
         : await api.createProject({ name, defaults });
       state.projects = await api.getProjects().catch(() => state.projects);
+      state.plannedJobs = await api.getPlannedJobs().catch(() => state.plannedJobs);
       closeModal();
-      showToast(existing ? 'Project updated' : 'Project created', 'success');
+      const followed = saved?.planned_jobs_updated || 0;
+      showToast(existing
+        ? (followed ? `Project updated — ${followed} planned job${followed === 1 ? '' : 's'} followed` : 'Project updated')
+        : 'Project created', 'success');
       if (onSaved) onSaved(saved);
       else renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Save failed', 'error'); }
@@ -1820,10 +1816,12 @@ async function renderProjectPage() {
     document.getElementById('pp-menu').addEventListener('click', () => openProjectMenu(project));
     document.getElementById('pp-use-actual')?.addEventListener('click', async () => {
       try {
-        await api.updateProject(project.id, { name: project.name,
-                                              defaults: { ...projDefaults, est_minutes: avgActual } });
+        const saved = await api.updateProject(project.id, { name: project.name,
+                                                            defaults: { ...projDefaults, est_minutes: avgActual } });
         await reloadData();
-        showToast(`Estimate set to ${fmtMins(avgActual)}`, 'success');
+        const followed = saved?.planned_jobs_updated || 0;
+        showToast(`Estimate set to ${fmtMins(avgActual)}`
+          + (followed ? ` — ${followed} planned job${followed === 1 ? '' : 's'} followed` : ''), 'success');
         renderProjectPage();
       } catch (err) { showToast(err.message || 'Save failed', 'error'); }
     });
