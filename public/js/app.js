@@ -6,6 +6,7 @@
 const state = {
   page: 'clock',
   user: null,
+  supervisor: null,
   overrideNote: null,
   overrideAcknowledged: false,
   currentEntry: null,
@@ -5921,6 +5922,16 @@ async function renderSettingsPage() {
           </div>
           <button class="btn btn-ghost btn-sm" id="s-signout">Sign Out</button>
         </div>
+        ${!isSup && state.supervisor ? `
+        <div class="account-sup">
+          <div class="account-sup-label">Your supervisor</div>
+          <div class="account-sup-row">
+            <span class="account-sup-name">${escHtml(state.supervisor.display_name || '—')}</span>
+            ${state.supervisor.phone
+              ? `<a class="contact-link" href="tel:${escHtml(state.supervisor.phone.replace(/[^\d+]/g, ''))}">${svg('phone')} ${escHtml(state.supervisor.phone)}</a>`
+              : '<span class="account-sup-none">no phone set</span>'}
+          </div>
+        </div>` : ''}
       </div>
 
       ${state.user?.role === 'supervisor' ? `
@@ -5931,13 +5942,20 @@ async function renderSettingsPage() {
         <button class="btn btn-ghost btn-sm" id="add-user-btn" style="margin-top:8px;">${svg('plus')} Add Person</button>
       </div>` : ''}
 
-      <!-- Tech Info -->
-      <div class="section-label">Technician Info</div>
+      <!-- Your details. The name is your own, not an install-wide setting —
+           with two people it has to say who each of them is. -->
+      <div class="section-label">Your Details</div>
       <div class="card">
         <div class="form-group">
-          <label class="form-label">Tech Name</label>
-          <input type="text" class="form-control" id="s-tech-name" value="${escHtml(s.tech_name||'')}">
+          <label class="form-label">Your Name</label>
+          <input type="text" class="form-control" id="s-tech-name" value="${escHtml(state.user?.display_name||'')}">
         </div>
+        <div class="form-group">
+          <label class="form-label">Phone</label>
+          <input type="tel" class="form-control" id="s-phone" value="${escHtml(state.user?.phone||'')}"
+                 placeholder="${isSup ? 'Shown to your tech in Dispatch' : 'So your supervisor can reach you'}">
+        </div>
+        ${isSup ? `
         <div class="form-group">
           <label class="form-label">Week Begins On</label>
           <div class="toggle-group" id="s-week-toggle">
@@ -5948,7 +5966,7 @@ async function renderSettingsPage() {
         <div class="form-group">
           <label class="form-label">Currency Symbol</label>
           <input type="text" class="form-control" id="s-currency" value="${escHtml(s.currency_symbol||'$')}" maxlength="3" style="max-width:80px;">
-        </div>
+        </div>` : ''}
         <button class="btn btn-primary btn-sm" id="s-save-tech-btn">${svg('check')} Save</button>
       </div>
 
@@ -6102,7 +6120,7 @@ async function renderSettingsPage() {
 
   // Tech info save
   let weekStart = s.week_start || '1';
-  document.getElementById('s-week-toggle').addEventListener('click', e => {
+  document.getElementById('s-week-toggle')?.addEventListener('click', e => {
     const btn = e.target.closest('.toggle-btn');
     if (!btn) return;
     weekStart = btn.dataset.w;
@@ -6110,12 +6128,22 @@ async function renderSettingsPage() {
   });
   document.getElementById('s-save-tech-btn').addEventListener('click', async () => {
     try {
-      state.settings = await api.saveSettings({
-        tech_name:       document.getElementById('s-tech-name').value.trim(),
-        week_start:      weekStart,
-        currency_symbol: document.getElementById('s-currency').value.trim() || '$',
+      const name = document.getElementById('s-tech-name').value.trim();
+      state.user = await api.updateUser(state.user.id, {
+        display_name: name,
+        phone: document.getElementById('s-phone').value.trim(),
       });
+      if (isSup) {
+        // Install-wide settings, and the name exports still print
+        state.settings = await api.saveSettings({
+          tech_name:       name,
+          week_start:      weekStart,
+          currency_symbol: document.getElementById('s-currency').value.trim() || '$',
+        });
+        state.supervisor = { display_name: state.user.display_name, phone: state.user.phone };
+      }
       showToast('Saved', 'success');
+      renderSettingsPage();
     } catch (e) { showToast(e.message, 'error'); }
   });
 
@@ -6611,6 +6639,7 @@ function renderAuthGate({ setup }) {
                                 phone: document.getElementById('au-phone').value.trim() })
         : await api.authLogin({ username, password });
       state.user = res.user;
+      state.supervisor = res.supervisor || null;
       await boot();
       document.getElementById('app').classList.remove('auth-mode');
       if (setup && res.claimed_rows) {
@@ -6642,6 +6671,7 @@ async function signOut() {
   try { await api.authLogout(); } catch { /* the cookie is going either way */ }
   clearTimers();
   state.user = null;
+  state.supervisor = null;
   state.currentEntry = null;
   state.currentTrip = null;
   renderAuthGate({ setup: false });
@@ -6685,6 +6715,7 @@ async function init() {
   if (auth.setup_required) { renderAuthGate({ setup: true }); return; }
   if (!auth.user)          { renderAuthGate({ setup: false }); return; }
   state.user = auth.user;
+  state.supervisor = auth.supervisor || null;
   document.getElementById('app').classList.remove('auth-mode');
   await boot();
 }
