@@ -373,6 +373,12 @@ def migrate_db():
         "CREATE INDEX IF NOT EXISTS idx_entries_user ON time_entries(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_planned_user ON planned_jobs(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_trips_user ON trips(user_id)",
+        # A tech starting a job nobody assigned records that it needs a decision
+        "ALTER TABLE time_entries ADD COLUMN approval TEXT",
+        "ALTER TABLE time_entries ADD COLUMN approval_note TEXT",
+        "ALTER TABLE time_entries ADD COLUMN approved_by INTEGER",
+        "ALTER TABLE time_entries ADD COLUMN approved_at TEXT",
+        "ALTER TABLE users ADD COLUMN default_pay_rate_id INTEGER",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -1122,6 +1128,104 @@ def h_auth_login(req, _groups):
     return 200, {"user": public_user(row), "_set_cookie": token}
 
 
+def h_get_users(req, _groups):
+    """The supervisor manages the team; a tech only ever gets themselves."""
+    user = req.get("user") or {}
+    with get_db() as db:
+        if user.get("role") == "tech":
+            rows = db.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM users ORDER BY role, display_name").fetchall()
+    return 200, [public_user(r) for r in rows]
+
+
+def h_create_user(req, _groups):
+    data = req.get("body", {})
+    username = (data.get("username") or "").strip()
+    display  = (data.get("display_name") or "").strip() or username
+    password = data.get("password") or ""
+    role     = data.get("role") if data.get("role") in ROLES else "tech"
+    if not username or not password:
+        return 400, {"error": "Username and password are required"}
+    if len(password) < 8:
+        return 400, {"error": "Password must be at least 8 characters"}
+    pw_hash, salt = hash_password(password)
+    with get_db() as db:
+        if db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone():
+            return 409, {"error": "That username is taken"}
+        cur = db.execute(
+            "INSERT INTO users (username, display_name, role, phone, password_hash, password_salt, "
+            "default_pay_rate_id) VALUES (?,?,?,?,?,?,?)",
+            (username, display, role, (data.get("phone") or "").strip() or None,
+             pw_hash, salt, data.get("default_pay_rate_id")))
+        row = db.execute("SELECT * FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+    return 201, public_user(row)
+
+
+def h_update_user(req, groups):
+    """Supervisors edit anyone; a tech may only rename themselves or change
+    their own password — never their role, and never someone else."""
+    actor = req.get("user") or {}
+    uid = int(groups[0])
+    data = req.get("body", {})
+    is_self = actor.get("id") == uid
+    if actor.get("role") == "tech" and not is_self:
+        return 403, {"error": "Not yours"}
+
+    with get_db() as db:
+        row = row_to_dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+        if not row:
+            return 404, {"error": "Not found"}
+
+        display = (data.get("display_name") or row["display_name"]).strip()
+        phone   = data.get("phone", row["phone"])
+        phone   = (phone or "").strip() or None
+        if actor.get("role") == "supervisor":
+            role   = data.get("role") if data.get("role") in ROLES else row["role"]
+            active = 1 if data.get("active", row["active"]) else 0
+            rate   = data.get("default_pay_rate_id", row["default_pay_rate_id"])
+            # Losing the last supervisor would lock everyone out of the install
+            if row["role"] == "supervisor" and (role != "supervisor" or not active):
+                others = db.execute("SELECT COUNT(*) n FROM users WHERE role='supervisor' "
+                                    "AND active=1 AND id!=?", (uid,)).fetchone()["n"]
+                if others == 0:
+                    return 409, {"error": "This is the only supervisor — promote someone else first"}
+        else:
+            role, active, rate = row["role"], row["active"], row["default_pay_rate_id"]
+
+        db.execute("UPDATE users SET display_name=?, phone=?, role=?, active=?, default_pay_rate_id=? "
+                   "WHERE id=?", (display, phone, role, active, rate, uid))
+
+        password = data.get("password")
+        if password:
+            if len(password) < 8:
+                return 400, {"error": "Password must be at least 8 characters"}
+            pw_hash, salt = hash_password(password)
+            db.execute("UPDATE users SET password_hash=?, password_salt=? WHERE id=?",
+                       (pw_hash, salt, uid))
+            # A new password ends every session but the one making the change
+            db.execute("DELETE FROM sessions WHERE user_id=? AND token IS NOT ?",
+                       (uid, req.get("session_token")))
+        if not active:
+            db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return 200, public_user(row)
+
+
+def h_delete_user(req, groups):
+    """Accounts are deactivated, never deleted — their work has to keep an owner."""
+    uid = int(groups[0])
+    if (req.get("user") or {}).get("id") == uid:
+        return 409, {"error": "You cannot remove your own account"}
+    with get_db() as db:
+        row = row_to_dict(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+        if not row:
+            return 404, {"error": "Not found"}
+        db.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
+        db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+    return 200, {"success": True, "deactivated": True}
+
+
 def h_auth_logout(req, _groups):
     token = req.get("session_token")
     if token:
@@ -1303,6 +1407,55 @@ def attach_breaks(db, entry):
     return entry
 
 
+def needs_approval(db, req, data):
+    """A tech is expected to work what the supervisor assigned. Starting anything
+    else is allowed — the app warns and they override — but it is flagged so the
+    supervisor gets to approve or reject it afterwards."""
+    user = req.get("user") or {}
+    if user.get("role") != "tech":
+        return False
+    pj_id = data.get("from_planned_job_id")
+    if not pj_id:
+        return True
+    row = db.execute("SELECT user_id FROM planned_jobs WHERE id=?", (pj_id,)).fetchone()
+    # Started from a job that was actually assigned to this tech
+    return not (row and row["user_id"] == user["id"])
+
+
+def h_approve_entry(req, groups):
+    return _decide_entry(req, groups, "approved")
+
+
+def h_reject_entry(req, groups):
+    return _decide_entry(req, groups, "rejected")
+
+
+def _decide_entry(req, groups, decision):
+    eid = groups[0]
+    note = (req.get("body", {}).get("note") or "").strip() or None
+    with get_db() as db:
+        row = db.execute("SELECT approval FROM time_entries WHERE id=?", (eid,)).fetchone()
+        if not row:
+            return 404, {"error": "Not found"}
+        if not row["approval"]:
+            return 409, {"error": "This job did not need approval"}
+        db.execute("UPDATE time_entries SET approval=?, approved_by=?, approved_at=?, "
+                   "approval_note=COALESCE(?, approval_note) WHERE id=?",
+                   (decision, (req.get("user") or {}).get("id"), now_iso(), note, eid))
+        entry = row_to_dict(db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone())
+    return 200, entry
+
+
+def h_get_approvals(req, _groups):
+    """What the supervisor still has to decide on."""
+    if (req.get("user") or {}).get("role") != "supervisor":
+        return 403, {"error": "Supervisors only"}
+    with get_db() as db:
+        rows = rows_to_list(db.execute(
+            ENTRY_SELECT + " WHERE e.approval='pending' ORDER BY e.clock_in DESC").fetchall())
+    return 200, rows
+
+
 def h_get_current(req, _groups):
     uid = (req.get("user") or {}).get("id")
     with get_db() as db:
@@ -1341,6 +1494,7 @@ def h_post_entry(req, _groups):
     with get_db() as db:
         existing = db.execute(
             "SELECT id FROM time_entries WHERE clock_out IS NULL AND user_id IS ?", (uid,)).fetchone()
+        approval = "pending" if needs_approval(db, req, data) else None
         if existing:
             return 409, {"error": "Already clocked in", "entry_id": existing["id"]}
         cur = db.execute(
@@ -1351,8 +1505,8 @@ def h_post_entry(req, _groups):
              parking_tolls, is_replacement, old_serial, new_serial, return_track, no_return_track,
              work_summary, additional_info, wo_title, travel_reimb,
              status, release_code, no_release_code, materials, project_id, revisit_of,
-             scope_of_work, dispatch_contacts, est_minutes, user_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scope_of_work, dispatch_contacts, est_minutes, user_id, approval, approval_note)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("organization_id"), data.get("client_id"), data.get("pay_rate_id"),
              data.get("rate_type", "hourly"), data.get("flat_amount"),
              clock_in, data.get("address"), data.get("latitude"), data.get("longitude"),
@@ -1368,7 +1522,8 @@ def h_post_entry(req, _groups):
              1 if data.get("no_release_code") else 0, materials_str,
              data.get("project_id"), data.get("revisit_of"),
              data.get("scope_of_work"), data.get("dispatch_contacts"),
-             data.get("est_minutes"), uid)
+             data.get("est_minutes"), uid, approval,
+             (data.get("override_note") or "").strip() or None)
         )
         row = db.execute(ENTRY_SELECT + " WHERE e.id=?", (cur.lastrowid,)).fetchone()
         entry = attach_breaks(db, row_to_dict(row))
@@ -1833,11 +1988,19 @@ def public_settings(rows):
 def h_get_settings(req, _groups):
     with get_db() as db:
         rows = db.execute("SELECT key, value FROM settings").fetchall()
-    return 200, public_settings(rows)
+    out = public_settings(rows)
+    if (req.get("user") or {}).get("role") == "tech":
+        # Sync credentials and the install's own config are not the tech's to see
+        out = {k: v for k, v in out.items() if not k.startswith(SUPERVISOR_SETTINGS_PREFIX)}
+    return 200, out
 
 
 def h_put_settings(req, _groups):
     data = dict(req.get("body", {}))
+    if (req.get("user") or {}).get("role") == "tech":
+        refused = [k for k in data if k not in TECH_SETTINGS]
+        if refused:
+            return 403, {"error": "Only the supervisor can change these settings"}
     if "caldav_url" in data:
         url, err = caldav_normalize_url(data["caldav_url"])
         if err:
@@ -2747,6 +2910,13 @@ ROUTES = [
     (r"/api/auth/setup",                ["POST"],   h_auth_setup),
     (r"/api/auth/login",                ["POST"],   h_auth_login),
     (r"/api/auth/logout",               ["POST"],   h_auth_logout),
+    (r"/api/users",                     ["GET"],    h_get_users),
+    (r"/api/users",                     ["POST"],   h_create_user),
+    (r"/api/users/(\d+)",               ["PUT"],    h_update_user),
+    (r"/api/users/(\d+)",               ["DELETE"], h_delete_user),
+    (r"/api/approvals",                 ["GET"],    h_get_approvals),
+    (r"/api/entries/(\d+)/approve",     ["POST"],   h_approve_entry),
+    (r"/api/entries/(\d+)/reject",      ["POST"],   h_reject_entry),
 
     (r"/api/entries/current",           ["GET"],    h_get_current),
     (r"/api/entries",                   ["GET"],    h_get_entries),
@@ -2811,6 +2981,33 @@ OWNED_TABLES = {"entries": "time_entries", "trips": "trips", "planned-jobs": "pl
 def owned_resource(path):
     m = re.match(r"/api/(entries|trips|planned-jobs)/(\d+)", path)
     return (OWNED_TABLES[m.group(1)], int(m.group(2))) if m else (None, None)
+
+
+# Shared reference data and anything that configures the install belongs to the
+# supervisor. Listed centrally so a new route cannot quietly widen what a tech
+# is allowed to change.
+SUPERVISOR_WRITES = (
+    r"/api/organizations(/\d+)?$",
+    r"/api/clients(/\d+)?$",
+    r"/api/projects(/\d+)?$",
+    r"/api/pay-rates(/\d+)?$",
+    r"/api/pay-periods$",
+    r"/api/caldav/.*",
+    r"/api/users(/\d+)?$",
+    r"/api/entries/\d+/(approve|reject)$",   # a tech must not sign off their own override
+)
+
+# The only settings a tech may change; everything else is install-wide.
+TECH_SETTINGS = {"breaks_enabled", "paid_breaks", "break_frequency_minutes", "break_length_minutes"}
+
+# Sync credentials are none of a tech's business, even to read.
+SUPERVISOR_SETTINGS_PREFIX = ("caldav_", "ftp_")
+
+
+def supervisor_only(path, method):
+    if method == "GET":
+        return False
+    return any(re.fullmatch(p, path) for p in SUPERVISOR_WRITES)
 
 
 # ── Request handler ─────────────────────────────────────────────────────────────
@@ -2961,6 +3158,13 @@ class Handler(BaseHTTPRequestHandler):
         # A tech reaching a specific entry/trip/planned job by id must own it.
         # Unknown ids fall through so the handler can answer its own 404.
         if user and user.get("role") == "tech":
+            if supervisor_only(path, method):
+                # Editing your own account is the one exception — the handler
+                # still refuses to let a tech change their role or rate.
+                m = re.fullmatch(r"/api/users/(\d+)", path)
+                if not (m and method == "PUT" and int(m.group(1)) == user["id"]):
+                    self._send(403, {"error": "Only the supervisor can change this"})
+                    return
             table, rid = owned_resource(path)
             if table:
                 with get_db() as db:

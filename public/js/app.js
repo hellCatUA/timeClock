@@ -6,6 +6,8 @@
 const state = {
   page: 'clock',
   user: null,
+  overrideNote: null,
+  overrideAcknowledged: false,
   currentEntry: null,
   lastCompletedEntry: null,
   organizations: [],
@@ -872,6 +874,11 @@ async function renderIdleClockPage() {
 
   try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
   try { state.plannedJobs = await api.getPlannedJobs(); } catch { state.plannedJobs = state.plannedJobs || []; }
+  if (state.user?.role === 'supervisor') {
+    try { state.approvals = await api.getApprovals(); } catch { state.approvals = []; }
+  } else {
+    state.approvals = [];
+  }
   const projects = state.projects || [];
   const plannedJobs = state.plannedJobs || [];
 
@@ -897,6 +904,21 @@ async function renderIdleClockPage() {
         </button>
       </div>
       ${pendingBanner}
+      ${(state.approvals || []).length ? `
+      <div class="card appr-banner">
+        <div class="appr-banner-head">${svg('alert')} ${state.approvals.length} job${
+          state.approvals.length === 1 ? '' : 's'} started without an assignment</div>
+        ${state.approvals.map(a => `
+          <div class="appr-row" data-id="${a.id}">
+            <div class="appr-who">
+              <div class="appr-title">${escHtml(a.wo_title || a.assignment_id || 'Work order')}</div>
+              <div class="appr-meta">${escHtml(fmtDateShort(a.clock_in))}${
+                a.approval_note ? ' · ' + escHtml(a.approval_note) : ''}</div>
+            </div>
+            <button class="btn btn-ghost btn-sm appr-no" data-id="${a.id}">Reject</button>
+            <button class="btn btn-primary btn-sm appr-yes" data-id="${a.id}">Approve</button>
+          </div>`).join('')}
+      </div>` : ''}
       <div id="idle-schedule">
         <div class="section-label">This Week</div>
         ${(() => {
@@ -1009,6 +1031,18 @@ async function renderIdleClockPage() {
     document.getElementById('idle-form')?.classList.remove('hidden');
   };
   document.getElementById('idle-form-back').addEventListener('click', () => renderIdleClockPage());
+
+  const decide = async (id, approve) => {
+    try {
+      await (approve ? api.approveEntry(id) : api.rejectEntry(id));
+      showToast(approve ? 'Approved' : 'Rejected', 'success');
+      renderIdleClockPage();
+    } catch (err) { showToast(err.message || 'Could not save the decision', 'error'); }
+  };
+  document.querySelectorAll('.appr-yes').forEach(b =>
+    b.addEventListener('click', () => decide(Number(b.dataset.id), true)));
+  document.querySelectorAll('.appr-no').forEach(b =>
+    b.addEventListener('click', () => decide(Number(b.dataset.id), false)));
 
   document.getElementById('in-route-btn').addEventListener('click', () => openTripStartModal());
 
@@ -1183,6 +1217,8 @@ async function renderIdleClockPage() {
         wo_title:        woTitle || null,
         travel_reimb:    travel,
         est_minutes:     readDurationField('ci-est'),
+        from_planned_job_id: prefillExtras.plannedJobId || null,
+        override_note:   state.overrideNote || null,
         assignment_id:   state.pendingTripAssignment || prefillExtras.assignment_id || null,
         site_id:         prefillExtras.site_id || null,
         ticket_num:      prefillExtras.ticket_num || null,
@@ -1199,6 +1235,8 @@ async function renderIdleClockPage() {
       if (prefillExtras.plannedJobId) {
         try { await api.deletePlannedJob(prefillExtras.plannedJobId); } catch { /* non-critical */ }
       }
+      state.overrideNote = null;
+      state.overrideAcknowledged = false;
       state.pendingTripAssignment = null;
       state.pendingTripClockIn = null;
       // pendingTripId is intentionally NOT cleared here — it must survive
@@ -1353,7 +1391,46 @@ function openPlannedJobMenu(pj, onStart) {
 }
 
 /* ── + New Work Order: WHEN first (now / later), THEN what (new / revisit) ── */
+/* A tech is expected to work what the supervisor assigned. Anything else is
+   still possible, but they are told so first and it goes for approval. */
+function openOverrideWarning(onProceed) {
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('alert')} Not an assigned job</h3>
+      <button class="btn btn-ghost btn-sm" id="ov-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text2);margin-bottom:12px;">
+        Jobs are normally assigned by your supervisor. You can still start this one,
+        but it will be sent to them for approval.
+      </p>
+      <div class="form-group">
+        <label class="form-label">Why are you starting it? <span class="opt-label">optional</span></label>
+        <input type="text" class="form-control" id="ov-note" placeholder="e.g. dispatch called me directly">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="ov-cancel">Cancel</button>
+      <button class="btn btn-orange" id="ov-go">Start Anyway</button>
+    </div>`);
+  document.getElementById('ov-x').addEventListener('click', closeModal);
+  document.getElementById('ov-cancel').addEventListener('click', closeModal);
+  document.getElementById('ov-go').addEventListener('click', () => {
+    state.overrideNote = document.getElementById('ov-note').value.trim() || null;
+    closeModal();
+    onProceed();
+  });
+}
+
 function openNewWoChoiceModal(onStartNow) {
+  // The supervisor assigns work, so only a tech gets the warning
+  if (state.user?.role === 'tech' && !state.overrideAcknowledged) {
+    openOverrideWarning(() => {
+      state.overrideAcknowledged = true;
+      openNewWoChoiceModal(onStartNow);
+    });
+    return;
+  }
   openModal(`
     <div class="modal-header">
       <h3>${svg('plus')} New Work Order</h3>
@@ -2632,6 +2709,8 @@ function renderActiveClockPage() {
       </div>
       <div class="elapsed-time" id="elapsed-display">00:00:00</div>
       ${entry.est_minutes ? '<div class="est-progress" id="est-progress"></div>' : ''}
+      ${entry.approval ? `<div class="appr-line ${entry.approval}">${approvalChip(entry)}${
+        entry.approval === 'pending' ? ' — your supervisor still has to approve this job' : ''}</div>` : ''}
       ${entry.rate_type === 'none'
         ? `<div class="earning-rate" style="margin-top:4px;">Non-Billable Visit</div>`
         : isFlat && entry.flat_amount
@@ -5107,6 +5186,13 @@ function openPayModal(weekStart, weekEnd, expectedTotal, payPeriod, sym, onSave,
   document.getElementById('pm-unconfirm')?.addEventListener('click', e => doSave('pending', e.currentTarget));
 }
 
+/* Jobs a tech started without an assignment carry the supervisor's decision. */
+function approvalChip(entry) {
+  if (!entry.approval) return '';
+  const label = { pending: 'AWAITING APPROVAL', approved: 'APPROVED', rejected: 'REJECTED' }[entry.approval];
+  return `<span class="appr-chip ${entry.approval}">${label}</span>`;
+}
+
 function renderEntryCard(entry, linked = false, revisitedIds = null, q = '', opts = {}) {
   const netSec = getNetSeconds(entry);
   const labor  = calcLabor(entry, netSec);
@@ -5129,6 +5215,7 @@ function renderEntryCard(entry, linked = false, revisitedIds = null, q = '', opt
         </div>
         <div class="entry-card-right">
           ${entry.revisit_of ? `<button class="rev-badge" data-rev-of="${entry.revisit_of}" title="Open first visit">${svg('return')} REVISIT</button>` : ''}
+          ${approvalChip(entry)}
           <span class="status-chip ${statusClass}">${statusClass.toUpperCase()}</span>
         </div>
       </div>
@@ -5818,6 +5905,7 @@ async function renderSettingsPage() {
   const paidBreaks    = s.paid_breaks === '1';
   const breakReminder = parseInt(s.break_frequency_minutes||'0',10) > 0;
   const calOn         = s.caldav_enabled === '1';
+  const isSup         = state.user?.role === 'supervisor';
   const calEntries    = s.caldav_sync_entries !== '0';
 
   page.innerHTML = `
@@ -5834,6 +5922,14 @@ async function renderSettingsPage() {
           <button class="btn btn-ghost btn-sm" id="s-signout">Sign Out</button>
         </div>
       </div>
+
+      ${state.user?.role === 'supervisor' ? `
+      <!-- Team -->
+      <div class="section-label">Team</div>
+      <div class="card" id="team-card">
+        <div id="team-list"></div>
+        <button class="btn btn-ghost btn-sm" id="add-user-btn" style="margin-top:8px;">${svg('plus')} Add Person</button>
+      </div>` : ''}
 
       <!-- Tech Info -->
       <div class="section-label">Technician Info</div>
@@ -5899,6 +5995,7 @@ async function renderSettingsPage() {
         <button class="btn btn-primary btn-sm" id="s-save-breaks-btn" style="margin-top:8px;">${svg('check')} Save</button>
       </div>
 
+      ${isSup ? `
       <!-- Pay Rates -->
       <div class="section-label">Pay Rates</div>
       <div class="card" id="pay-rates-card">
@@ -5989,10 +6086,15 @@ async function renderSettingsPage() {
         <div id="s-cal-status" class="cal-status hidden"></div>
         <button class="btn btn-ghost btn-sm" id="s-syncall-cal-btn" style="margin-top:8px;">${svg('calendar')} Re-Sync Everything</button>
         <div class="field-hint">Rebuilds every event from scratch. Only needed if the calendar got out of step — new and past jobs sync on their own.</div>
-      </div>
+      </div>` : ''}
 
       <div style="height:16px;"></div>
     </div>`;
+
+  if (state.user?.role === 'supervisor') {
+    renderTeamList();
+    document.getElementById('add-user-btn').addEventListener('click', () => openUserForm(null));
+  }
 
   document.getElementById('s-signout').addEventListener('click', () => {
     if (confirm('Sign out of QuickTec?')) signOut();
@@ -6051,8 +6153,8 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-  // Pay rates CRUD
-  document.getElementById('add-rate-btn').addEventListener('click', () => showRateForm(null));
+  // Pay rates CRUD — supervisor-only sections are absent for a tech
+  document.getElementById('add-rate-btn')?.addEventListener('click', () => showRateForm(null));
   document.querySelectorAll('.rate-edit-btn').forEach(btn => {
     const r = state.payRates.find(x => x.id === parseInt(btn.dataset.id));
     btn.addEventListener('click', () => showRateForm(r));
@@ -6065,7 +6167,7 @@ async function renderSettingsPage() {
   });
 
   // Companies CRUD
-  document.getElementById('add-org-btn').addEventListener('click', () => showOrgForm(null));
+  document.getElementById('add-org-btn')?.addEventListener('click', () => showOrgForm(null));
   document.querySelectorAll('.org-edit-btn').forEach(btn => {
     const o = state.organizations.find(x => x.id === parseInt(btn.dataset.id));
     btn.addEventListener('click', () => showOrgForm(o));
@@ -6078,7 +6180,7 @@ async function renderSettingsPage() {
   });
 
   // Customers CRUD
-  document.getElementById('add-client-btn').addEventListener('click', () => showClientForm(null));
+  document.getElementById('add-client-btn')?.addEventListener('click', () => showClientForm(null));
   document.querySelectorAll('.client-edit-btn').forEach(btn => {
     const c = state.clients.find(x => x.id === parseInt(btn.dataset.id));
     btn.addEventListener('click', () => showClientForm(c));
@@ -6091,7 +6193,7 @@ async function renderSettingsPage() {
   });
 
   // Trip Settings — Mileage rate save
-  document.getElementById('s-save-mileage-btn').addEventListener('click', async () => {
+  document.getElementById('s-save-mileage-btn')?.addEventListener('click', async () => {
     const rate = document.getElementById('s-mileage-rate').value.trim();
     if (!rate) { showToast('Rate required', 'error'); return; }
     try {
@@ -6100,7 +6202,7 @@ async function renderSettingsPage() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-  wireCalendarSettings();
+  if (isSup) wireCalendarSettings();
 }
 
 /* ── Settings ▸ Calendar Sync ────────────────────────────────────── */
@@ -6119,17 +6221,17 @@ function wireCalendarSettings() {
   // The server fills in a missing scheme; show what it actually settled on.
   const showUrl = url => { if (url) document.getElementById('s-cal-url').value = url; };
 
-  document.getElementById('s-cal-enabled').addEventListener('change', e => {
+  document.getElementById('s-cal-enabled')?.addEventListener('change', e => {
     document.getElementById('s-cal-options').classList.toggle('hidden', !e.target.checked);
   });
 
-  document.getElementById('s-cal-dur').addEventListener('click', e => {
+  document.getElementById('s-cal-dur')?.addEventListener('click', e => {
     const btn = e.target.closest('.toggle-btn');
     if (!btn) return;
     document.querySelectorAll('#s-cal-dur .toggle-btn').forEach(b => b.classList.toggle('active', b===btn));
   });
 
-  document.getElementById('s-save-cal-btn').addEventListener('click', async () => {
+  document.getElementById('s-save-cal-btn')?.addEventListener('click', async () => {
     const enabled = document.getElementById('s-cal-enabled').checked;
     const form    = readForm();
     if (enabled && (!form.caldav_url || !form.caldav_user)) {
@@ -6153,7 +6255,7 @@ function wireCalendarSettings() {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
-  document.getElementById('s-test-cal-btn').addEventListener('click', async (ev) => {
+  document.getElementById('s-test-cal-btn')?.addEventListener('click', async (ev) => {
     const btn = ev.currentTarget;
     btn.disabled = true;
     showStatus('Checking…', '');
@@ -6193,7 +6295,7 @@ function wireCalendarSettings() {
     } finally { btn.disabled = false; }
   });
 
-  document.getElementById('s-syncall-cal-btn').addEventListener('click', async (ev) => {
+  document.getElementById('s-syncall-cal-btn')?.addEventListener('click', async (ev) => {
     const btn = ev.currentTarget;
     btn.disabled = true;
     statusEl.classList.remove('hidden');
@@ -6343,6 +6445,113 @@ function showClientForm(client) {
 /* ================================================================
    INIT
    ================================================================ */
+/* ── Team (supervisor only) ──────────────────────────────────────── */
+async function renderTeamList() {
+  const el = document.getElementById('team-list');
+  if (!el) return;
+  let users = [];
+  try { users = await api.getUsers(); } catch { el.innerHTML = '<div class="empty-state-sm">Could not load the team</div>'; return; }
+  state.team = users;
+
+  el.innerHTML = users.map(u => `
+    <div class="list-item">
+      <div class="list-item-main">
+        <div class="list-item-title">${escHtml(u.display_name)}${
+          u.id === state.user?.id ? ' <span class="opt-label">you</span>' : ''}</div>
+        <div class="list-item-sub">${escHtml(u.role)} · ${escHtml(u.username)}${
+          u.phone ? ' · ' + escHtml(u.phone) : ''}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm user-edit-btn" data-id="${u.id}">${svg('edit')}</button>
+    </div>`).join('') || '<div class="empty-state-sm">Just you so far</div>';
+
+  el.querySelectorAll('.user-edit-btn').forEach(b =>
+    b.addEventListener('click', () => openUserForm(users.find(u => u.id === Number(b.dataset.id)))));
+}
+
+function openUserForm(existing = null) {
+  const isSelf = existing && existing.id === state.user?.id;
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('user')} ${existing ? 'Edit Person' : 'Add Person'}</h3>
+      <button class="btn btn-ghost btn-sm" id="uf-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Name</label>
+        <input type="text" class="form-control" id="uf-name" value="${escHtml(existing?.display_name || '')}">
+      </div>
+      ${existing ? '' : `
+      <div class="form-group">
+        <label class="form-label">Username <span class="req-star">*</span></label>
+        <input type="text" class="form-control" id="uf-username" autocapitalize="off" spellcheck="false">
+      </div>`}
+      <div class="form-group">
+        <label class="form-label">${existing ? 'New Password' : 'Password'} ${
+          existing ? '<span class="opt-label">leave blank to keep it</span>' : '<span class="req-star">*</span>'}</label>
+        <input type="password" class="form-control" id="uf-pass" autocomplete="new-password">
+        <div class="field-hint">At least 8 characters.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Phone <span class="opt-label">optional</span></label>
+        <input type="tel" class="form-control" id="uf-phone" value="${escHtml(existing?.phone || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Role</label>
+        <div class="toggle-group" id="uf-role">
+          <button type="button" class="toggle-btn ${(existing?.role || 'tech') === 'tech' ? 'active' : ''}" data-r="tech">Tech</button>
+          <button type="button" class="toggle-btn ${existing?.role === 'supervisor' ? 'active' : ''}" data-r="supervisor">Supervisor</button>
+        </div>
+        ${isSelf ? '<div class="field-hint">You cannot remove your own supervisor access.</div>' : ''}
+      </div>
+    </div>
+    <div class="modal-footer">
+      ${existing && !isSelf
+        ? `<button class="btn btn-ghost btn-sm" id="uf-off" style="color:var(--red);">Deactivate</button>` : ''}
+      <button class="btn btn-ghost" id="uf-cancel">Cancel</button>
+      <button class="btn btn-primary" id="uf-save">${svg('check')} Save</button>
+    </div>`);
+
+  document.getElementById('uf-x').addEventListener('click', closeModal);
+  document.getElementById('uf-cancel').addEventListener('click', closeModal);
+  document.getElementById('uf-role').addEventListener('click', e => {
+    const b = e.target.closest('.toggle-btn');
+    if (!b) return;
+    document.querySelectorAll('#uf-role .toggle-btn').forEach(x => x.classList.toggle('active', x === b));
+  });
+
+  document.getElementById('uf-off')?.addEventListener('click', async () => {
+    if (!confirm(`Deactivate ${existing.display_name}? Their work stays, but they can no longer sign in.`)) return;
+    try {
+      await api.deactivateUser(existing.id);
+      closeModal();
+      showToast('Account deactivated', 'success');
+      renderTeamList();
+    } catch (err) { showToast(err.message || 'Could not deactivate', 'error'); }
+  });
+
+  document.getElementById('uf-save').addEventListener('click', async () => {
+    const data = {
+      display_name: document.getElementById('uf-name').value.trim(),
+      phone:        document.getElementById('uf-phone').value.trim(),
+      role:         document.querySelector('#uf-role .toggle-btn.active')?.dataset.r || 'tech',
+    };
+    const pass = document.getElementById('uf-pass').value;
+    if (pass) data.password = pass;
+    try {
+      if (existing) {
+        await api.updateUser(existing.id, data);
+      } else {
+        data.username = document.getElementById('uf-username').value.trim();
+        if (!data.username || !pass) { showToast('Username and password are required', 'error'); return; }
+        await api.createUser(data);
+      }
+      closeModal();
+      showToast(existing ? 'Saved' : 'Person added', 'success');
+      renderTeamList();
+    } catch (err) { showToast(err.message || 'Could not save', 'error'); }
+  });
+}
+
 /* ── Sign in ──────────────────────────────────────────────────────
    Two people share this install, so the app asks who it is before it
    draws anything. On a brand-new database there is nobody to sign in

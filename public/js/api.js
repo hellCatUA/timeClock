@@ -23,6 +23,17 @@ const api = (() => {
     authLogin:          (d) => req('POST', '/api/auth/login', d),
     authLogout:         ()  => req('POST', '/api/auth/logout', {}),
 
+    // Team
+    getUsers:           ()      => req('GET',    '/api/users'),
+    createUser:         (d)     => req('POST',   '/api/users', d),
+    updateUser:         (id, d) => req('PUT',    `/api/users/${id}`, d),
+    deactivateUser:     (id)    => req('DELETE', `/api/users/${id}`),
+
+    // Overrides awaiting a decision
+    getApprovals:       ()      => req('GET',  '/api/approvals'),
+    approveEntry:       (id, d) => req('POST', `/api/entries/${id}/approve`, d || {}),
+    rejectEntry:        (id, d) => req('POST', `/api/entries/${id}/reject`, d || {}),
+
     // Entries
     getCurrentEntry:    ()       => req('GET',    '/api/entries/current'),
     getEntries:         (params) => req('GET',    '/api/entries' + (params ? '?' + new URLSearchParams(params) : '')),
