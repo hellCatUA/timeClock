@@ -949,6 +949,16 @@ async function renderIdleClockPage() {
                     <div class="sched-line">${meta || '&nbsp;'}</div>
                     ${pj.revisit_of ? `<span class="rev-badge" style="pointer-events:none;flex-shrink:0;">${svg('return')} REVISIT</span>` : ''}
                   </div>
+                  ${(() => {
+                    const mine = pj.user_id === state.user?.id;
+                    const mates = (state.plannedJobs || []).filter(o =>
+                      pj.job_group_id && o.job_group_id === pj.job_group_id && o.id !== pj.id);
+                    if (!mates.length && mine) return '';
+                    const who = mates.length
+                      ? 'With ' + mates.map(o => escHtml(o.assignee_name || 'someone')).join(', ')
+                      : 'For ' + escHtml(pj.assignee_name || 'someone');
+                    return `<div class="sched-assignee">${svg('user')} ${who}</div>`;
+                  })()}
                   ${soon ? `<button class="btn btn-primary btn-full sched-soon-start" data-id="${pj.id}" style="margin-top:6px;">${svg('play')} Start This Job</button>` : ''}
                 </div>`;
               }).join('')}
@@ -1708,6 +1718,20 @@ function openPlanJobModal(existing = null) {
         <label class="form-label">Project <span class="opt-label">optional</span></label>
         ${buildCombo('pj-project', 'Type to search projects...')}
       </div>
+      ${state.user?.role === 'supervisor' ? `
+      <div class="form-group">
+        <label class="form-label">Assign To</label>
+        <div class="toggle-group" id="pj-assign-to"></div>
+        <div class="field-hint" id="pj-assign-hint"></div>
+      </div>
+      <div class="form-group hidden" id="pj-budget-group">
+        <label class="form-label">Job Budget <span class="opt-label">optional</span></label>
+        <div class="money-wrap"><span class="money-sym">${sym}</span>
+          <input type="number" class="form-control" id="pj-budget" min="0" step="0.01"
+                 value="${existing?.job_budget ?? ''}"></div>
+        <div class="field-hint">What the job is worth in total. Each person's own pay is set on their
+          copy below, so the two do not double up.</div>
+      </div>` : ''}
       ${buildJobFieldsHtml('pj', sym)}
     </div>
     <div class="modal-footer">
@@ -1717,6 +1741,43 @@ function openPlanJobModal(existing = null) {
 
   document.getElementById('pj-x').addEventListener('click', closeModal);
   document.getElementById('pj-cancel').addEventListener('click', closeModal);
+
+  // Who the job is for. "Both" plans one copy each, tied together, so each
+  // person clocks their own time and carries their own pay.
+  let assignTo = existing?.user_id || state.user?.id || null;
+  let shared   = false;
+  if (state.user?.role === 'supervisor') {
+    (async () => {
+      let team = state.team;
+      if (!team) { try { team = state.team = await api.getUsers(); } catch { team = []; } }
+      const others = team.filter(u => u.id !== state.user.id && u.active);
+      const box = document.getElementById('pj-assign-to');
+      if (!box) return;
+      const opts = [{ id: state.user.id, label: 'Me' },
+                    ...others.map(u => ({ id: u.id, label: u.display_name }))];
+      if (others.length) opts.push({ id: 'both', label: 'Both' });
+      box.innerHTML = opts.map(o =>
+        `<button type="button" class="toggle-btn ${o.id === assignTo ? 'active' : ''}" data-a="${o.id}">${escHtml(o.label)}</button>`).join('');
+      const hint = document.getElementById('pj-assign-hint');
+      const budget = document.getElementById('pj-budget-group');
+      const sync = () => {
+        budget.classList.toggle('hidden', !shared);
+        hint.textContent = shared
+          ? 'Each person gets their own copy of this job and clocks their own time.'
+          : '';
+      };
+      box.addEventListener('click', e => {
+        const b = e.target.closest('.toggle-btn');
+        if (!b) return;
+        box.querySelectorAll('.toggle-btn').forEach(x => x.classList.toggle('active', x === b));
+        shared = b.dataset.a === 'both';
+        assignTo = shared ? state.user.id : Number(b.dataset.a);
+        sync();
+      });
+      sync();
+    })();
+  }
+
   const getRateType = wireJobFieldsPayType('pj');
   wireJobFieldCombos('pj');
   wireCombo('pj-project', projComboOpts(existing?.project_id));
@@ -1757,11 +1818,27 @@ function openPlanJobModal(existing = null) {
     data.project_id = document.getElementById('pj-project').value ? Number(document.getElementById('pj-project').value) : null;
     data.planned_date = document.getElementById('pj-date').value || null;
     data.planned_time = document.getElementById('pj-time').value || null;
+    data.user_id = assignTo;
+    const budgetEl = document.getElementById('pj-budget');
+    if (budgetEl) data.job_budget = parseFloat(budgetEl.value) || null;
     try {
-      if (existing) await api.updatePlannedJob(existing.id, data);
-      else await api.createPlannedJob(data);
+      if (existing) {
+        await api.updatePlannedJob(existing.id, data);
+        showToast('Planned job updated', 'success');
+      } else if (shared) {
+        // One copy per person, tied by a shared id, so each clocks their own time
+        const group = 'g-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        const team = (state.team || []).filter(u => u.active);
+        const both = [state.user.id, ...team.filter(u => u.id !== state.user.id).map(u => u.id)];
+        for (const uid of both) {
+          await api.createPlannedJob({ ...data, user_id: uid, job_group_id: group });
+        }
+        showToast(`Planned for ${both.length} people`, 'success');
+      } else {
+        await api.createPlannedJob(data);
+        showToast('Job planned', 'success');
+      }
       closeModal();
-      showToast(existing ? 'Planned job updated' : 'Job planned', 'success');
       renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Save failed', 'error'); }
   });
@@ -3874,7 +3951,7 @@ function showFinalReview(entry, coData) {
   const mode = coData.mode || 'normal';
   const prefill = mode === 'prefill';          // no end time yet
   const finishing = mode === 'finish';         // draft + real time, sign-off already done
-  const techName = state.settings.tech_name || '—';
+  const techName = entry.owner_name || state.user?.display_name || '—';
   const clockOutTime = coData.clockOutISO ? new Date(coData.clockOutISO) : null;
   const grossSec = clockOutTime ? Math.max(0, Math.floor((clockOutTime - new Date(entry.clock_in)) / 1000)) : 0;
   const netSec   = state.settings.paid_breaks === '1'
@@ -4188,7 +4265,7 @@ function renderSummaryPage(entry) {
 
 /* ── Text Report builder ─────────────────────────────────────────── */
 function buildTextReport(entry) {
-  const techName = state.settings.tech_name || '';
+  const techName = entry.owner_name || state.user?.display_name || '';
   const netSec = getNetSeconds(entry);
   const totalHrs = fmtDecimalHours(netSec);
 
@@ -6134,9 +6211,7 @@ async function renderSettingsPage() {
         phone: document.getElementById('s-phone').value.trim(),
       });
       if (isSup) {
-        // Install-wide settings, and the name exports still print
         state.settings = await api.saveSettings({
-          tech_name:       name,
           week_start:      weekStart,
           currency_symbol: document.getElementById('s-currency').value.trim() || '$',
         });
@@ -6523,6 +6598,42 @@ function openUserForm(existing = null) {
         <label class="form-label">Phone <span class="opt-label">optional</span></label>
         <input type="tel" class="form-control" id="uf-phone" value="${escHtml(existing?.phone || '')}">
       </div>
+      ${existing ? `
+      <div class="divider"></div>
+      <div class="subsection-label">Their Calendar</div>
+      <div class="field-hint" style="margin-bottom:10px;">
+        Their planned jobs sync to this Nextcloud account. You set it up — they cannot change it.
+        Leave blank to use yours.
+      </div>
+      <div class="form-group">
+        <label class="form-label">Nextcloud URL</label>
+        <input type="text" class="form-control" id="uf-cal-url" autocapitalize="off" spellcheck="false"
+               value="${escHtml(existing.caldav?.caldav_url || '')}" placeholder="https://cloud.example.com">
+      </div>
+      <div class="row-2">
+        <div class="form-group">
+          <label class="form-label">Username</label>
+          <input type="text" class="form-control" id="uf-cal-user" autocapitalize="off"
+                 value="${escHtml(existing.caldav?.caldav_user || '')}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Calendar</label>
+          <input type="text" class="form-control" id="uf-cal-name"
+                 value="${escHtml(existing.caldav?.caldav_calendar || '')}" placeholder="personal">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">App Password</label>
+        <input type="password" class="form-control" id="uf-cal-pass" autocomplete="new-password"
+               placeholder="${existing.caldav?.caldav_password_set === '1' ? '•••••••• (saved)' : 'Nextcloud app password'}">
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <label class="form-label" style="margin:0;">Sync Their Jobs</label>
+          <label class="switch"><input type="checkbox" id="uf-cal-on" ${
+            existing.caldav?.caldav_enabled === '1' ? 'checked' : ''}><span class="slider"></span></label>
+        </div>
+      </div>` : ''}
       <div class="form-group">
         <label class="form-label">Role</label>
         <div class="toggle-group" id="uf-role">
@@ -6565,6 +6676,15 @@ function openUserForm(existing = null) {
     };
     const pass = document.getElementById('uf-pass').value;
     if (pass) data.password = pass;
+    if (document.getElementById('uf-cal-url')) {
+      data.caldav = {
+        caldav_url:      document.getElementById('uf-cal-url').value.trim(),
+        caldav_user:     document.getElementById('uf-cal-user').value.trim(),
+        caldav_calendar: document.getElementById('uf-cal-name').value.trim() || 'personal',
+        caldav_password: document.getElementById('uf-cal-pass').value,
+        caldav_enabled:  document.getElementById('uf-cal-on').checked ? '1' : '0',
+      };
+    }
     try {
       if (existing) {
         await api.updateUser(existing.id, data);

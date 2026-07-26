@@ -175,7 +175,8 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS pay_periods (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            week_start TEXT NOT NULL UNIQUE,
+            user_id INTEGER,
+            week_start TEXT NOT NULL,
             week_end TEXT NOT NULL,
             status TEXT DEFAULT 'pending',
             expected_total REAL DEFAULT 0,
@@ -183,7 +184,8 @@ def init_db():
             notes TEXT,
             paid_at TEXT,
             created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, week_start)
         );
         CREATE TABLE IF NOT EXISTS trips (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -268,7 +270,6 @@ def init_db():
             ('break_return_minutes', '10'),
             ('currency_symbol', '$'),
             ('week_start', '1'),
-            ('tech_name', ''),
             ('breaks_enabled', '1'),
             ('paid_breaks', '0'),
             ('break_frequency_minutes', '120'),
@@ -288,6 +289,40 @@ def init_db():
             ('caldav_duration_min', '60'),
             ('caldav_sync_entries', '1');
         """)
+
+
+def migrate_pay_periods_per_user(db):
+    """Pay used to be one row per week for the whole install, so two people
+    shared one confirmation and one received amount. SQLite cannot drop the
+    old UNIQUE(week_start), so the table is rebuilt once. Existing rows are
+    left unowned and claimed by whoever sets up, like every other table."""
+    cols = [r["name"] for r in db.execute("PRAGMA table_info(pay_periods)").fetchall()]
+    if "user_id" in cols:
+        return
+    db.executescript("""
+        CREATE TABLE pay_periods_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            week_start TEXT NOT NULL,
+            week_end TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            expected_total REAL DEFAULT 0,
+            received_amount REAL,
+            notes TEXT,
+            paid_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, week_start)
+        );
+        INSERT INTO pay_periods_new
+            (id, user_id, week_start, week_end, status, expected_total,
+             received_amount, notes, paid_at, created_at, updated_at)
+        SELECT id, NULL, week_start, week_end, status, expected_total,
+               received_amount, notes, paid_at, created_at, updated_at
+        FROM pay_periods;
+        DROP TABLE pay_periods;
+        ALTER TABLE pay_periods_new RENAME TO pay_periods;
+    """)
 
 
 def migrate_db():
@@ -315,7 +350,6 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN release_code TEXT",
         "ALTER TABLE time_entries ADD COLUMN no_release_code INTEGER DEFAULT 0",
         "ALTER TABLE time_entries ADD COLUMN materials TEXT",
-        "INSERT OR IGNORE INTO settings (key, value) VALUES ('tech_name', '')",
         "ALTER TABLE time_entries ADD COLUMN wo_title TEXT",
         "ALTER TABLE time_entries ADD COLUMN travel_reimb REAL",
         "ALTER TABLE time_entries ADD COLUMN revisit_required INTEGER DEFAULT 0",
@@ -379,6 +413,15 @@ def migrate_db():
         "ALTER TABLE time_entries ADD COLUMN approved_by INTEGER",
         "ALTER TABLE time_entries ADD COLUMN approved_at TEXT",
         "ALTER TABLE users ADD COLUMN default_pay_rate_id INTEGER",
+        # Each person syncs to their own Nextcloud; the supervisor sets it up
+        "ALTER TABLE users ADD COLUMN caldav TEXT",
+        # Two people on the same job keep a row each, tied by a shared id
+        "ALTER TABLE time_entries ADD COLUMN job_group_id TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN job_group_id TEXT",
+        "ALTER TABLE planned_jobs ADD COLUMN job_budget REAL",
+        "ALTER TABLE time_entries ADD COLUMN job_budget REAL",
+        "CREATE INDEX IF NOT EXISTS idx_entries_group ON time_entries(job_group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_planned_group ON planned_jobs(job_group_id)",
         "ALTER TABLE planned_jobs ADD COLUMN dispatch_contacts TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_date TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN planned_time TEXT",
@@ -426,6 +469,8 @@ def migrate_db():
             except Exception:
                 pass  # column or row already exists
     with get_db() as db:
+        migrate_pay_periods_per_user(db)
+    with get_db() as db:
         if db.execute("SELECT COUNT(*) FROM trip_categories").fetchone()[0] == 0:
             for i, name in enumerate(["In Route to WO","Returning Home","OffClock Tools/Supplies","OnClock Tools/Supplies","Other"]):
                 db.execute("INSERT OR IGNORE INTO trip_categories (name, sort_order) VALUES (?,?)", (name, i))
@@ -450,10 +495,21 @@ def rows_to_list(rows):
 CALDAV_KEYS = ("caldav_enabled", "caldav_url", "caldav_user", "caldav_password",
                "caldav_calendar", "caldav_duration_min", "caldav_sync_entries")
 
-def caldav_settings(db=None):
+def caldav_settings(db=None, user_id=None):
+    """Calendar settings for one person. A user with their own block uses it;
+    everyone else falls back to the install-wide one, which is what the
+    supervisor has been using all along."""
     def read(conn):
-        return {r["key"]: r["value"] for r in conn.execute(
+        base = {r["key"]: r["value"] for r in conn.execute(
             "SELECT key, value FROM settings WHERE key LIKE 'caldav_%'").fetchall()}
+        if user_id is None:
+            return base
+        row = conn.execute("SELECT caldav FROM users WHERE id=?", (user_id,)).fetchone()
+        try:
+            own = json.loads((row["caldav"] if row else None) or "null")
+        except Exception:
+            own = None
+        return {**base, **own} if isinstance(own, dict) and own else base
     if db is not None:
         return read(db)
     with get_db() as conn:
@@ -766,8 +822,8 @@ def caldav_push(job, settings=None):
         print(f"CalDAV push failed for job {job.get('id')}: {err}", file=sys.stderr)
         return uid, err
 
-def caldav_delete(uid, settings=None):
-    s = settings or caldav_settings()
+def caldav_delete(uid, settings=None, user_id=None):
+    s = settings or caldav_settings(user_id=user_id)
     if not caldav_ready(s) or not uid:
         return
     try:
@@ -783,10 +839,10 @@ def caldav_sync_async(job_id):
     def work():
         try:
             with get_db() as db:
-                s = caldav_settings(db)
-                if not caldav_ready(s):
-                    return
                 job = row_to_dict(db.execute(PLANNED_SELECT + " WHERE pj.id=?", (job_id,)).fetchone())
+                s = caldav_settings(db, (job or {}).get("user_id"))
+                if not caldav_ready(s) or not job:
+                    return
             if not job:
                 return
             uid, err = caldav_push(job, s)
@@ -799,10 +855,10 @@ def caldav_sync_async(job_id):
             print(f"CalDAV sync thread error: {exc}", file=sys.stderr)
     threading.Thread(target=work, daemon=True).start()
 
-def caldav_delete_async(uid):
+def caldav_delete_async(uid, user_id=None):
     if not uid:
         return
-    threading.Thread(target=lambda: caldav_delete(uid), daemon=True).start()
+    threading.Thread(target=lambda: caldav_delete(uid, user_id=user_id), daemon=True).start()
 
 def caldav_entries_on(s):
     return caldav_ready(s) and s.get("caldav_sync_entries", "1") == "1"
@@ -829,10 +885,10 @@ def caldav_entry_sync_async(entry_id):
     def work():
         try:
             with get_db() as db:
-                s = caldav_settings(db)
-                if not caldav_entries_on(s):
-                    return
                 entry = row_to_dict(db.execute(ENTRY_SELECT + " WHERE e.id=?", (entry_id,)).fetchone())
+                s = caldav_settings(db, (entry or {}).get("user_id"))
+                if not caldav_entries_on(s) or not entry:
+                    return
             if not entry:
                 return
             uid, err = caldav_push_entry(entry, s)
@@ -874,8 +930,17 @@ def caldav_backfill(force=False, settings=None):
     is cheap enough to run whenever settings change or the server starts — that
     is also what heals anything missed while Nextcloud was unreachable.
     """
+    cache = {}
+
+    def owner_settings(uid):
+        if uid not in cache:
+            cache[uid] = settings if settings is not None else caldav_settings(user_id=uid)
+        return cache[uid]
+
     s = settings or caldav_settings()
-    if not caldav_ready(s):
+    if not caldav_ready(s) and not any(
+            caldav_ready(caldav_settings(user_id=r["id"]))
+            for r in (get_db().execute("SELECT id FROM users WHERE active=1").fetchall() or [])):
         return {"synced": 0, "failed": [], "errors": [], "total": 0}
 
     with get_db() as db:
@@ -913,7 +978,7 @@ def caldav_backfill(force=False, settings=None):
 
     synced = 0
     for job in jobs:
-        uid, err = caldav_push(job, s)
+        uid, err = caldav_push(job, owner_settings(job.get("user_id")))
         if uid and not err:
             with get_db() as db:
                 db.execute("UPDATE planned_jobs SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
@@ -923,7 +988,7 @@ def caldav_backfill(force=False, settings=None):
             note(err, job.get("wo_title") or f"planned job {job['id']}")
 
     for entry in entries:
-        uid, err = caldav_push_entry(entry, s)
+        uid, err = caldav_push_entry(entry, owner_settings(entry.get("user_id")))
         if uid and not err:
             with get_db() as db:
                 db.execute("UPDATE time_entries SET calendar_uid=?, calendar_seq=COALESCE(calendar_seq,0)+1 WHERE id=?",
@@ -1024,8 +1089,16 @@ def verify_password(password, stored_hash, salt):
 def public_user(row):
     if not row:
         return None
-    return {"id": row["id"], "username": row["username"], "display_name": row["display_name"],
-            "role": row["role"], "phone": row["phone"], "active": row["active"]}
+    out = {"id": row["id"], "username": row["username"], "display_name": row["display_name"],
+           "role": row["role"], "phone": row["phone"], "active": row["active"]}
+    try:
+        cal = json.loads((row["caldav"] if "caldav" in row.keys() else None) or "{}") or {}
+    except Exception:
+        cal = {}
+    if cal:
+        out["caldav"] = {k: v for k, v in cal.items() if k != "caldav_password"}
+        out["caldav"]["caldav_password_set"] = "1" if (cal.get("caldav_password") or "").strip() else "0"
+    return out
 
 
 def user_count(db=None):
@@ -1119,8 +1192,7 @@ def h_auth_setup(req, _groups):
         # Everything recorded before accounts existed belongs to whoever claims
         # the install — that is the person who has been using it all along.
         claimed = sum(db.execute(f"UPDATE {t} SET user_id=? WHERE user_id IS NULL", (uid,)).rowcount
-                      for t in ("time_entries", "planned_jobs", "trips"))
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tech_name', ?)", (display,))
+                      for t in ("time_entries", "planned_jobs", "trips", "pay_periods"))
         token = create_session(db, uid)
         row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         contact = supervisor_contact(db)
@@ -1212,6 +1284,27 @@ def h_update_user(req, groups):
 
         db.execute("UPDATE users SET display_name=?, phone=?, role=?, active=?, default_pay_rate_id=? "
                    "WHERE id=?", (display, phone, role, active, rate, uid))
+
+        # Calendar credentials belong to the person but are set by the supervisor
+        if actor.get("role") == "supervisor" and "caldav" in data:
+            block = data.get("caldav")
+            if isinstance(block, dict):
+                if "caldav_url" in block:
+                    url, err = caldav_normalize_url(block["caldav_url"])
+                    if err:
+                        return 400, {"error": err}
+                    block["caldav_url"] = url
+                prev = {}
+                try:
+                    prev = json.loads(row.get("caldav") or "{}") or {}
+                except Exception:
+                    prev = {}
+                if not str(block.get("caldav_password") or "").strip():
+                    block.pop("caldav_password", None)   # blank keeps the stored one
+                merged = {**prev, **{k: str(v) for k, v in block.items()}}
+                db.execute("UPDATE users SET caldav=? WHERE id=?", (json.dumps(merged), uid))
+            else:
+                db.execute("UPDATE users SET caldav=NULL WHERE id=?", (uid,))
 
         password = data.get("password")
         if password:
@@ -1405,12 +1498,13 @@ def h_delete_rate(req, groups):
 ENTRY_SELECT = """
     SELECT e.*, o.name as org_name, c.name as client_name,
            p.name as rate_name, p.rate as hourly_rate, p.currency,
-           pr.name as project_name
+           pr.name as project_name, u.display_name as owner_name
     FROM time_entries e
     LEFT JOIN organizations o ON e.organization_id = o.id
     LEFT JOIN clients c ON e.client_id = c.id
     LEFT JOIN pay_rates p ON e.pay_rate_id = p.id
     LEFT JOIN projects pr ON e.project_id = pr.id
+    LEFT JOIN users u ON e.user_id = u.id
 """
 
 
@@ -1789,7 +1883,7 @@ def h_delete_entry(req, groups):
         photos = rows_to_list(db.execute(
             "SELECT * FROM entry_photos WHERE entry_id=?", (eid,)
         ).fetchall())
-        existing = row_to_dict(db.execute("SELECT calendar_uid FROM time_entries WHERE id=?", (eid,)).fetchone())
+        existing = row_to_dict(db.execute("SELECT calendar_uid, user_id FROM time_entries WHERE id=?", (eid,)).fetchone())
         cur = db.execute("DELETE FROM time_entries WHERE id=?", (eid,))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
@@ -1797,7 +1891,7 @@ def h_delete_entry(req, groups):
         fp = UPLOADS_DIR / (photo.get('folder') or str(eid)) / photo['filename']
         try: fp.unlink(missing_ok=True)
         except Exception: pass
-    caldav_delete_async((existing or {}).get("calendar_uid"))
+    caldav_delete_async((existing or {}).get("calendar_uid"), (existing or {}).get("user_id"))
     return 200, {"success": True}
 
 
@@ -1941,9 +2035,11 @@ def h_delete_photo(req, groups):
 
 
 def h_get_pay_periods(req, _groups):
+    """Pay is personal: each person confirms their own week."""
+    uid = (req.get("user") or {}).get("id")
     with get_db() as db:
         rows = rows_to_list(db.execute(
-            "SELECT * FROM pay_periods ORDER BY week_start DESC"
+            "SELECT * FROM pay_periods WHERE user_id IS ? ORDER BY week_start DESC", (uid,)
         ).fetchall())
     return 200, rows
 
@@ -1959,25 +2055,27 @@ def h_upsert_pay_period(req, _groups):
     expected_total  = data.get("expected_total")
     notes           = data.get("notes")
     paid_at         = data.get("paid_at")
+    uid = (req.get("user") or {}).get("id")
     with get_db() as db:
         existing = db.execute(
-            "SELECT id FROM pay_periods WHERE week_start=?", (week_start,)
+            "SELECT id FROM pay_periods WHERE week_start=? AND user_id IS ?", (week_start, uid)
         ).fetchone()
         if existing:
             db.execute(
                 """UPDATE pay_periods
                    SET status=?, received_amount=?, expected_total=?, notes=?,
                        paid_at=?, updated_at=datetime('now')
-                   WHERE week_start=?""",
-                (status, received_amount, expected_total, notes, paid_at, week_start)
+                   WHERE id=?""",
+                (status, received_amount, expected_total, notes, paid_at, existing["id"])
             )
             pid = existing["id"]
         else:
             cur = db.execute(
                 """INSERT INTO pay_periods
-                   (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (week_start, week_end, status, received_amount, expected_total, notes, paid_at)
+                   (user_id, week_start, week_end, status, received_amount,
+                    expected_total, notes, paid_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (uid, week_start, week_end, status, received_amount, expected_total, notes, paid_at)
             )
             pid = cur.lastrowid
         row = row_to_dict(db.execute(
@@ -2311,7 +2409,7 @@ def h_export_entry_zip(req, groups):
     return_track = "N/a" if entry.get("no_return_track") else (entry.get("return_track") or "N/a")
     parking = f"{sym}{entry['parking_tolls']}" if entry.get("parking_tolls") else "N/a"
 
-    report = f"""Tech name: {settings.get('tech_name') or ''}
+    report = f"""Tech name: {entry.get('owner_name') or ''}
 Assignment ID: {entry.get('assignment_id') or ''}
 Site name & ID: {site_and_id}
 Address: {entry.get('address') or ''}
@@ -2671,8 +2769,10 @@ def h_delete_project(req, groups):
 # ── Planned jobs ────────────────────────────────────────────────────────────────
 
 PLANNED_SELECT = """
-    SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name
+    SELECT pj.*, o.name as org_name, c.name as client_name, pr.name as project_name,
+           u.display_name as assignee_name
     FROM planned_jobs pj
+    LEFT JOIN users u ON pj.user_id = u.id
     LEFT JOIN organizations o ON pj.organization_id = o.id
     LEFT JOIN clients c ON pj.client_id = c.id
     LEFT JOIN projects pr ON pj.project_id = pr.id
@@ -2687,6 +2787,10 @@ def h_get_planned_jobs(req, _groups):
 
 def h_create_planned_job(req, _groups):
     data = req.get("body", {})
+    actor = req.get("user") or {}
+    # Only the supervisor hands work to someone else; a tech plans for themselves
+    assign_to = data.get("user_id") if actor.get("role") == "supervisor" else None
+    assign_to = assign_to or actor.get("id")
     with get_db() as db:
         cur = db.execute(
             """INSERT INTO planned_jobs
@@ -2694,8 +2798,8 @@ def h_create_planned_job(req, _groups):
              address, rate_type, pay_rate_id, flat_amount, travel_reimb, notes,
              planned_date, planned_time, est_minutes, revisit_of,
              ticket_num, inc_num, mod_name, noc_name, pm_pc_name,
-             scope_of_work, dispatch_contacts, user_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             scope_of_work, dispatch_contacts, user_id, job_group_id, job_budget)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (data.get("wo_title"), data.get("organization_id"), data.get("client_id"),
              data.get("project_id"), data.get("assignment_id"), data.get("site_id"),
              data.get("address"), data.get("rate_type", "hourly"), data.get("pay_rate_id"),
@@ -2705,7 +2809,7 @@ def h_create_planned_job(req, _groups):
              data.get("ticket_num"), data.get("inc_num"), data.get("mod_name"),
              data.get("noc_name"), data.get("pm_pc_name"),
              data.get("scope_of_work"), data.get("dispatch_contacts"),
-             (req.get("user") or {}).get("id"))
+             assign_to, data.get("job_group_id"), data.get("job_budget"))
         )
         row = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (cur.lastrowid,)).fetchone())
     caldav_sync_async(row["id"])
@@ -2715,13 +2819,16 @@ PLANNED_JOB_FIELDS = [
     "wo_title", "organization_id", "client_id", "project_id", "assignment_id",
     "site_id", "address", "rate_type", "pay_rate_id", "flat_amount",
     "travel_reimb", "notes", "planned_date", "planned_time", "est_minutes", "revisit_of",
+    "user_id", "job_group_id", "job_budget",
     "ticket_num", "inc_num", "mod_name", "noc_name", "pm_pc_name",
     "scope_of_work", "dispatch_contacts",
 ]
 
 def h_update_planned_job(req, groups):
     pid = groups[0]
-    data = req.get("body", {})
+    data = dict(req.get("body", {}))
+    if (req.get("user") or {}).get("role") != "supervisor":
+        data.pop("user_id", None)          # a tech cannot reassign work
     with get_db() as db:
         ex = row_to_dict(db.execute("SELECT * FROM planned_jobs WHERE id=?", (pid,)).fetchone())
         if not ex:
@@ -2737,11 +2844,11 @@ def h_update_planned_job(req, groups):
 
 def h_delete_planned_job(req, groups):
     with get_db() as db:
-        row = row_to_dict(db.execute("SELECT calendar_uid FROM planned_jobs WHERE id=?", (groups[0],)).fetchone())
+        row = row_to_dict(db.execute("SELECT calendar_uid, user_id FROM planned_jobs WHERE id=?", (groups[0],)).fetchone())
         cur = db.execute("DELETE FROM planned_jobs WHERE id=?", (groups[0],))
         if cur.rowcount == 0:
             return 404, {"error": "Not found"}
-    caldav_delete_async((row or {}).get("calendar_uid"))
+    caldav_delete_async((row or {}).get("calendar_uid"), (row or {}).get("user_id"))
     return 200, {"success": True}
 
 
@@ -3008,7 +3115,6 @@ SUPERVISOR_WRITES = (
     r"/api/clients(/\d+)?$",
     r"/api/projects(/\d+)?$",
     r"/api/pay-rates(/\d+)?$",
-    r"/api/pay-periods$",
     r"/api/caldav/.*",
     r"/api/users(/\d+)?$",
     r"/api/entries/\d+/(approve|reject)$",   # a tech must not sign off their own override
