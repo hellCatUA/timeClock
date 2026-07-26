@@ -428,6 +428,7 @@ const ICONS = {
   file:     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
   phone:    '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
   mail:     '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
+  lock:     '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   refresh:  '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
 };
@@ -876,10 +877,13 @@ async function renderIdleClockPage() {
   try { state.projects = await api.getProjects(); } catch { state.projects = state.projects || []; }
   try { state.plannedJobs = await api.getPlannedJobs(); } catch { state.plannedJobs = state.plannedJobs || []; }
   if (state.user?.role === 'supervisor') {
-    try { state.approvals = await api.getApprovals(); } catch { state.approvals = []; }
+    try { state.inbox = await api.getApprovals(); } catch { state.inbox = null; }
+    try { state.changeRequests = await api.getChangeRequests(); } catch { state.changeRequests = []; }
   } else {
-    state.approvals = [];
+    state.inbox = null;
+    state.changeRequests = [];
   }
+  state.approvals = state.inbox?.overrides || [];
   const projects = state.projects || [];
   const plannedJobs = state.plannedJobs || [];
 
@@ -920,6 +924,42 @@ async function renderIdleClockPage() {
             <button class="btn btn-primary btn-sm appr-yes" data-id="${a.id}">Approve</button>
           </div>`).join('')}
       </div>` : ''}
+      ${(() => {
+        const fin = (state.inbox?.finished || []);
+        const crs = (state.changeRequests || []);
+        if (!fin.length && !crs.length) return '';
+        const att = fin.filter(e => e.needs_attention);
+        return `
+        <div class="card review-banner${att.length ? ' urgent' : ''}">
+          <div class="review-head">${svg(att.length ? 'alert' : 'bell')} ${
+            fin.length ? `${fin.length} finished job${fin.length === 1 ? '' : 's'} to review` : ''}${
+            fin.length && crs.length ? ' · ' : ''}${
+            crs.length ? `${crs.length} change request${crs.length === 1 ? '' : 's'}` : ''}</div>
+          ${fin.slice(0, 6).map(e => `
+            <div class="review-row">
+              <div class="review-who">
+                <div class="review-title">${escHtml(e.wo_title || e.assignment_id || 'Work order')}
+                  ${e.needs_attention ? `<span class="status-chip ${e.status || 'pending'}">${
+                    (e.revisit_required && e.status === 'completed' ? 'REVISIT' : (e.status || '')).toUpperCase()}</span>` : ''}</div>
+                <div class="review-meta">${escHtml(e.owner_name || 'Tech')} · ${escHtml(fmtDateShort(e.clock_out))}</div>
+              </div>
+              <button class="btn btn-ghost btn-sm rev-open" data-id="${e.id}">Open</button>
+              <button class="btn btn-primary btn-sm rev-ok" data-id="${e.id}">Reviewed</button>
+            </div>`).join('')}
+          ${crs.slice(0, 6).map(c => `
+            <div class="review-row">
+              <div class="review-who">
+                <div class="review-title">${escHtml(c.wo_title || 'Work order')}
+                  <span class="appr-chip pending">CHANGE</span></div>
+                <div class="review-meta">${escHtml(c.requested_by || 'Tech')}${
+                  c.note ? ' · ' + escHtml(c.note) : ''} — ${
+                  escHtml(Object.keys(c.changes || {}).join(', '))}</div>
+              </div>
+              <button class="btn btn-ghost btn-sm cr-no" data-id="${c.id}">Reject</button>
+              <button class="btn btn-primary btn-sm cr-yes" data-id="${c.id}">Apply</button>
+            </div>`).join('')}
+        </div>`;
+      })()}
       <div id="idle-schedule">
         <div class="section-label">This Week</div>
         ${(() => {
@@ -1050,6 +1090,24 @@ async function renderIdleClockPage() {
       renderIdleClockPage();
     } catch (err) { showToast(err.message || 'Could not save the decision', 'error'); }
   };
+  const refresh = () => renderIdleClockPage();
+  document.querySelectorAll('.rev-ok').forEach(b => b.addEventListener('click', async () => {
+    try { await api.reviewEntry(Number(b.dataset.id)); showToast('Marked reviewed', 'success'); refresh(); }
+    catch (err) { showToast(err.message || 'Failed', 'error'); }
+  }));
+  document.querySelectorAll('.rev-open').forEach(b => b.addEventListener('click', async () => {
+    const e = (state.inbox?.finished || []).find(x => x.id === Number(b.dataset.id));
+    if (e) openEntryDetail(e);
+  }));
+  document.querySelectorAll('.cr-yes').forEach(b => b.addEventListener('click', async () => {
+    try { await api.approveChange(Number(b.dataset.id)); showToast('Change applied', 'success'); refresh(); }
+    catch (err) { showToast(err.message || 'Failed', 'error'); }
+  }));
+  document.querySelectorAll('.cr-no').forEach(b => b.addEventListener('click', async () => {
+    try { await api.rejectChange(Number(b.dataset.id)); showToast('Change rejected', 'success'); refresh(); }
+    catch (err) { showToast(err.message || 'Failed', 'error'); }
+  }));
+
   document.querySelectorAll('.appr-yes').forEach(b =>
     b.addEventListener('click', () => decide(Number(b.dataset.id), true)));
   document.querySelectorAll('.appr-no').forEach(b =>
@@ -1334,9 +1392,12 @@ function openPlannedJobDetail(pj, onStart) {
       ${pj.notes ? `<div class="review-row" style="align-items:flex-start;"><span>Notes:</span><span style="white-space:pre-wrap;">${escHtml(pj.notes)}</span></div>` : ''}
       ${(() => {
         const dc = parseDispatch(pj.dispatch_contacts);
-        return dc.length ? `<div class="subsection-label" style="margin-top:12px;">Dispatch</div>${buildDispatchView(dc)}` : '';
+        const head = `<div class="subsection-label" style="margin-top:12px;">Dispatch ${
+          isTech() ? lockChip('set by your supervisor') : ''}</div>`;
+        return (dc.length || isTech()) ? head + buildDispatchView(dc) : '';
       })()}
-      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work</div><div id="pjd-scope"><div class="scope-rich">${renderRichText(pj.scope_of_work)}</div></div>` : ''}
+      ${pj.scope_of_work ? `<div class="subsection-label" style="margin-top:12px;">Scope of Work ${
+        isTech() ? lockChip('set by your supervisor') : ''}</div><div id="pjd-scope"><div class="scope-rich">${renderRichText(pj.scope_of_work)}</div></div>` : ''}
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" id="pjd-close">Close</button>
@@ -1616,6 +1677,15 @@ function buildJobFieldsHtml(prefix, sym) {
         <input type="number" class="form-control" id="${prefix}-travel" min="0" step="0.01"></div>
     </div>
     ${durationFieldHtml(`${prefix}-est`)}
+    ${isTech() ? `
+    <div class="form-group">
+      <label class="form-label">Scope of Work ${lockChip('set by your supervisor')}</label>
+      <div class="locked-box">Your supervisor writes the scope for planned work.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Dispatch ${lockChip('set by your supervisor')}</label>
+      <div class="locked-box">Dispatch contacts come from your supervisor.</div>
+    </div>` : `
     <div class="form-group">
       <label class="form-label">Scope of Work <span class="opt-label">optional</span></label>
       <textarea class="form-control" id="${prefix}-scope" rows="4" placeholder="What has to be done on site..."></textarea>
@@ -1624,13 +1694,13 @@ function buildJobFieldsHtml(prefix, sym) {
     <div class="form-group">
       <label class="form-label">Dispatch <span class="opt-label">optional</span></label>
       ${buildDispatchEditor(`${prefix}-dispatch`, [])}
-    </div>`;
+    </div>`}`;
 }
 
 function wireJobFieldCombos(prefix) {
   wireCombo(`${prefix}-org`, orgComboOpts());
   wireCombo(`${prefix}-client`, cliComboOpts());
-  wireDispatchEditor(`${prefix}-dispatch`);
+  if (document.getElementById(`${prefix}-dispatch-list`)) wireDispatchEditor(`${prefix}-dispatch`);
   wireDurationField(`${prefix}-est`);
 }
 // Fills the shared job-field block's scope + dispatch from a saved record
@@ -1691,8 +1761,10 @@ function readJobFields(prefix, getRateType) {
     flat_amount:     rt === 'flat' ? (parseFloat(g('flat').value) || null) : null,
     travel_reimb:    parseFloat(g('travel').value) || null,
     est_minutes:     readDurationField(`${prefix}-est`),
-    scope_of_work:   g('scope')?.value.trim() || null,
-    dispatch_contacts: readDispatchEditor(`${prefix}-dispatch`),
+    ...(document.getElementById(`${prefix}-scope`) ? {
+      scope_of_work: g('scope').value.trim() || null,
+      dispatch_contacts: readDispatchEditor(`${prefix}-dispatch`),
+    } : {}),
   };
 }
 
@@ -3549,11 +3621,19 @@ function contactHref(value) {
   return `tel:${v.replace(/[^\d+,;*#]/g, '')}`;
 }
 function buildDispatchView(contacts) {
-  if (!contacts.length) return '<div class="empty-state-sm">No dispatch contacts yet</div>';
-  return contacts.map(c => {
+  // The tech's own supervisor is always reachable and always first. It is
+  // rendered, never stored, so it cannot be overwritten by a project's
+  // dispatch list or go stale when the number changes.
+  const pinned = (state.user?.role === 'tech' && state.supervisor?.phone)
+    ? [{ name: `${state.supervisor.display_name || 'Supervisor'} (Supervisor)`,
+         value: state.supervisor.phone, note: 'Your supervisor', pinned: true }]
+    : [];
+  const all = [...pinned, ...contacts];
+  if (!all.length) return '<div class="empty-state-sm">No dispatch contacts yet</div>';
+  return all.map(c => {
     const kind = contactKind(c.value);
     return `
-    <div class="contact">
+    <div class="contact${c.pinned ? ' contact-pinned' : ''}">
       <div class="contact-top">
         <span class="contact-name">${escHtml(c.name || 'Contact')}</span>
         <span class="tag">${kind === 'email' ? 'EMAIL' : 'CALL'}</span>
@@ -5282,11 +5362,14 @@ function renderEntryCard(entry, linked = false, revisitedIds = null, q = '', opt
   const meta = [entry.org_name, entry.client_name].filter(Boolean).map(v => hlText(v, q)).join(' · ')
     + (entry.site_id ? `${(entry.org_name || entry.client_name) ? ' · ' : ''}#${hlText(entry.site_id, q)}` : '');
 
+  const theirs = state.user?.role === 'supervisor'
+              && entry.user_id && entry.user_id !== state.user.id;
   return `
-    <div class="entry-card${linked ? ' linked-visit' : ''}" data-id="${entry.id}">
+    <div class="entry-card${linked ? ' linked-visit' : ''}${theirs ? ' other-tech' : ''}" data-id="${entry.id}">
       <div class="entry-card-top">
         <div class="entry-card-left">
           <div class="entry-title">${hlText(entry.wo_title || entry.assignment_id || 'Work Order', q)}</div>
+          ${theirs ? `<div class="entry-owner">${svg('user')} ${escHtml(entry.owner_name || 'Tech')}</div>` : ''}
           ${entry.project_name ? `<div class="entry-project">${hlText(entry.project_name, q)}</div>` : ''}
           ${meta ? `<div class="entry-meta">${meta}</div>` : ''}
           ${entry.address ? `<div class="entry-addr">${svg('location')} ${hlText(entry.address, q)}</div>` : ''}
@@ -5391,8 +5474,10 @@ async function openEntryDetail(entry) {
       <button class="btn btn-ghost btn-sm" id="det-copy-btn">${svg('copy')} Copy Report</button>
       <a class="btn btn-ghost btn-sm" href="${api.getEntryZipUrl(entry.id)}" download>${svg('download')} Export ZIP</a>
       ${entry.clock_out ? `<button class="btn btn-secondary btn-sm" id="det-revisit-btn">${svg('return')} Revisit</button>` : ''}
-      <button class="btn btn-ghost btn-sm" id="det-delete-btn" style="color:var(--red);">${svg('trash')} Delete</button>
-      <button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>
+      ${isTech() ? '' : `<button class="btn btn-ghost btn-sm" id="det-delete-btn" style="color:var(--red);">${svg('trash')} Delete</button>`}
+      ${isTech() && entry.clock_out
+        ? `<button class="btn btn-secondary btn-sm" id="det-suggest-btn">${svg('edit')} Suggest Changes</button>`
+        : `<button class="btn btn-primary btn-sm" id="det-edit-btn">${svg('edit')} Edit</button>`}
     </div>`);
 
   document.getElementById('det-close-btn').addEventListener('click', closeModal);
@@ -5412,9 +5497,10 @@ async function openEntryDetail(entry) {
   document.getElementById('det-copy-btn').addEventListener('click', () => {
     copyToClipboard(buildTextReport(entry));
   });
-  document.getElementById('det-edit-btn').addEventListener('click', () => openEntryEdit(entry));
+  document.getElementById('det-edit-btn')?.addEventListener('click', () => openEntryEdit(entry));
+  document.getElementById('det-suggest-btn')?.addEventListener('click', () => openSuggestChanges(entry));
   document.getElementById('det-revisit-btn')?.addEventListener('click', () => openRevisitModal(entry));
-  document.getElementById('det-delete-btn').addEventListener('click', async () => {
+  document.getElementById('det-delete-btn')?.addEventListener('click', async () => {
     if (!confirm('Delete this work order? Photos will be removed as well.')) return;
     try {
       await api.deleteEntry(entry.id);
@@ -6048,8 +6134,8 @@ async function renderSettingsPage() {
       </div>
 
       <!-- Break Settings -->
-      <div class="section-label">Break Settings</div>
-      <div class="card">
+      <div class="section-label">Break Settings ${isSup ? '' : lockChip('set by your supervisor')}</div>
+      <div class="card${isSup ? '' : ' locked-card'}">
         <div class="form-group">
           <div class="toggle-row">
             <label class="form-label" style="margin:0;">Enable Breaks</label>
@@ -6087,7 +6173,7 @@ async function renderSettingsPage() {
             </div>
           </div>
         </div>
-        <button class="btn btn-primary btn-sm" id="s-save-breaks-btn" style="margin-top:8px;">${svg('check')} Save</button>
+        ${isSup ? `<button class="btn btn-primary btn-sm" id="s-save-breaks-btn" style="margin-top:8px;">${svg('check')} Save</button>` : ''}
       </div>
 
       ${isSup ? `
@@ -6223,10 +6309,10 @@ async function renderSettingsPage() {
   });
 
   // Break options visibility
-  document.getElementById('s-breaks-enabled').addEventListener('change', e => {
+  document.getElementById('s-breaks-enabled')?.addEventListener('change', e => {
     document.getElementById('s-break-options').classList.toggle('hidden', !e.target.checked);
   });
-  document.getElementById('s-break-reminder').addEventListener('change', e => {
+  document.getElementById('s-break-reminder')?.addEventListener('change', e => {
     document.getElementById('s-reminder-options').classList.toggle('hidden', !e.target.checked);
   });
 
@@ -6239,7 +6325,7 @@ async function renderSettingsPage() {
     });
   });
 
-  document.getElementById('s-save-breaks-btn').addEventListener('click', async () => {
+  document.getElementById('s-save-breaks-btn')?.addEventListener('click', async () => {
     const enabled  = document.getElementById('s-breaks-enabled').checked;
     const paid     = document.getElementById('s-paid-breaks').checked;
     const reminder = document.getElementById('s-break-reminder').checked;
@@ -6548,6 +6634,67 @@ function showClientForm(client) {
 /* ================================================================
    INIT
    ================================================================ */
+/* A tech proposes a correction; the supervisor applies or refuses it. */
+function openSuggestChanges(entry) {
+  const F = [
+    ['wo_title',      'WO Title'],
+    ['assignment_id', 'Assignment ID'],
+    ['site_id',       'Site ID'],
+    ['address',       'Address'],
+    ['ticket_num',    'Ticket #'],
+    ['work_summary',  'Work Summary'],
+  ];
+  openModal(`
+    <div class="modal-header">
+      <h3>${svg('edit')} Suggest Changes</h3>
+      <button class="btn btn-ghost btn-sm" id="sc-x">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-hint" style="margin-bottom:12px;">
+        Finished jobs are a record, so changes go to your supervisor to approve.
+        Leave a field alone to keep it as it is.
+      </div>
+      ${F.map(([k, label]) => `
+        <div class="form-group">
+          <label class="form-label">${label}</label>
+          <input type="text" class="form-control" data-cr="${k}" value="${escHtml(entry[k] || '')}">
+        </div>`).join('')}
+      <div class="form-group">
+        <label class="form-label">Why <span class="opt-label">optional</span></label>
+        <input type="text" class="form-control" id="sc-note" placeholder="e.g. wrong site ID on the ticket">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="sc-cancel">Cancel</button>
+      <button class="btn btn-primary" id="sc-send">${svg('check')} Send for Approval</button>
+    </div>`);
+  document.getElementById('sc-x').addEventListener('click', closeModal);
+  document.getElementById('sc-cancel').addEventListener('click', closeModal);
+  document.getElementById('sc-send').addEventListener('click', async () => {
+    const changes = {};
+    document.querySelectorAll('[data-cr]').forEach(el => {
+      const k = el.dataset.cr;
+      const v = el.value.trim();
+      if (v !== (entry[k] || '')) changes[k] = v || null;
+    });
+    if (!Object.keys(changes).length) { showToast('Nothing changed', 'error'); return; }
+    try {
+      await api.requestChange(entry.id, { changes, note: document.getElementById('sc-note').value.trim() });
+      closeModal();
+      showToast('Sent to your supervisor', 'success');
+    } catch (err) { showToast(err.message || 'Could not send', 'error'); }
+  });
+}
+
+/* ── What a tech may not change ───────────────────────────────────
+   Locked things stay on screen with a padlock, so it is clear they exist
+   and who owns them, rather than quietly disappearing. */
+const isTech = () => state.user?.role === 'tech';
+
+function lockChip(why) {
+  return `<span class="lock-chip" title="${escHtml(why)}">${svg('lock')} ${escHtml(why)}</span>`;
+}
+
 /* ── Team (supervisor only) ──────────────────────────────────────── */
 async function renderTeamList() {
   const el = document.getElementById('team-list');

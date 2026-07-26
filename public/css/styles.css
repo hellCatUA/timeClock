@@ -1254,6 +1254,40 @@ mark.hl { background: var(--orange); color: #1a1a1a; border-radius: 3px; padding
 .account-name { font-size: 15px; font-weight: 600; }
 .account-role { font-size: 11.5px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; margin-top: 2px; }
 
+/* Finished work and proposed edits waiting on the supervisor */
+.review-banner { border-color: var(--blue); background: var(--blue-bg); }
+.review-banner.urgent { border-color: var(--orange); background: var(--orange-bg); }
+.review-head { font-size: 13.5px; font-weight: 700; color: var(--blue); display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.review-banner.urgent .review-head { color: var(--orange); }
+.review-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid color-mix(in srgb, var(--blue) 25%, transparent); }
+.review-banner.urgent .review-row { border-top-color: color-mix(in srgb, var(--orange) 30%, transparent); }
+.review-who { flex: 1; min-width: 0; }
+.review-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.review-meta { font-size: 11.5px; color: var(--text3); margin-top: 2px; }
+
+/* Someone else's work, on the supervisor's side */
+.entry-card.other-tech { border-left: 3px solid var(--blue); }
+.entry-owner { font-size: 11.5px; color: var(--blue); margin-top: 2px; display: flex; align-items: center; gap: 4px; }
+.entry-owner svg { width: 11px; height: 11px; flex-shrink: 0; }
+
+.lock-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 600; text-transform: none; letter-spacing: 0;
+  color: var(--text3); background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 8px;
+  margin-left: 6px; vertical-align: middle;
+}
+.lock-chip svg { width: 11px; height: 11px; }
+
+.locked-box {
+  background: var(--bg3); border: 1px dashed var(--border); border-radius: var(--radius-sm);
+  padding: 12px 14px; font-size: 13px; color: var(--text3);
+}
+/* Locked sections stay visible so it is clear they exist and who owns them */
+.locked-card { opacity: .6; pointer-events: none; }
+
+.contact.contact-pinned { border-color: var(--green); background: var(--green-bg); }
+
 .account-sup { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 .account-sup-label { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .5px; }
 .account-sup-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 5px; flex-wrap: wrap; }

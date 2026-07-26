@@ -415,6 +415,21 @@ def migrate_db():
         "ALTER TABLE users ADD COLUMN default_pay_rate_id INTEGER",
         # Each person syncs to their own Nextcloud; the supervisor sets it up
         "ALTER TABLE users ADD COLUMN caldav TEXT",
+        # A tech's proposed edit waits for the supervisor
+        """CREATE TABLE IF NOT EXISTS change_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            changes TEXT NOT NULL,
+            note TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            decided_by INTEGER,
+            decided_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (entry_id) REFERENCES time_entries(id) ON DELETE CASCADE
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_cr_status ON change_requests(status)",
+        "ALTER TABLE time_entries ADD COLUMN reviewed INTEGER DEFAULT 0",
         # Two people on the same job keep a row each, tied by a shared id
         "ALTER TABLE time_entries ADD COLUMN job_group_id TEXT",
         "ALTER TABLE planned_jobs ADD COLUMN job_group_id TEXT",
@@ -504,12 +519,19 @@ def caldav_settings(db=None, user_id=None):
             "SELECT key, value FROM settings WHERE key LIKE 'caldav_%'").fetchall()}
         if user_id is None:
             return base
-        row = conn.execute("SELECT caldav FROM users WHERE id=?", (user_id,)).fetchone()
+        row = conn.execute("SELECT caldav, role FROM users WHERE id=?", (user_id,)).fetchone()
         try:
             own = json.loads((row["caldav"] if row else None) or "null")
         except Exception:
             own = None
-        return {**base, **own} if isinstance(own, dict) and own else base
+        if isinstance(own, dict) and own:
+            return {**base, **own}
+        # The install-wide calendar is the supervisor's own. A tech with none
+        # configured simply does not sync — their jobs are not the supervisor's
+        # to put on their calendar.
+        if row and row["role"] != "supervisor":
+            return {}
+        return base
     if db is not None:
         return read(db)
     with get_db() as conn:
@@ -1007,7 +1029,7 @@ def caldav_backfill_async():
             s = caldav_settings()
             if not caldav_ready(s):
                 return
-            r = caldav_backfill(force=False, settings=s)
+            r = caldav_backfill(force=False)
             if r["total"]:
                 print(f"CalDAV catch-up: {r['synced']}/{r['total']} pushed"
                       + (f", {len(r['failed'])} failed" if r["failed"] else ""), file=sys.stderr)
@@ -1557,14 +1579,113 @@ def _decide_entry(req, groups, decision):
     return 200, entry
 
 
+# What a change request is allowed to touch once approved
+ENTRY_EDITABLE = {
+    "wo_title", "assignment_id", "site_id", "address", "ticket_num", "inc_num",
+    "mod_name", "noc_name", "pm_pc_name", "work_summary", "additional_info",
+    "comment", "status", "release_code", "clock_in", "clock_out", "est_minutes",
+    "parking_tolls", "old_serial", "new_serial", "return_track", "revisit_required",
+}
+
+
+def h_create_change_request(req, groups):
+    """A tech proposes an edit rather than making it; the supervisor decides."""
+    eid = int(groups[0])
+    data = req.get("body", {})
+    changes = data.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        return 400, {"error": "Nothing to change"}
+    uid = (req.get("user") or {}).get("id")
+    with get_db() as db:
+        row = db.execute("SELECT user_id FROM time_entries WHERE id=?", (eid,)).fetchone()
+        if not row:
+            return 404, {"error": "Not found"}
+        if row["user_id"] != uid:
+            return 403, {"error": "Not yours"}
+        cur = db.execute(
+            "INSERT INTO change_requests (entry_id, user_id, changes, note) VALUES (?,?,?,?)",
+            (eid, uid, json.dumps(changes), (data.get("note") or "").strip() or None))
+        out = row_to_dict(db.execute("SELECT * FROM change_requests WHERE id=?", (cur.lastrowid,)).fetchone())
+    return 201, out
+
+
+def h_get_change_requests(req, _groups):
+    """Pending for the supervisor; a tech sees the state of their own."""
+    user = req.get("user") or {}
+    sql = ("SELECT cr.*, u.display_name AS requested_by, e.wo_title "
+           "FROM change_requests cr "
+           "LEFT JOIN users u ON u.id = cr.user_id "
+           "LEFT JOIN time_entries e ON e.id = cr.entry_id ")
+    args = []
+    if user.get("role") == "tech":
+        sql += "WHERE cr.user_id=? "
+        args.append(user.get("id"))
+    else:
+        sql += "WHERE cr.status='pending' "
+    with get_db() as db:
+        rows = rows_to_list(db.execute(sql + "ORDER BY cr.created_at DESC", args).fetchall())
+    for r in rows:
+        try:
+            r["changes"] = json.loads(r["changes"] or "{}")
+        except Exception:
+            r["changes"] = {}
+    return 200, rows
+
+
+def h_decide_change_request(req, groups):
+    rid = int(groups[0])
+    decision = "approved" if groups[1] == "approve" else "rejected"
+    with get_db() as db:
+        cr = row_to_dict(db.execute("SELECT * FROM change_requests WHERE id=?", (rid,)).fetchone())
+        if not cr:
+            return 404, {"error": "Not found"}
+        if cr["status"] != "pending":
+            return 409, {"error": "Already decided"}
+        if decision == "approved":
+            try:
+                changes = json.loads(cr["changes"] or "{}")
+            except Exception:
+                changes = {}
+            allowed = [k for k in changes if k in ENTRY_EDITABLE]
+            if allowed:
+                sets = ", ".join(f"{k}=?" for k in allowed)
+                db.execute(f"UPDATE time_entries SET {sets} WHERE id=?",
+                           [changes[k] for k in allowed] + [cr["entry_id"]])
+        db.execute("UPDATE change_requests SET status=?, decided_by=?, decided_at=? WHERE id=?",
+                   (decision, (req.get("user") or {}).get("id"), now_iso(), rid))
+        out = row_to_dict(db.execute("SELECT * FROM change_requests WHERE id=?", (rid,)).fetchone())
+    if decision == "approved":
+        caldav_entry_sync_async(cr["entry_id"])
+    return 200, out
+
+
 def h_get_approvals(req, _groups):
-    """What the supervisor still has to decide on."""
-    if (req.get("user") or {}).get("role") != "supervisor":
+    """Everything waiting on the supervisor: overrides, finished jobs to
+    review, and proposed edits."""
+    user = req.get("user") or {}
+    if user.get("role") != "supervisor":
         return 403, {"error": "Supervisors only"}
     with get_db() as db:
-        rows = rows_to_list(db.execute(
+        overrides = rows_to_list(db.execute(
             ENTRY_SELECT + " WHERE e.approval='pending' ORDER BY e.clock_in DESC").fetchall())
-    return 200, rows
+        finished = rows_to_list(db.execute(
+            ENTRY_SELECT + " WHERE e.clock_out IS NOT NULL AND e.user_id IS NOT ?"
+            " AND (e.reviewed IS NULL OR e.reviewed = 0)"
+            " ORDER BY e.clock_out DESC", (user.get("id"),)).fetchall())
+    for e in finished:
+        e["needs_attention"] = bool(
+            e.get("status") in ("fail", "cancel") or e.get("revisit_required"))
+    return 200, {"overrides": overrides, "finished": finished,
+                 "attention": [e for e in finished if e["needs_attention"]]}
+
+
+def h_review_entry(req, groups):
+    """The supervisor has looked at a finished job."""
+    with get_db() as db:
+        cur = db.execute("UPDATE time_entries SET reviewed=1 WHERE id=?", (groups[0],))
+        if cur.rowcount == 0:
+            return 404, {"error": "Not found"}
+    return 200, {"success": True}
 
 
 def h_get_current(req, _groups):
@@ -1646,7 +1767,7 @@ def h_put_entry(req, groups):
     eid = groups[0]
     old_folder = new_folder = None
     with get_db() as db:
-        ex = row_to_dict(db.execute("SELECT * FROM time_entries WHERE id=?", (eid,)).fetchone())
+        ex = row_to_dict(db.execute(ENTRY_SELECT + " WHERE e.id=?", (eid,)).fetchone())
         if not ex:
             return 404, {"error": "Not found"}
         old_folder = _photo_folder(ex, eid)
@@ -1718,6 +1839,7 @@ def h_put_entry(req, groups):
         new_folder = _photo_folder({
             "clock_in":      data.get("clock_in", ex["clock_in"]),
             "assignment_id": data.get("assignment_id", ex.get("assignment_id")),
+            "owner_name":    ex.get("owner_name"),
         }, eid)
         if old_folder != new_folder:
             db.execute(
@@ -1898,7 +2020,11 @@ def h_delete_entry(req, groups):
 # ── Photos ─────────────────────────────────────────────────────────────────────
 
 def _photo_folder(entry_row, eid):
-    """Compute folder path: YYYY/MM/DD-AssignmentID"""
+    """Compute folder path: YYYY/MM/DD-AssignmentID[-Person]
+
+    Two people on the same assignment on the same day used to write into one
+    folder, so their photos mixed and an export could pick up the other's.
+    The owner's name keeps them apart."""
     clock_in = (entry_row or {}).get('clock_in') or ''
     assignment_id = re.sub(r'[^\w-]', '', ((entry_row or {}).get('assignment_id') or '').strip())
     try:
@@ -1907,7 +2033,8 @@ def _photo_folder(entry_row, eid):
     except Exception:
         yyyy, mm, dd = 'XXXX', 'XX', 'XX'
     suffix = assignment_id if assignment_id else str(eid)
-    return f"{yyyy}/{mm}/{dd}-{suffix}"
+    who = re.sub(r'[^\w-]', '', ((entry_row or {}).get('owner_name') or '').strip())
+    return f"{yyyy}/{mm}/{dd}-{suffix}" + (f"-{who}" if who else "")
 
 
 CAT_SHORTCUTS = {
@@ -1986,7 +2113,8 @@ def h_post_photo(req, groups):
 
     with get_db() as db:
         entry_row = row_to_dict(db.execute(
-            "SELECT clock_in, assignment_id FROM time_entries WHERE id=?", (eid,)
+            "SELECT e.clock_in, e.assignment_id, u.display_name AS owner_name "
+            "FROM time_entries e LEFT JOIN users u ON u.id = e.user_id WHERE e.id=?", (eid,)
         ).fetchone())
         settings = {r["key"]: r["value"] for r in db.execute("SELECT key, value FROM settings").fetchall()}
 
@@ -3039,6 +3167,10 @@ ROUTES = [
     (r"/api/users/(\d+)",               ["PUT"],    h_update_user),
     (r"/api/users/(\d+)",               ["DELETE"], h_delete_user),
     (r"/api/approvals",                 ["GET"],    h_get_approvals),
+    (r"/api/change-requests",           ["GET"],    h_get_change_requests),
+    (r"/api/entries/(\d+)/review",       ["POST"],   h_review_entry),
+    (r"/api/entries/(\d+)/change-request", ["POST"], h_create_change_request),
+    (r"/api/change-requests/(\d+)/(approve|reject)", ["POST"], h_decide_change_request),
     (r"/api/entries/(\d+)/approve",     ["POST"],   h_approve_entry),
     (r"/api/entries/(\d+)/reject",      ["POST"],   h_reject_entry),
 
@@ -3118,10 +3250,12 @@ SUPERVISOR_WRITES = (
     r"/api/caldav/.*",
     r"/api/users(/\d+)?$",
     r"/api/entries/\d+/(approve|reject)$",   # a tech must not sign off their own override
+    r"/api/change-requests/\d+/(approve|reject)$",
+    r"/api/entries/\d+/review$",
 )
 
 # The only settings a tech may change; everything else is install-wide.
-TECH_SETTINGS = {"breaks_enabled", "paid_breaks", "break_frequency_minutes", "break_length_minutes"}
+TECH_SETTINGS = set()   # break rules and everything else are the supervisor's
 
 # Sync credentials are none of a tech's business, even to read.
 SUPERVISOR_SETTINGS_PREFIX = ("caldav_", "ftp_")
@@ -3295,8 +3429,31 @@ class Handler(BaseHTTPRequestHandler):
                 if row is not None and row["user_id"] != user["id"]:
                     self._send(403, {"error": "Not yours"})
                     return
+                # Finished work is a record: a tech proposes changes, never
+                # rewrites or removes one.
+                if table == "time_entries" and method in ("PUT", "DELETE") \
+                        and re.fullmatch(r"/api/entries/\d+", path):
+                    if method == "DELETE":
+                        self._send(403, {"error": "Jobs cannot be deleted — ask your supervisor"})
+                        return
+                    with get_db() as db:
+                        done = db.execute("SELECT clock_out FROM time_entries WHERE id=?",
+                                          (rid,)).fetchone()
+                    if done and done["clock_out"]:
+                        self._send(403, {"error": "Send this as a change request instead"})
+                        return
+                if table == "planned_jobs" and method == "PUT":
+                    body = self._read_body()
+                    blocked = [k for k in ("scope_of_work", "dispatch_contacts") if k in body]
+                    if blocked:
+                        self._send(403, {"error": "Scope and Dispatch are set by your supervisor"})
+                        return
+                    self._prefetched_body = body
 
-        body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
+        body = getattr(self, "_prefetched_body", None)
+        if body is None:
+            body = self._read_body() if method in ("POST", "PUT", "PATCH") else {}
+        self._prefetched_body = None
         req = {"body": body, "query": query, "path": path, "method": method,
                "user": user, "session_token": token}
 

@@ -29,9 +29,16 @@ const api = (() => {
     updateUser:         (id, d) => req('PUT',    `/api/users/${id}`, d),
     deactivateUser:     (id)    => req('DELETE', `/api/users/${id}`),
 
+    // A tech's proposed edits
+    getChangeRequests:  ()      => req('GET',  '/api/change-requests'),
+    requestChange:      (id, d) => req('POST', `/api/entries/${id}/change-request`, d),
+    approveChange:      (id)    => req('POST', `/api/change-requests/${id}/approve`, {}),
+    rejectChange:       (id)    => req('POST', `/api/change-requests/${id}/reject`, {}),
+
     // Overrides awaiting a decision
     getApprovals:       ()      => req('GET',  '/api/approvals'),
     approveEntry:       (id, d) => req('POST', `/api/entries/${id}/approve`, d || {}),
+    reviewEntry:        (id)    => req('POST', `/api/entries/${id}/review`, {}),
     rejectEntry:        (id, d) => req('POST', `/api/entries/${id}/reject`, d || {}),
 
     // Entries
