@@ -1077,9 +1077,23 @@ def scope_clause(req, column="user_id"):
     return "", []
 
 
+def supervisor_contact(db=None):
+    """Who to call. A tech never gets the team list, but they do need this."""
+    def read(conn):
+        row = conn.execute("SELECT display_name, phone FROM users "
+                           "WHERE role='supervisor' AND active=1 ORDER BY id LIMIT 1").fetchone()
+        return {"display_name": row["display_name"], "phone": row["phone"]} if row else None
+    if db is not None:
+        return read(db)
+    with get_db() as conn:
+        return read(conn)
+
+
 def h_auth_state(req, _groups):
     """What the app needs before it can draw anything."""
-    return 200, {"setup_required": user_count() == 0, "user": req.get("user")}
+    user = req.get("user")
+    return 200, {"setup_required": user_count() == 0, "user": user,
+                 "supervisor": supervisor_contact() if user else None}
 
 
 def h_auth_setup(req, _groups):
@@ -1109,7 +1123,9 @@ def h_auth_setup(req, _groups):
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tech_name', ?)", (display,))
         token = create_session(db, uid)
         row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-    return 200, {"user": public_user(row), "claimed_rows": claimed, "_set_cookie": token}
+        contact = supervisor_contact(db)
+    return 200, {"user": public_user(row), "supervisor": contact,
+                 "claimed_rows": claimed, "_set_cookie": token}
 
 
 def h_auth_login(req, _groups):
@@ -1125,7 +1141,8 @@ def h_auth_login(req, _groups):
         if not row or not ok:
             return 401, {"error": "Wrong username or password"}
         token = create_session(db, row["id"])
-    return 200, {"user": public_user(row), "_set_cookie": token}
+        contact = supervisor_contact(db)
+    return 200, {"user": public_user(row), "supervisor": contact, "_set_cookie": token}
 
 
 def h_get_users(req, _groups):
